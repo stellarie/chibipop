@@ -4,7 +4,7 @@
 
 #![cfg(windows)]
 
-use chibipop::config::{Config, TriggerMode};
+use chibipop::config::{Bind, BindAction, Config, ProfileCatalog, ProfileSession, TriggerMode};
 use std::fs::File;
 use std::os::windows::process::CommandExt;
 use std::path::PathBuf;
@@ -24,6 +24,7 @@ struct Fixture {
     host: HWND,
     font: HFONT,
     cursor: POINT,
+    session: ProfileSession,
 }
 
 impl Fixture {
@@ -40,19 +41,36 @@ impl Fixture {
         std::fs::copy(repo.join("data/deconjugator.json"), root.join("data/deconjugator.json")).unwrap();
         std::fs::copy(env!("CARGO_BIN_EXE_chibipop"), root.join("chibipop.exe")).unwrap();
         let mut config = Config::default();
-        config.trigger.mode = mode;
-        config.trigger.trigger_key = "F8".into();
-        config.anki.enabled = false;
-        config.actions.enabled = true;
-        config.actions.search.selected_hotkey = Some("G".into());
-        config.actions.search.selected_opens_sentence_search = std::env::var("CHIBIPOP_SELECTED_TEST_MODE").as_deref() == Ok("Sentence");
-        config.popup.sub_popups = true;
-        config.ocr.language = "ja".into();
+        let mut profile = config.resolve("default").unwrap();
+        profile.anki.enabled = false;
+        profile.actions.search.selected_opens_sentence_search =
+            std::env::var("CHIBIPOP_SELECTED_TEST_MODE").as_deref() == Ok("Sentence");
+        profile.popup.sub_popups = true;
+        profile.ocr.language = "ja".into();
+        config.update_profile("default", &profile).unwrap();
+        let live_lookup = mode == TriggerMode::Live;
+        config.live_lookup = live_lookup;
+        let lookup = config.binds.iter_mut().find(|bind| bind.action == BindAction::Lookup).unwrap();
+        lookup.windows = "F8".into();
+        lookup.mode = if live_lookup { TriggerMode::Press } else { mode };
+        lookup.enabled = true;
+        let mut selected_text = Bind::new("selected-text".into(), BindAction::SelectedText);
+        selected_text.windows = "G".into();
+        config.binds.push(selected_text);
         config.save(&root.join("chibipop.toml")).unwrap();
+        let session = ProfileCatalog::new(&config, &[]).unwrap().session(None).unwrap();
         let mut cursor = POINT::default();
         // SAFETY: The cursor output buffer is initialized and live.
         unsafe { GetCursorPos(&mut cursor).unwrap(); }
-        let mut fixture = Self { root, child: None, word: HWND::default(), host: HWND::default(), font: HFONT::default(), cursor };
+        let mut fixture = Self {
+            root,
+            child: None,
+            word: HWND::default(),
+            host: HWND::default(),
+            font: HFONT::default(),
+            cursor,
+            session,
+        };
         // SAFETY: All buffers are live. The fixture owns each created native resource.
         unsafe {
             let mut description = LOGFONTW { lfHeight: -72, ..Default::default() };
@@ -64,7 +82,11 @@ impl Fixture {
             fixture.host = CreateWindowExW(WS_EX_TOPMOST, w!("STATIC"), w!("Chibipop selection regression"),
                 WS_OVERLAPPEDWINDOW | WS_VISIBLE,
                 800, GetSystemMetrics(SM_CYSCREEN) - 160, 840, 240, None, None, None, None).unwrap();
-            let initial_text = if config.actions.search.selected_opens_sentence_search { w!("猫がいる。") } else { w!("猫") };
+            let initial_text = if profile.actions.search.selected_opens_sentence_search {
+                w!("猫がいる。")
+            } else {
+                w!("猫")
+            };
             fixture.word = CreateWindowExW(WINDOW_EX_STYLE(0), w!("EDIT"), initial_text,
                 WS_CHILD | WS_VISIBLE | WINDOW_STYLE(0x0004),
                 0, 0, 800, 180, Some(fixture.host), None, None, None).unwrap();
@@ -217,13 +239,16 @@ fn run_selection(mode: TriggerMode) {
         windows::Win32::System::DataExchange::GetClipboardSequenceNumber()
     };
     let mut bounds_reader = chibipop_windows::action::selected_text::Reader::new();
-    bounds_reader.request(chibipop::controller::RequestId(1000));
+    bounds_reader.request(chibipop::controller::RequestId(1000), fixture.session.clone());
     let deadline = Instant::now() + Duration::from_secs(3);
-    let selection = loop {
-        if let Some((_, selection)) = bounds_reader.poll() { break selection.expect("fixture selection"); }
+    let (session, selection) = loop {
+        if let Some((_, session, selection)) = bounds_reader.poll() {
+            break (session, selection.expect("fixture selection"));
+        }
         assert!(Instant::now() < deadline, "fixture bounds read timed out");
         pause(Duration::from_millis(10));
     };
+    assert_eq!(fixture.session, session);
     let bounds = selection.bounds.expect("fixture selection must expose screen bounds");
     assert!(bounds.w > 1 && bounds.h > 1);
     let before = fixture.diagnostics().len();

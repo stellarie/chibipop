@@ -46,6 +46,7 @@ impl Action for OcrClipboardAction {
             bgra_buf: cap.buf,
             width: cap.w,
             height: cap.h,
+            session: ctx.session.clone(),
             result_tx,
         })?;
         let Some(lines) = wait_lines(result_rx, || cancellation.cancelled())? else {

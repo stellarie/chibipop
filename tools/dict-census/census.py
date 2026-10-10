@@ -32,13 +32,13 @@ from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
-# Support columns come out of these three, never out of a copy here, so the
-# report always scores against the current build. The tag and style tables
-# moved out of the old `glossary.rs` into the arena parser, and the
-# stylesheet grammar and property table now sit beside them.
+# Support columns come from these files, never from a copy here, so the report
+# scores against the current build. The selector grammar and chrome classes
+# come from `sheet/select.rs`; the property keys come from `sheet/mod.rs`.
 PARSE_RS = REPO / "src" / "dict" / "gloss" / "parse.rs"
 GLOSS_RS = REPO / "src" / "dict" / "gloss" / "mod.rs"
 SHEET_RS = REPO / "src" / "dict" / "sheet" / "mod.rs"
+SHEET_SELECT_RS = REPO / "src" / "dict" / "sheet" / "select.rs"
 
 # Yomitan attributes worth counting separately from `style`; see
 # dictionary-term-bank-v3-schema.json.
@@ -73,6 +73,38 @@ def _rust_match_keys(src: str, fn: str, where_: Path) -> set[str]:
     return keys
 
 
+def _rust_chrome_map(src: str, where_: Path) -> dict[str, str]:
+    """The class-to-Chrome mapping in `chrome_of`."""
+    m = re.search(r"fn chrome_of\b.*?\{(.*?)\n\}", src, re.S)
+    if not m:
+        raise SystemExit(f"census: could not find chrome_of in {where_}")
+    rows = re.findall(
+        r'((?:"[^"]+"\s*(?:\|\s*)?)+)\s*=>\s*Chrome::(\w+)', m.group(1)
+    )
+    return {
+        name: chrome
+        for names, chrome in rows
+        for name in re.findall(r'"([^"]+)"', names)
+    }
+
+
+def _rust_chrome_props(src: str, where_: Path) -> dict[str, dict[str, bool]]:
+    """The `chrome_key` properties and their `important` guards."""
+    m = re.search(r"fn chrome_key\b.*?\{(.*?)\n\}", src, re.S)
+    if not m:
+        raise SystemExit(f"census: could not find chrome_key in {where_}")
+    rows = re.findall(
+        r'\(Chrome::(\w+),\s*"([^"]+)"\)\s*(?:if\s+(\w+))?\s*=>',
+        m.group(1),
+    )
+    if not rows:
+        raise SystemExit(f"census: chrome_key in {where_} parsed to no keys")
+    return {
+        chrome: {prop: guard == "important" for owner, prop, guard in rows if owner == chrome}
+        for chrome, _, _ in rows
+    }
+
+
 def _rust_needles(src: str, where_: Path) -> list[tuple[str, str]]:
     """`const NEEDLES: [(&str, Role); N]` as `[(needle, role), ...]`, in the
     table's own order."""
@@ -104,23 +136,16 @@ def read_support() -> dict[str, object]:
     parse_src = PARSE_RS.read_text(encoding="utf-8")
     gloss_src = GLOSS_RS.read_text(encoding="utf-8")
     sheet_src = SHEET_RS.read_text(encoding="utf-8")
+    select_src = SHEET_SELECT_RS.read_text(encoding="utf-8")
     return {
-        # The tags the arena parser resolves to its own `Tag` enum. Anything
-        # else parses as `Tag::Other`, keeping its name as an attribute.
         "tags": _rust_match_keys(parse_src, "tag_for", PARSE_RS),
-        # Inline `style` keys, camelCase as the schema spells them.
         "styles": _rust_match_keys(parse_src, "style_key_for", PARSE_RS),
-        # The editorial-role classifier: the needle table, the three keys
-        # whose value carries the role, and the precedence the `Role` enum's
-        # declaration order defines.
         "role_needles": _rust_needles(parse_src, PARSE_RS),
         "role_value_keys": _rust_str_array(parse_src, "VALUE_KEYS", PARSE_RS),
         "role_order": _rust_role_order(gloss_src, GLOSS_RS),
-        # The `styles.css` half: the CSS spelling of the same properties, and
-        # the selector grammar the matcher compiles. The chrome classes are the
-        # only class tokens that grammar keeps. A `.gloss-image-link` scores as
-        # `image-chrome`. Any other class scores as `class`.
         "css_props": _rust_match_keys(sheet_src, "css_key", SHEET_RS),
+        "chrome_props": _rust_chrome_props(sheet_src, SHEET_RS),
+        "chrome_map": _rust_chrome_map(select_src, SHEET_SELECT_RS),
         "css_kinds": _rust_str_array(
             sheet_src, "SUPPORTED_SELECTOR_KINDS", SHEET_RS
         ),
@@ -413,7 +438,7 @@ def _block_kind(prelude: str, open_blocks: list[dict], at_rules: collections.Cou
 
 
 def _flush_statement(
-    buf: list[str], decls: list[tuple[str, str]] | None, at_rules: collections.Counter
+    buf: list[str], decls: list[tuple[str, str, bool]] | None, at_rules: collections.Counter
 ) -> None:
     """One `;`-terminated statement: a declaration, or an at-statement such as
     `@import url(...)`."""
@@ -427,11 +452,16 @@ def _flush_statement(
     if not sep or decls is None:
         return
     name = head.strip().lower()
-    if PROP_NAME_RE.fullmatch(name):
-        # The value comes along because support is not a property question
-        # alone: the matcher drops a `var()` value it cannot substitute,
-        # whatever property carries it.
-        decls.append((name, value.strip()))
+    value = value.strip()
+    important = False
+    if value.endswith("important"):
+        head = value[:-len("important")].rstrip()
+        if head.endswith("!"):
+            value = head[:-1].rstrip()
+            important = True
+    if PROP_NAME_RE.fullmatch(name) and value:
+        # Keep values for `var()` checks and importance for chrome-key rules.
+        decls.append((name, value, important))
 
 
 def _resolve_nesting(prelude: str, parent: list[str] | None) -> list[str]:
@@ -774,6 +804,24 @@ def _chrome_misplaced(sel: str, chrome: set[str]) -> bool:
     return False
 
 
+def _chrome_subject(sel: str, support: dict[str, object]) -> str:
+    """The subject's Chrome variant, or `None` for a glossary node."""
+    blank = re.sub(r"\[[^\]]*\]", "[]", sel)
+    subject = re.split(r"[\s>]+", blank.strip())[-1]
+    match = re.fullmatch(r"\.([\w-]+)", subject)
+    return support["chrome_map"].get(match.group(1), "None") if match else "None"
+
+
+def _inner_chrome_child(sel: str, support: dict[str, object]) -> bool:
+    """A direct-child relation cannot reach virtual Container/Image parents."""
+    blank = re.sub(r"\[[^\]]*\]", "[]", sel)
+    match = re.search(r">\s*\.([\w-]+)\s*$", blank)
+    return bool(
+        match
+        and support["chrome_map"].get(match.group(1)) == "Container"
+    )
+
+
 def selector_support(sel: str, support: dict[str, set[str]]) -> set[str]:
     """Why one complex selector leaves the matcher's grammar, or an empty set
     when it does not.
@@ -799,6 +847,8 @@ def selector_support(sel: str, support: dict[str, set[str]]) -> set[str]:
             bad.add(f"pseudo:{name}")
     if "image-chrome" in kinds and _chrome_misplaced(sel, support["image_chrome"]):
         bad.add("chrome-not-subject")
+    if _inner_chrome_child(sel, support):
+        bad.add("chrome-virtual-parent")
     if re.search(r"[+~]", _outside_brackets(sel)):
         bad.add("sibling-combinator")
     for inner in ATTR_OP_RE.findall(sel):
@@ -827,7 +877,7 @@ def css_stats(raw: bytes, support: dict[str, set[str]]) -> dict:
         if block["kind"] != "rule":
             continue  # @font-face descriptors and animation steps draw no pill
         st["rules"] += 1
-        box = [prop for prop, _ in decls if is_box_prop(prop)]
+        box = [prop for prop, _, _ in decls if is_box_prop(prop)]
         for prop in box:
             st["box_props"][prop] += 1
         if box:
@@ -844,12 +894,25 @@ def css_stats(raw: bytes, support: dict[str, set[str]]) -> dict:
     return st
 
 
+def _supported_decl(
+    prop: str, value: str, important: bool, subject: str, support: dict[str, object]
+) -> bool:
+    """Whether `Sheet::push_decl` keeps this property on the rule subject."""
+    if "var(" in value:
+        return False
+    if prop in support["css_props"]:
+        return True
+    chrome_props = support["chrome_props"].get(subject, {})
+    requires_important = chrome_props.get(prop)
+    return requires_important is not None and (important or not requires_important)
+
+
 def score_rule(
     st: dict,
     block: dict,
-    decls: list[tuple[str, str]],
+    decls: list[tuple[str, str, bool]],
     is_box: bool,
-    support: dict[str, set[str]],
+    support: dict[str, object],
 ) -> None:
     """One rule into exactly one of the four support buckets.
 
@@ -870,8 +933,15 @@ def score_rule(
         for reason in reasons or {"empty selector"}:
             st["drop_reasons"][reason] += 1
         return
+    subjects = {_chrome_subject(sel, support) for sel in sels}
+    if len(subjects) > 1:
+        st["rules_dropped_selector"] += 1
+        st["drop_reasons"]["mixed-chrome-subjects"] += 1
+        return
+    subject = next(iter(subjects))
     if not any(
-        prop in support["css_props"] and "var(" not in value for prop, value in decls
+        _supported_decl(prop, value, important, subject, support)
+        for prop, value, important in decls
     ):
         st["rules_no_props"] += 1
         return

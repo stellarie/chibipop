@@ -67,7 +67,11 @@ $previousAt = $null
 $records = @()
 $stoppedIds = @()
 $remainingIds = @()
-$started = Start-Process -FilePath $FilePath -ArgumentList $ArgumentList -PassThru
+$startParameters = @{ FilePath = $FilePath; PassThru = $true }
+if ($ArgumentList.Count -gt 0) {
+    $startParameters.ArgumentList = $ArgumentList
+}
+$started = Start-Process @startParameters
 $rootPid = [uint32]$started.Id
 $stopAt = (Get-Date).AddSeconds($DurationSeconds)
 

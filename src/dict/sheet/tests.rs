@@ -304,12 +304,11 @@ fn other_properties_on_chrome_map_as_they_do_on_a_node() {
 }
 
 /// A chrome class stands alone as the subject.
-/// The three elements belong to one node.
-/// A selector can relate two elements, test an attribute on one element, or place
-/// a node under one element.
-/// Those selectors describe arrangements that this tree cannot hold.
-/// 明鏡's `.gloss-image-link[data-background="true"] > .gloss-image-container` is
-/// the real case.
+/// The image's chrome classes name three virtual elements in one GlossDoc node.
+/// Other chrome elements cannot constrain the selector. A `>` immediately
+/// before Container or Image also fails because each has a virtual parent.
+/// Descendant selectors can name real GlossDoc ancestors. Link supports `>`
+/// because its parent is real.
 /// A mixed list that names the link beside the container needs two declaration
 /// slices. It drops as one unit.
 #[test]
@@ -335,6 +334,26 @@ fn a_chrome_class_compiles_only_alone_and_only_as_the_subject() {
          span[data-sc-kodaimoji] span[data-sc-img] .gloss-image { width: 15em !important }",
     );
     assert_eq!((1, 2), (sheet.counts().kept, sheet.counts().selectors), "角川's list shares one element");
+}
+
+#[test]
+fn an_inner_chrome_subject_rejects_a_direct_child_parent() {
+    let content = json!([{"tag": "span", "content": [{"tag": "img", "path": "a.png"}]}]);
+    for class in ["gloss-image-container", "gloss-image"] {
+        let css = format!("span > .{class} {{ width: 15em !important }}");
+        let sheet = Sheet::compile(&css);
+        assert!(sheet.is_empty(), "{css}");
+        assert_eq!(1, sheet.counts().dropped_selector, "{css}");
+        let d = styled(&css, content.clone());
+        assert!(record(&d, find(&d, Tag::Img)).is_empty(), "{css}");
+    }
+
+    let link = styled("span > .gloss-image-link { max-width: 25% }", content);
+    assert_eq!(
+        Some("25%".to_string()),
+        prop(&link, find(&link, Tag::Img), StyleKey::ImageLinkMaxWidth),
+        "a link has a real parent",
+    );
 }
 
 // ---- a css-only dictionary draws its boxes ----

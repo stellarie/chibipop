@@ -4,6 +4,7 @@
 //! Platform code supplies the two seams.
 //! Core shares all code below the seams.
 
+use crate::config::ProfileSession;
 use crate::geom::{PhysPoint, PhysRect, ScanKind, ScanRect};
 use crate::lookup::engine::MAX_LOOKUP_CHARS;
 use crate::text::layout::{
@@ -175,6 +176,8 @@ pub struct TextSource {
     capture: Box<dyn RegionCapture>,
     ocr: RefCell<Box<dyn OcrEngine>>,
     settings: SettingsSnapshot,
+    language: RefCell<String>,
+    profile_scope: Option<ProfileSession>,
     show_lookup_log: bool,
     /// This is the press-time grab for the active trigger hold.
     /// Every lookup reads from it, so the backend receives no more calls.
@@ -198,6 +201,42 @@ impl TextSource {
     /// The job cannot create a second engine elsewhere.
     /// This method gives one-off OCR calls the same seam as lookups.
     pub fn recognise(&self, bgra: &[u8], w: i32, h: i32) -> Result<Vec<OcrLine>> {
+        self.recognise_with(
+            bgra,
+            w,
+            h,
+            self.settings.discard_furigana,
+            self.show_lookup_log,
+        )
+    }
+
+    pub fn recognise_for_session(
+        &self,
+        session: &ProfileSession,
+        bgra: &[u8],
+        w: i32,
+        h: i32,
+    ) -> Result<Vec<OcrLine>> {
+        let config = session.config();
+        self.ocr.borrow_mut().set_language(&config.ocr.language);
+        *self.language.borrow_mut() = config.ocr.language.clone();
+        self.recognise_with(
+            bgra,
+            w,
+            h,
+            config.ocr.discard_furigana,
+            self.show_lookup_log,
+        )
+    }
+
+    fn recognise_with(
+        &self,
+        bgra: &[u8],
+        w: i32,
+        h: i32,
+        discard_ruby: bool,
+        show_log: bool,
+    ) -> Result<Vec<OcrLine>> {
         let started = std::time::Instant::now();
         let lines = match self.ocr.borrow().recognise(bgra, w, h) {
             Ok(lines) => lines,
@@ -212,7 +251,7 @@ impl TextSource {
                 return Err(error);
             }
         };
-        let lines = if self.settings.discard_furigana {
+        let lines = if discard_ruby {
             discard_furigana(lines)
         } else {
             lines
@@ -227,7 +266,7 @@ impl TextSource {
             lines.len(),
             words,
         );
-        if self.show_lookup_log {
+        if show_log {
             use std::fmt::Write;
             let mut message = String::new();
             for (line_index, line) in lines.iter().enumerate() {
@@ -266,6 +305,8 @@ impl TextSource {
             capture,
             ocr: RefCell::new(ocr),
             settings,
+            language: RefCell::new(String::new()),
+            profile_scope: None,
             show_lookup_log: false,
             frozen: None,
             recognised: Vec::new(),
@@ -279,11 +320,21 @@ impl TextSource {
 
     /// Replace the OCR settings.
     pub fn apply_settings(&mut self, settings: SettingsSnapshot, language: &str) {
-        self.ocr.borrow_mut().set_language(language);
-        self.settings = settings;
-        // A new language or capture size produces a new answer.
-        self.recognised.clear();
-        self.previous.clear();
+        if self.settings != settings || self.language.borrow().as_str() != language {
+            self.ocr.borrow_mut().set_language(language);
+            *self.language.borrow_mut() = language.to_string();
+            self.settings = settings;
+            self.recognised.clear();
+            self.previous.clear();
+        }
+    }
+
+    pub fn set_profile_scope(&mut self, session: &ProfileSession) {
+        if self.profile_scope.as_ref() != Some(session) {
+            self.profile_scope = Some(session.clone());
+            self.recognised.clear();
+            self.previous.clear();
+        }
     }
 
     /// Freeze the output that contains `at`.
@@ -329,6 +380,7 @@ impl TextSource {
     /// Swap OCR backend.
     pub fn replace_ocr(&self, ocr: Box<dyn OcrEngine>) {
         drop(self.ocr.replace(ocr));
+        self.language.borrow_mut().clear();
     }
 
     /// Return the box covered by the hold's frozen grab, if one exists.
@@ -452,8 +504,9 @@ impl TextSource {
             source.previous = std::mem::take(&mut source.recognised);
             let mut all_lines = Vec::new();
             for tile in regions {
-                let (mut lines, _) =
-                    source.recognise_at_capture(tile, source.settings.upscale, mask)?;
+                let (mut lines, _) = source.recognise_oriented(
+                    tile, source.settings.upscale, mask, orientation,
+                )?;
                 trim_probe_edges(&mut lines, tile, bounds, orientation);
                 all_lines.extend(lines);
             }
@@ -491,6 +544,21 @@ impl TextSource {
         factor: i32,
         mask: CaptureMask,
     ) -> Result<(Vec<OcrLine>, Frame)> {
+        self.recognise_oriented(region, factor, mask, box_orientation(region))
+    }
+
+    fn recognise_oriented(
+        &mut self,
+        region: PhysRect,
+        factor: i32,
+        mask: CaptureMask,
+        orientation: Orientation,
+    ) -> Result<(Vec<OcrLine>, Frame)> {
+        let discard_ruby = self.settings.discard_furigana;
+        let filter = |lines| {
+            let lines = drop_slivers(lines, orientation);
+            if discard_ruby { discard_furigana(lines) } else { lines }
+        };
         // One value controls the fill, word drop, and reuse key.
         // These three actions therefore use the same mask.
         let mask = match self.frozen {
@@ -516,6 +584,7 @@ impl TextSource {
         };
         let capture_ms = capture_started.elapsed().as_secs_f64() * 1000.0;
         if let Some(lines) = self.reuse(region, factor, mask, &frame.buf) {
+            let lines = filter(lines);
             self.log_capture(CaptureLog {
                 frame: &frame,
                 region,
@@ -552,12 +621,9 @@ impl TextSource {
         };
         let ocr_ms = ocr_started.elapsed().as_secs_f64() * 1000.0;
         let origin = PhysPoint { x: region.x, y: region.y };
-        let lines = drop_slivers(to_desktop(raw, origin, factor, mask), box_orientation(region));
-        let lines = if self.settings.discard_furigana {
-            discard_furigana(lines)
-        } else {
-            lines
-        };
+        let lines = to_desktop(raw, origin, factor, mask);
+        self.remember(region, factor, mask, &lines, &frame.buf);
+        let lines = filter(lines);
         self.log_capture(CaptureLog {
             frame: &frame,
             region,
@@ -570,7 +636,6 @@ impl TextSource {
             outcome: "ok",
             error: None,
         });
-        self.remember(region, factor, mask, &lines, &frame.buf);
         Ok((lines, frame))
     }
 
@@ -863,7 +928,7 @@ impl TextSource {
         let probes = wrap_probe(lines, cursor, region, alnum, bounds)?;
         let mut probe_lines: Vec<(PhysRect, Vec<OcrLine>)> = Vec::new();
         for (i, &probe) in probes.iter().enumerate() {
-            match self.recognise_at_capture(probe, self.settings.upscale, mask) {
+            match self.recognise_oriented(probe, self.settings.upscale, mask, orientation) {
                 Ok((lines, _)) => probe_lines.push((probe, lines)),
                 Err(e) => {
                     eprintln!("chibipop: wrap probe failed, using pass 1: {e:#}");
@@ -884,7 +949,8 @@ impl TextSource {
         tolerance: i32,
         mask: CaptureMask,
     ) -> Result<Vec<OcrWord>> {
-        let (lines, _) = self.recognise_at_capture(tile, self.settings.upscale, mask)?;
+        let (lines, _) =
+            self.recognise_oriented(tile, self.settings.upscale, mask, orientation)?;
         Ok(nearest_line(&lines, perpendicular_centre, orientation, tolerance)
             .map(|line| line.words.clone())
             .unwrap_or_default())
@@ -1717,6 +1783,94 @@ mod tests {
 
         fn bounds_containing(&self, _p: PhysPoint) -> PhysRect {
             PhysRect { x: 0, y: 0, w: 2560, h: 1500 }
+        }
+    }
+
+    struct ThinGlyphs {
+        vertical: bool,
+        calls: Rc<std::cell::Cell<u32>>,
+    }
+
+    impl OcrEngine for ThinGlyphs {
+        fn recognise(&self, _: &[u8], w: i32, h: i32) -> Result<Vec<OcrLine>> {
+            self.calls.set(self.calls.get() + 1);
+            let region = match (self.vertical, w, h) {
+                (false, 500, 100) => PhysRect { x: -210, y: 50, w, h },
+                (false, 153, 182) => PhysRect { x: 0, y: 80, w, h },
+                (true, 100, 500) => PhysRect { x: 550, y: -210, w, h },
+                (true, 182, 153) => PhysRect { x: 438, y: 0, w, h },
+                _ => panic!("unexpected capture size: {w}x{h}"),
+            };
+            let words = [
+                ("カ", PhysRect { x: 20, y: 80, w: 40, h: 40 }),
+                ("ー", PhysRect { x: 60, y: 99, w: 40, h: 2 }),
+                ("ド", PhysRect { x: 100, y: 80, w: 40, h: 40 }),
+                ("型", PhysRect { x: 20, y: 150, w: 40, h: 40 }),
+            ];
+            Ok([&words[..3], &words[3..]].into_iter().filter_map(|line| {
+                let words: Vec<_> = line.iter().filter_map(|&(text, mut rect)| {
+                    if self.vertical {
+                        rect = PhysRect { x: 700 - rect.y - rect.h, y: rect.x, w: rect.h, h: rect.w };
+                    }
+                    if rect.intersection(region) != Some(rect) {
+                        return None;
+                    }
+                    rect.x -= region.x;
+                    rect.y -= region.y;
+                    Some(OcrWord { text: text.into(), rect })
+                }).collect();
+                (!words.is_empty()).then_some(OcrLine { words })
+            }).collect())
+        }
+
+        fn set_language(&mut self, _: &str) {}
+        fn name(&self) -> &str { "thin-glyphs" }
+        fn provides_geometry(&self) -> bool { true }
+    }
+
+    #[test]
+    fn wrap_preserves_thin_glyphs_on_both_reading_axes_and_cached_probes() {
+        for vertical in [false, true] {
+            for cached_probe in [false, true] {
+                let calls = Rc::new(std::cell::Cell::new(0));
+                let mut source = TextSource::new(
+                    Box::new(OutputCapture),
+                    Box::new(ThinGlyphs { vertical, calls: calls.clone() }),
+                    SettingsSnapshot { upscale: 1, prefer_vertical: vertical, ..snap() },
+                );
+                let (cursor, first, probe, orientation, thin) = if vertical {
+                    (
+                        PhysPoint { x: 600, y: 40 },
+                        PhysRect { x: 550, y: -210, w: 100, h: 500 },
+                        PhysRect { x: 438, y: 0, w: 182, h: 153 },
+                        Orientation::Vertical,
+                        PhysRect { x: 599, y: 60, w: 2, h: 40 },
+                    )
+                } else {
+                    (
+                        PhysPoint { x: 40, y: 100 },
+                        PhysRect { x: -210, y: 50, w: 500, h: 100 },
+                        PhysRect { x: 0, y: 80, w: 153, h: 182 },
+                        Orientation::Horizontal,
+                        PhysRect { x: 60, y: 99, w: 40, h: 2 },
+                    )
+                };
+                if cached_probe {
+                    source.recognise_at_capture(probe, 1, CaptureMask::NONE).unwrap();
+                }
+                for _ in 0..2 {
+                    let (resolved, scan, _) = source
+                        .resolve_at_tiled_scanned(cursor, true, CaptureMask::NONE).unwrap();
+                    let resolved = resolved.expect("wrapped text");
+                    assert_eq!("カード型", resolved.span.text);
+                    assert_eq!(orientation, resolved.orientation);
+                    assert_eq!(4, resolved.span.geom.len());
+                    assert_eq!(thin, resolved.span.geom[1].rect);
+                    assert_eq!(first, scan[0].rect);
+                    assert_eq!(probe, scan[1].rect);
+                    assert_eq!(2, calls.get(), "identical pixels reuse both capture regions");
+                }
+            }
         }
     }
 

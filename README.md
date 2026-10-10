@@ -184,6 +184,40 @@ You can edit the file manually. The settings window covers most options.
 See the [configuration reference](docs/REFERENCE.md#configuration-file)
 for more options.
 
+### Profiles
+
+Settings saves a profile catalog. A Full profile stores its own popup, OCR,
+Dictionary, Anki, action, and nested-profile settings.
+
+A Derived profile inherits one Full profile. It can override each field alone.
+Its role-list override replaces the complete ordered list.
+An explicit empty list searches no Dictionary for that role.
+
+Profile IDs stay stable when names change. Bind IDs stay stable when chords
+change. Frequency lists and the Ranking strategy are shared by all profiles.
+
+Configured Binds select lookup mode, action, and an optional profile.
+Lookup Binds support Press, Hold, and Toggle.
+Anki add and static-region Binds use the displayed profile.
+Existing popups and Search windows retain their profile settings until close.
+Linux has no Search profile picker.
+
+See the [profile and bind reference](docs/REFERENCE.md#profiles-and-binds).
+
+---
+
+### Bind actions
+
+On Linux, use the configured Bind ID in compositor commands:
+
+```bash
+chibipop ctl bind-down monolingual
+chibipop ctl bind-up monolingual
+```
+
+The fixed socket verbs remain supported. See the
+[Linux guide](docs/LINUX.md#the-trigger-key) for the command list.
+
 ### Important settings
 
 - **Screen area size** (**Text recognition** tab) — the area that chibipop
@@ -200,11 +234,11 @@ for more options.
 - **Text language** (**Text recognition** tab) — **Windows OCR only.**
   This setting selects an installed OCR language. A plugin uses its own
   language and disables this control. Linux uses Japanese OCR.
-- **Dictionaries for each language** — **Windows only.** Separate language
-  lists require entries under `[dictionaries.per_language]` in
-  `chibipop.toml`. The **Definition dictionaries** list edits an existing
-  language list when you change **Text language**. Without a language
-  list, chibipop uses the global definition dictionary list.
+- **Dictionaries for each language** — Windows and Linux can store a list in
+  the selected profile under
+  `[profiles.settings.dictionaries.per_language]`.
+  A Derived profile can override the complete language map.
+  Without a list, the profile searches every enabled terms Dictionary.
 
 ### Other ways to search
 
@@ -215,6 +249,9 @@ for more options.
 3. Select a candidate to open its definition.
 
 The search windows use the popup theme.
+
+Create a Search Bind to open Search with a profile override.
+Linux has no Search profile picker.
 
 #### Selected text
 
@@ -257,6 +294,11 @@ See the [Linux clipboard requirements](docs/LINUX.md).
 
 chibipop copies imported archives into its own **library** folder. The
 original files in your download folder stay unchanged.
+
+Select the profile before you edit its Dictionary lists.
+An import enables its detected roles in that profile.
+Other explicit profile lists receive the imported Dictionary disabled.
+An explicit empty role list stays empty.
 
 **Windows.** Change the dictionary list on the **Dictionaries** tab.
 Click **Apply** to update the database in place. You can continue to use
@@ -591,9 +633,9 @@ variable takes priority.
 
 #### Select the plugin
 
-1. On the **Text recognition** tab, choose **meikiocr** under **Text reader**.
-2. Click **Apply**.
-3. Restart chibipop.
+1. On the **Extensions** tab, check **Enable** beside **meikiocr**.
+2. On the **Text recognition** tab, choose **meikiocr** under **Text reader**.
+3. Click **Apply**. Apply changes the active OCR engine without a restart.
 
 If you use a virtual environment, start chibipop from that environment.
 For an existing installation, `meikiocr_path` must name the package's import
@@ -763,18 +805,22 @@ command. The **Shortcuts** tab provides the command for each action.
 that send only key presses cannot use this mode. Use **Turn on / off** or
 **Once per press** instead.
 
-On Hyprland, two lines in your configuration set the default `ALT+F` for
-the **While held** mode:
+Configure a Bind in the **Shortcuts** tab. Use its stable ID in the
+compositor command. Hold mode needs both activation and release:
 
 ```
-bind = ALT, F, exec, chibipop ctl trigger-down
-bindr = ALT, F, exec, chibipop ctl trigger-up
+bind = ALT, F, exec, chibipop ctl bind-down my-lookup
+bindr = ALT, F, exec, chibipop ctl bind-up my-lookup
 ```
 
-[`extras/`](extras/) contains a ready-made `hyprland.conf`.
-[`extras/README.md`](extras/README.md) also has Sway examples. The
-**Shortcuts** tab shows instructions for Hyprland, Sway, Niri, KDE,
-and GNOME.
+Press mode and Toggle mode use `bind-down` only.
+The settings window provides the exact command for each configured Bind.
+The fixed verbs `trigger-down`, `trigger-up`, `toggle`, and `lookup` remain
+supported.
+
+[`extras/`](extras/) contains a daemon startup snippet.
+Configure Bind IDs in Settings and copy the generated compositor commands.
+[`extras/README.md`](extras/README.md) also has Sway startup examples.
 
 ### Two things to expect
 

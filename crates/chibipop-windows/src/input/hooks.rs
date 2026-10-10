@@ -10,9 +10,9 @@ use crate::geom::PhysPoint;
 use anyhow::{anyhow, Context, Result};
 use std::collections::VecDeque;
 use std::panic::catch_unwind;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicU16, AtomicU8, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicU8, AtomicU64, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
-use std::sync::{LazyLock, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::thread;
 use std::time::Duration;
 use windows::Win32::Foundation::*;
@@ -34,18 +34,6 @@ static LAST_ACCEPTED: AtomicI64 = AtomicI64::new(NO_POINT);
 
 /// Stores one candidate point when one exists.
 static PENDING: AtomicI64 = AtomicI64::new(NO_POINT);
-
-/// Stores the configured virtual-key code for the trigger key.
-static TRIGGER_VK: AtomicU16 = AtomicU16::new(0x10);
-
-/// Stores whether the trigger is active for popup display.
-static KEY_DOWN: AtomicBool = AtomicBool::new(false);
-
-/// Tracks physical trigger edges so Windows autorepeat does not toggle the latch.
-static TRIGGER_PHYSICAL: AtomicBool = AtomicBool::new(false);
-
-/// Stores one physical Press-mode trigger edge.
-static PENDING_PRESS: AtomicBool = AtomicBool::new(false);
 
 /// The main thread resets this flag on each tick.
 /// A stuck `true` value blocks every wheel event.
@@ -115,59 +103,48 @@ fn queue_pointer_event(event: PointerEvent) {
 /// Defines the number of `WHEEL_DELTA` units from `winuser.h`.
 const WHEEL_DELTA_UNITS: i32 = 120;
 
-/// Stores the trigger mode as `u8`.
-static MODE: AtomicU8 = AtomicU8::new(0);
 
-/// Stores the virtual-key code for the Add-to-Anki hotkey.
-static ANKI_ADD_VK: AtomicU16 = AtomicU16::new(0x41);
+/// One configured action edge delivered to the pump.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BindEvent {
+    pub id: Arc<str>,
+    pub action: crate::config::BindAction,
+    pub down: bool,
+}
 
-/// Stores whether the popup is shown and Anki integration is enabled.
-static ANKI_ADD_ARMED: AtomicBool = AtomicBool::new(false);
+#[derive(Debug)]
+struct HookBind {
+    id: Arc<str>,
+    action: crate::config::BindAction,
+    mode: TriggerMode,
+    vk: u16,
+    modifiers: Option<u8>,
+    down: bool,
+    modifier_sides: u8,
+    retired: bool,
+}
 
-/// One stored hotkey press.
-static PENDING_ADD: AtomicBool = AtomicBool::new(false);
+#[derive(Debug, Default)]
+struct ConfiguredBinds {
+    binds: Vec<HookBind>,
+    pending: VecDeque<BindEvent>,
+}
 
-/// Defines the number of action hotkey slots.
-pub const MAX_ACTION_SLOTS: usize = 8;
-pub const SELECTED_TEXT_SLOT: usize = 5;
-static SELECTED_TEXT_SWALLOWED: AtomicU16 = AtomicU16::new(0);
-static ACTION_DOWN: [AtomicBool; MAX_ACTION_SLOTS] = [const { AtomicBool::new(false) }; MAX_ACTION_SLOTS];
+static CONFIGURED_BINDS: LazyLock<Mutex<ConfiguredBinds>> =
+    LazyLock::new(|| Mutex::new(ConfiguredBinds::default()));
 
-/// Stores virtual-key codes for action hotkeys.
-static ACTION_VK: [AtomicU16; MAX_ACTION_SLOTS] = [
-    AtomicU16::new(0),
-    AtomicU16::new(0),
-    AtomicU16::new(0),
-    AtomicU16::new(0),
-    AtomicU16::new(0),
-    AtomicU16::new(0),
-    AtomicU16::new(0),
-    AtomicU16::new(0),
-];
+/// Tracks physical key edges independently from the current bind list.
+static PHYSICAL_KEYS: [AtomicBool; 256] = [const { AtomicBool::new(false) }; 256];
 
-/// Stores modifier masks for action hotkeys.
-static ACTION_MODS: [AtomicU8; MAX_ACTION_SLOTS] = [
-    AtomicU8::new(0),
-    AtomicU8::new(0),
-    AtomicU8::new(0),
-    AtomicU8::new(0),
-    AtomicU8::new(0),
-    AtomicU8::new(0),
-    AtomicU8::new(0),
-    AtomicU8::new(0),
-];
+/// Keeps selected-text keys consumed through release after a rebind.
+static SELECTED_TEXT_SWALLOWED_KEYS: [AtomicBool; 256] =
+    [const { AtomicBool::new(false) }; 256];
 
-/// Stores one action press for each slot.
-static PENDING_ACTION: [AtomicBool; MAX_ACTION_SLOTS] = [
-    AtomicBool::new(false),
-    AtomicBool::new(false),
-    AtomicBool::new(false),
-    AtomicBool::new(false),
-    AtomicBool::new(false),
-    AtomicBool::new(false),
-    AtomicBool::new(false),
-    AtomicBool::new(false),
-];
+/// Marks whether a configured Anki-add action can run on the active popup.
+static ADD_ARMED: AtomicBool = AtomicBool::new(false);
+
+/// Keeps an eligible Anki-add key consumed through repeats and release.
+static ADD_SWALLOWED_KEYS: [AtomicBool; 256] = [const { AtomicBool::new(false) }; 256];
 
 /// Marks an active Region selector.
 static SELECTION_ACTIVE: AtomicBool = AtomicBool::new(false);
@@ -204,70 +181,6 @@ fn unpack(v: i64) -> PhysPoint {
     }
 }
 
-fn mode_to_u8(m: TriggerMode) -> u8 {
-    match m {
-        TriggerMode::Live => 0,
-        TriggerMode::HoldKey | TriggerMode::HoldShift => 1,
-        TriggerMode::Toggle => 2,
-        TriggerMode::Press => 3,
-    }
-}
-
-fn u8_to_mode(v: u8) -> TriggerMode {
-    match v {
-        1 => TriggerMode::HoldKey,
-        2 => TriggerMode::Toggle,
-        3 => TriggerMode::Press,
-        _ => TriggerMode::Live,
-    }
-}
-
-/// Returns whether a move can count now.
-fn mode_currently_eligible() -> bool {
-    match u8_to_mode(MODE.load(Ordering::SeqCst)) {
-        TriggerMode::Live => true,
-        TriggerMode::Press => false,
-        _ => KEY_DOWN.load(Ordering::SeqCst),
-    }
-}
-
-/// Updates trigger state without calling Win32 APIs.
-///
-/// Windows sends autorepeat key-down events, so the physical edge state filters
-/// repeats. Toggle mode keeps its latch across release, and toggle-off resets the
-/// movement gate before the next capture.
-fn transition_trigger_state(down: bool, still_held: bool, mode: TriggerMode) {
-    if down {
-        if TRIGGER_PHYSICAL.swap(true, Ordering::SeqCst) {
-            return;
-        }
-        if mode == TriggerMode::Press {
-            PENDING_PRESS.store(true, Ordering::SeqCst);
-            return;
-        }
-        if mode == TriggerMode::Toggle {
-            if KEY_DOWN.fetch_xor(true, Ordering::SeqCst) {
-                LAST_ACCEPTED.store(NO_POINT, Ordering::SeqCst);
-                PENDING.store(NO_POINT, Ordering::SeqCst);
-            }
-        } else {
-            KEY_DOWN.store(true, Ordering::SeqCst);
-        }
-    } else if !still_held {
-        TRIGGER_PHYSICAL.store(false, Ordering::SeqCst);
-        if mode == TriggerMode::Press {
-            return;
-        }
-        if mode == TriggerMode::Toggle {
-            return;
-        }
-        KEY_DOWN.store(false, Ordering::SeqCst);
-        if mode != TriggerMode::Live {
-            LAST_ACCEPTED.store(NO_POINT, Ordering::SeqCst);
-            PENDING.store(NO_POINT, Ordering::SeqCst);
-        }
-    }
-}
 
 /// Returns the left and right virtual-key codes for a modifier.
 fn modifier_variants(vk: u16) -> Option<(u16, u16)> {
@@ -279,9 +192,32 @@ fn modifier_variants(vk: u16) -> Option<(u16, u16)> {
     }
 }
 
-/// Returns true when this event fires Add-to-Anki.
-fn add_hotkey_hit(down: bool, vk: u16) -> bool {
-    down && vk == ANKI_ADD_VK.load(Ordering::SeqCst) && ANKI_ADD_ARMED.load(Ordering::SeqCst)
+fn bind_key_matches(vk: u16, target: u16) -> bool {
+    vk == target || modifier_variants(target).is_some_and(|(left, right)| vk == left || vk == right)
+}
+
+fn modifier_side(vk: u16, target: u16) -> Option<u8> {
+    let (left, right) = modifier_variants(target)?;
+    match vk {
+        key if key == left => Some(1),
+        key if key == right => Some(2),
+        _ => None,
+    }
+}
+
+fn physical_modifier_sides(target: u16) -> u8 {
+    let Some((left, right)) = modifier_variants(target) else { return 0 };
+    u8::from(PHYSICAL_KEYS[left as usize].load(Ordering::SeqCst))
+        | (u8::from(PHYSICAL_KEYS[right as usize].load(Ordering::SeqCst)) << 1)
+}
+
+fn modifier_bit(vk: u16) -> u8 {
+    match vk {
+        0x10 | 0xA0 | 0xA1 => crate::config::MOD_SHIFT,
+        0x11 | 0xA2 | 0xA3 => crate::config::MOD_CTRL,
+        0x12 | 0xA4 | 0xA5 => crate::config::MOD_ALT,
+        _ => 0,
+    }
 }
 
 /// Returns the current Ctrl, Shift, and Alt modifier mask.
@@ -303,39 +239,103 @@ fn current_modifiers() -> u8 {
     m
 }
 
-/// Returns true and stores an action when the virtual-key code and modifiers match.
+/// Returns true and stores one selected-text edge when a configured chord matches.
 fn action_hotkey_hit(down: bool, vk: u16, mods: u8) -> bool {
-    let mut hit = false;
-    for i in 0..MAX_ACTION_SLOTS {
-        let want_vk = ACTION_VK[i].load(Ordering::SeqCst);
-        if want_vk == 0 {
+    let Some(physical_key) = PHYSICAL_KEYS.get(vk as usize) else {
+        return false;
+    };
+    let edge = physical_key.swap(down, Ordering::SeqCst) != down;
+    if !edge {
+        return false;
+    }
+
+    let mut state = CONFIGURED_BINDS.lock().unwrap_or_else(|e| e.into_inner());
+    let ConfiguredBinds { binds, pending } = &mut *state;
+    let mut selected_text = false;
+    for bind in binds {
+        if !bind_key_matches(vk, bind.vk) {
             continue;
         }
-        if vk == want_vk {
-            let repeated = ACTION_DOWN[i].swap(down, Ordering::SeqCst);
-            if down && !repeated && !hit && mods == ACTION_MODS[i].load(Ordering::SeqCst) {
-                PENDING_ACTION[i].store(true, Ordering::SeqCst);
-                hit = true;
+        let side = modifier_side(vk, bind.vk);
+        if down {
+            if let Some(side) = side {
+                let already_held = bind.modifier_sides != 0;
+                bind.modifier_sides |= side;
+                if bind.down || already_held {
+                    continue;
+                }
+            } else if bind.down {
+                continue;
+            }
+            if bind.action == crate::config::BindAction::AnkiAdd && !ADD_ARMED.load(Ordering::SeqCst) {
+                continue;
+            }
+            let active_modifiers = mods & !modifier_bit(bind.vk);
+            if !bind.retired && bind.modifiers.is_none_or(|expected| active_modifiers == expected) {
+                bind.down = true;
+                if bind.action == crate::config::BindAction::AnkiAdd {
+                    ADD_SWALLOWED_KEYS[vk as usize].store(true, Ordering::SeqCst);
+                }
+                pending.push_back(BindEvent {
+                    id: Arc::clone(&bind.id),
+                    action: bind.action,
+                    down: true,
+                });
+                selected_text |= bind.action == crate::config::BindAction::SelectedText;
+            }
+        } else {
+            if let Some(side) = side {
+                bind.modifier_sides &= !side;
+                if bind.modifier_sides != 0 {
+                    continue;
+                }
+            } else {
+                bind.modifier_sides = 0;
+            }
+            if bind.down {
+                bind.down = false;
+                if bind.action == crate::config::BindAction::Lookup && bind.mode == TriggerMode::HoldKey {
+                    pending.push_back(BindEvent {
+                        id: Arc::clone(&bind.id),
+                        action: bind.action,
+                        down: false,
+                    });
+                }
             }
         }
     }
-    hit
+    selected_text
 }
 
-/// The selection action must consume its key before the source can replace
-/// the selection or open another window. Its matching release stays consumed
-/// even if configuration or focus changes while the key is held.
-fn selected_text_key(down: bool, vk: u16, mods: u8, eligible: bool) -> bool {
-    if vk != 0 && SELECTED_TEXT_SWALLOWED.load(Ordering::SeqCst) == vk {
-        if !down { SELECTED_TEXT_SWALLOWED.store(0, Ordering::SeqCst); }
-        return true;
+fn add_key_swallowed(down: bool, vk: u16) -> bool {
+    let Some(swallowed) = ADD_SWALLOWED_KEYS.get(vk as usize) else { return false };
+    if down {
+        swallowed.load(Ordering::SeqCst)
+    } else {
+        swallowed.swap(false, Ordering::SeqCst)
     }
-    if !down || !eligible || vk == 0 || ACTION_DOWN[SELECTED_TEXT_SLOT].load(Ordering::SeqCst)
-        || vk != ACTION_VK[SELECTED_TEXT_SLOT].load(Ordering::SeqCst)
-        || mods != ACTION_MODS[SELECTED_TEXT_SLOT].load(Ordering::SeqCst)
-    { return false; }
-    SELECTED_TEXT_SWALLOWED.store(vk, Ordering::SeqCst);
-    true
+}
+
+/// The selection action consumes each key through release, even after a rebind.
+fn selected_text_key(down: bool, vk: u16, eligible: bool, matched: bool) -> bool {
+    if vk == 0 {
+        return false;
+    }
+    let Some(swallowed) = SELECTED_TEXT_SWALLOWED_KEYS.get(vk as usize) else {
+        return false;
+    };
+    if down {
+        if swallowed.load(Ordering::SeqCst) {
+            return true;
+        }
+        if !eligible || !matched {
+            return false;
+        }
+        swallowed.store(true, Ordering::SeqCst);
+        true
+    } else {
+        swallowed.swap(false, Ordering::SeqCst)
+    }
 }
 
 fn own_foreground() -> bool {
@@ -353,17 +353,6 @@ fn selection_active() -> bool {
     SELECTION_ACTIVE.load(Ordering::SeqCst)
 }
 
-/// Returns whether this event matches the trigger key.
-fn matches_trigger(vk: u16, target: u16) -> bool {
-    if vk == target {
-        return true;
-    }
-    if let Some((l, r)) = modifier_variants(target) {
-        vk == l || vk == r
-    } else {
-        false
-    }
-}
 
 /// Records one mouse move.
 ///
@@ -385,9 +374,6 @@ unsafe fn record_mouse_move(lparam: LPARAM) {
     if selection_active() {
         return;
     }
-    if !mode_currently_eligible() {
-        return;
-    }
 
     let last = LAST_ACCEPTED.load(Ordering::SeqCst);
     let gate_open = last == NO_POINT || {
@@ -403,7 +389,7 @@ unsafe fn record_mouse_move(lparam: LPARAM) {
     PENDING.store(packed, Ordering::SeqCst);
 }
 
-/// Tracks the configured trigger key.
+/// Tracks keyboard edges and dispatches configured binds.
 ///
 /// It reads the event rather than current key state.
 unsafe fn record_key_state(wparam: WPARAM, lparam: LPARAM) -> bool {
@@ -415,86 +401,57 @@ unsafe fn record_key_state(wparam: WPARAM, lparam: LPARAM) -> bool {
     let escape = vk == VK_ESCAPE && !ESCAPE_DOWN.swap(down, Ordering::SeqCst) && down;
     if escape { ESCAPE_GENERATION.fetch_add(1, Ordering::SeqCst); }
     let selecting = selection_active();
-    let held = KEY_DOWN.load(Ordering::SeqCst);
-    record_trigger_state(down, vk);
     let mods = current_modifiers();
     let own = own_foreground();
-    let swallow = selected_text_key(down, vk, mods, !selecting && !own);
-    action_hotkey_hit(down, vk, mods);
-    if own { PENDING_ACTION[SELECTED_TEXT_SLOT].store(false, Ordering::SeqCst); }
+    let selected_text_hit = action_hotkey_hit(down, vk, mods);
+    let swallow = selected_text_key(down, vk, !selecting && !own, selected_text_hit);
+    let add_swallow = add_key_swallowed(down, vk);
+    if own {
+        CONFIGURED_BINDS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .pending
+            .retain(|event| event.action != crate::config::BindAction::SelectedText);
+    }
     if selecting {
-        if down { KEY_DOWN.store(held, Ordering::SeqCst); }
         discard_keyboard_actions();
-        return swallow;
+        return swallow || add_swallow;
     }
     if crate::ui::search_window::is_foreground() {
         cancel_keyboard_actions();
-        return swallow;
+        return swallow || add_swallow;
     }
     if escape { PENDING_ESCAPE.store(true, Ordering::SeqCst); }
-    if add_hotkey_hit(down, vk) {
-        PENDING_ADD.store(true, Ordering::SeqCst);
-    }
     if escape && BACK_ARMED.load(Ordering::SeqCst) {
         PENDING_BACK.store(true, Ordering::SeqCst);
     }
-    swallow
-}
-
-fn record_trigger_state(down: bool, vk: u16) {
-    let target = TRIGGER_VK.load(Ordering::SeqCst);
-    if !matches_trigger(vk, target) {
-        return;
-    }
-    if down {
-        let mode = u8_to_mode(MODE.load(Ordering::SeqCst));
-        transition_trigger_state(true, false, mode);
-    } else {
-        // For a modifier with left and right variants, clear the state only
-        // when both sides are up.
-        let still_held = modifier_variants(target).is_some_and(|(l, r)| {
-            // The hook runs before Windows updates the key state.
-            let other = if vk == l {
-                r
-            } else if vk == r {
-                l
-            } else {
-                return false;
-            };
-            // SAFETY: This call has no preconditions.
-            (unsafe { windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(other as i32) }
-                as u16
-                & 0x8000)
-                != 0
-        });
-        let mode = u8_to_mode(MODE.load(Ordering::SeqCst));
-        transition_trigger_state(false, still_held, mode);
-    }
+    swallow || add_swallow
 }
 
 pub fn clear_keyboard_actions() {
-    TRIGGER_PHYSICAL.store(false, Ordering::SeqCst);
-    cancel_keyboard_actions();
+    discard_keyboard_actions();
 }
 
 pub fn cancel_keyboard_actions() {
-    KEY_DOWN.store(false, Ordering::SeqCst);
     discard_keyboard_actions();
 }
 
 pub fn discard_keyboard_actions() {
     PENDING.store(NO_POINT, Ordering::SeqCst);
-    PENDING_PRESS.store(false, Ordering::SeqCst);
-    PENDING_ADD.store(false, Ordering::SeqCst);
     PENDING_BACK.store(false, Ordering::SeqCst);
     PENDING_ESCAPE.store(false, Ordering::SeqCst);
-    for pending in &PENDING_ACTION { pending.store(false, Ordering::SeqCst); }
+    CONFIGURED_BINDS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .pending
+        .retain(|event| event.action == crate::config::BindAction::Lookup && !event.down);
 }
 
 #[cfg(test)]
 pub(crate) fn search_keyboard_test_guard() -> impl Sized {
-    (tests::trigger_guard(), tests::add_hotkey_guard(), tests::back_guard())
+    tests::keyboard_guard()
 }
+
 
 /// This function stores one popup button edge in screen coordinates.
 unsafe fn record_pointer_event(button: PointerButton, down: bool, lparam: LPARAM) {
@@ -746,43 +703,6 @@ impl Hooks {
         SCROLL_ARMED.load(Ordering::SeqCst)
     }
 
-    /// Returns whether the trigger latch is active.
-    ///
-    /// Toggle mode keeps this latch active after key release.
-    /// Hold mode clears it when the key changes from down to up.
-    pub fn trigger_held() -> bool {
-        KEY_DOWN.load(Ordering::SeqCst)
-    }
-
-    /// Delivers one Press-mode edge to the pump.
-    ///
-    /// Press mode uses a pulse instead of `KEY_DOWN`, so it never emits hold
-    /// edges.
-    pub fn take_press() -> bool {
-        PENDING_PRESS.swap(false, Ordering::SeqCst)
-    }
-
-    /// Sets the virtual-key code for the trigger key.
-    pub fn set_trigger_key(vk: u16) {
-        TRIGGER_VK.store(vk, Ordering::SeqCst);
-    }
-
-    /// Sets the virtual-key code for the Add-to-Anki hotkey.
-    pub fn set_add_hotkey(vk: u16) {
-        ANKI_ADD_VK.store(vk, Ordering::SeqCst);
-    }
-
-    /// Arms or disarms the add-to-Anki hotkey.
-    pub fn set_add_armed(armed: bool) {
-        if ANKI_ADD_ARMED.swap(armed, Ordering::SeqCst) != armed {
-            eprintln!("chibipop: action=set_add_armed armed={armed}");
-        }
-    }
-
-    /// Takes one stored add-to-Anki press.
-    pub fn take_add_hotkey() -> bool {
-        PENDING_ADD.swap(false, Ordering::SeqCst)
-    }
 
     /// Takes only complete wheel notches.
     ///
@@ -863,18 +783,6 @@ impl Hooks {
         (v != NO_POINT).then(|| unpack(v))
     }
 
-    /// Sets the mode that controls the trigger gate.
-    ///
-    /// A mode change clears the physical edge, latch, and pending Press state.
-    /// This prevents a previous mode from delivering an edge after the change.
-    pub fn set_mode(m: TriggerMode) {
-        let mode = mode_to_u8(m);
-        if MODE.swap(mode, Ordering::SeqCst) != mode {
-            KEY_DOWN.store(false, Ordering::SeqCst);
-            TRIGGER_PHYSICAL.store(false, Ordering::SeqCst);
-            PENDING_PRESS.store(false, Ordering::SeqCst);
-        }
-    }
 
     /// Takes the stored candidate point.
     ///
@@ -885,6 +793,13 @@ impl Hooks {
             None
         } else {
             Some(unpack(v))
+        }
+    }
+
+    /// Arms or disarms configured Anki-add keys.
+    pub fn set_add_armed(armed: bool) {
+        if ADD_ARMED.swap(armed, Ordering::SeqCst) != armed {
+            eprintln!("chibipop: action=set_add_armed armed={armed}");
         }
     }
 
@@ -906,9 +821,6 @@ impl Hooks {
 
     /// Uses a polled fallback for the movement gate.
     pub fn poll_gate(p: PhysPoint) -> bool {
-        if !mode_currently_eligible() {
-            return false;
-        }
         let last = LAST_ACCEPTED.load(Ordering::SeqCst);
         let open = last == NO_POINT || {
             let lp = unpack(last);
@@ -922,28 +834,68 @@ impl Hooks {
         open
     }
 
-    /// Sets one action hotkey slot.
-    pub fn set_action_hotkey(slot: usize, vk: u16, modifiers: u8) {
-        if slot < MAX_ACTION_SLOTS {
-            if slot == SELECTED_TEXT_SLOT { PENDING_ACTION[slot].store(false, Ordering::SeqCst); }
-            ACTION_DOWN[slot].store(false, Ordering::SeqCst);
-            ACTION_VK[slot].store(vk, Ordering::SeqCst);
-            ACTION_MODS[slot].store(modifiers, Ordering::SeqCst);
+    /// Replaces the Windows chord table, drops queued activations, and keeps queued lookup releases.
+    pub fn set_configured_binds(binds: &[crate::config::Bind]) {
+        let mut state = CONFIGURED_BINDS.lock().unwrap_or_else(|e| e.into_inner());
+        let mut held: Vec<_> = state
+            .binds
+            .drain(..)
+            .filter(|bind| {
+                bind.down
+                    && bind.action == crate::config::BindAction::Lookup
+                    && bind.mode == TriggerMode::HoldKey
+            })
+            .collect();
+        state
+            .pending
+            .retain(|edge| edge.action == crate::config::BindAction::Lookup && !edge.down);
+        state.pending.reserve(binds.len().saturating_mul(2));
+        state.binds.reserve(binds.len() + held.len());
+        for bind in binds.iter().filter(|bind| bind.enabled) {
+            let Some((vk, modifiers)) = bind.windows_key() else {
+                continue;
+            };
+            if vk == 0 || vk >= PHYSICAL_KEYS.len() as u16 {
+                continue;
+            }
+            let carried = held.iter().position(|old| {
+                old.id.as_ref() == bind.id
+                    && old.action == bind.action
+                    && old.mode == bind.mode
+                    && old.vk == vk
+                    && old.modifiers == modifiers
+            });
+            let (down, modifier_sides) = carried
+                .map(|index| {
+                    let old = held.swap_remove(index);
+                    (old.down, old.modifier_sides)
+                })
+                .unwrap_or_else(|| (false, physical_modifier_sides(vk)));
+            state.binds.push(HookBind {
+                id: Arc::from(bind.id.as_str()),
+                action: bind.action,
+                mode: bind.mode,
+                vk,
+                modifiers,
+                down,
+                modifier_sides,
+                retired: false,
+            });
+        }
+        for mut bind in held {
+            bind.retired = true;
+            state.binds.push(bind);
         }
     }
 
-    /// Takes one stored action for a slot.
-    pub fn take_action_hotkey(slot: usize) -> bool {
-        if slot < MAX_ACTION_SLOTS {
-            PENDING_ACTION[slot].swap(false, Ordering::SeqCst)
-        } else {
-            false
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn record_action_hotkey_for_test(vk: u16, modifiers: u8) -> bool {
-        action_hotkey_hit(true, vk, modifiers)
+    /// Takes all configured action edges in callback order.
+    pub fn take_configured_binds() -> Vec<BindEvent> {
+        CONFIGURED_BINDS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .pending
+            .drain(..)
+            .collect()
     }
 
     /// Sets the Region selector state.
@@ -963,7 +915,6 @@ impl Drop for Hooks {
             .unwrap_or_else(|e| e.into_inner())
             .clear();
         PENDING_POINTER_MOVE.store(NO_POINT, Ordering::SeqCst);
-        ANKI_ADD_ARMED.store(false, Ordering::SeqCst);
         BACK_ARMED.store(false, Ordering::SeqCst);
         let posted = stop_hook_thread(self.thread_id);
         if let Some(worker) = self.worker.take() {
@@ -1025,78 +976,29 @@ mod tests {
         POINTER_STATE.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// The tests share trigger transition state.
-    static TRIGGER_STATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    static KEYBOARD_STATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    pub(super) fn trigger_guard() -> std::sync::MutexGuard<'static, ()> {
-        TRIGGER_STATE.lock().unwrap_or_else(|e| e.into_inner())
-    }
-
-    #[test]
-    fn toggle_transitions_latch_and_reset_gate_on_toggle_off() {
-        let _g = trigger_guard();
-        KEY_DOWN.store(false, Ordering::SeqCst);
-        TRIGGER_PHYSICAL.store(false, Ordering::SeqCst);
-        LAST_ACCEPTED.store(1, Ordering::SeqCst);
-        PENDING.store(2, Ordering::SeqCst);
-
-        transition_trigger_state(true, false, TriggerMode::Toggle);
-        assert!(Hooks::trigger_held());
-        transition_trigger_state(false, false, TriggerMode::Toggle);
-        assert!(Hooks::trigger_held());
-        assert_eq!(1, LAST_ACCEPTED.load(Ordering::SeqCst));
-        assert_eq!(2, PENDING.load(Ordering::SeqCst));
-
-        transition_trigger_state(true, false, TriggerMode::Toggle);
-        assert!(!Hooks::trigger_held());
-        assert_eq!(NO_POINT, LAST_ACCEPTED.load(Ordering::SeqCst));
-        assert_eq!(NO_POINT, PENDING.load(Ordering::SeqCst));
-        transition_trigger_state(false, false, TriggerMode::Toggle);
-    }
-
-    #[test]
-    fn toggle_ignores_repeated_key_down_without_release() {
-        let _g = trigger_guard();
-        KEY_DOWN.store(false, Ordering::SeqCst);
-        TRIGGER_PHYSICAL.store(false, Ordering::SeqCst);
-
-        transition_trigger_state(true, false, TriggerMode::Toggle);
-        transition_trigger_state(true, false, TriggerMode::Toggle);
-        assert!(Hooks::trigger_held());
-
-        transition_trigger_state(false, false, TriggerMode::Toggle);
-    }
-
-    #[test]
-    fn hold_key_transitions_follow_press_and_release() {
-        let _g = trigger_guard();
-        KEY_DOWN.store(false, Ordering::SeqCst);
-        TRIGGER_PHYSICAL.store(false, Ordering::SeqCst);
-
-        transition_trigger_state(true, false, TriggerMode::HoldKey);
-        assert!(Hooks::trigger_held());
-        transition_trigger_state(false, false, TriggerMode::HoldKey);
-        assert!(!Hooks::trigger_held());
-    }
-
-    #[test]
-    fn press_transitions_queue_one_edge_without_latching() {
-        let _g = trigger_guard();
-        KEY_DOWN.store(false, Ordering::SeqCst);
-        TRIGGER_PHYSICAL.store(false, Ordering::SeqCst);
-        PENDING_PRESS.store(false, Ordering::SeqCst);
-
-        transition_trigger_state(true, false, TriggerMode::Press);
-        assert!(Hooks::take_press());
-        assert!(!Hooks::take_press());
-        assert!(!Hooks::trigger_held());
-
-        transition_trigger_state(true, false, TriggerMode::Press);
-        assert!(!Hooks::take_press(), "autorepeat must not queue another press");
-
-        transition_trigger_state(false, false, TriggerMode::Press);
-        assert!(!Hooks::take_press(), "release must not queue a press");
-        assert!(!TRIGGER_PHYSICAL.load(Ordering::SeqCst));
+    pub(super) fn keyboard_guard() -> std::sync::MutexGuard<'static, ()> {
+        let guard = KEYBOARD_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        for key in &PHYSICAL_KEYS {
+            key.store(false, Ordering::SeqCst);
+        }
+        for key in &SELECTED_TEXT_SWALLOWED_KEYS {
+            key.store(false, Ordering::SeqCst);
+        }
+        ESCAPE_DOWN.store(false, Ordering::SeqCst);
+        BACK_ARMED.store(false, Ordering::SeqCst);
+        ADD_ARMED.store(false, Ordering::SeqCst);
+        for key in &ADD_SWALLOWED_KEYS {
+            key.store(false, Ordering::SeqCst);
+        }
+        SELECTION_ACTIVE.store(false, Ordering::SeqCst);
+        clear_keyboard_actions();
+        let mut state = CONFIGURED_BINDS.lock().unwrap_or_else(|e| e.into_inner());
+        state.binds.clear();
+        state.pending.clear();
+        drop(state);
+        guard
     }
 
     #[test]
@@ -1279,42 +1181,49 @@ mod tests {
     }
 
     #[test]
-    fn matches_trigger_exact_vk() {
-        assert!(matches_trigger(0x10, 0x10));
-        assert!(matches_trigger(0x70, 0x70));
+    fn configured_modifier_keys_match_both_physical_sides() {
+        for (generic, left, right) in [(0x10, 0xA0, 0xA1), (0x11, 0xA2, 0xA3), (0x12, 0xA4, 0xA5)] {
+            assert!(bind_key_matches(left, generic));
+            assert!(bind_key_matches(right, generic));
+            assert_eq!(Some(1), modifier_side(left, generic));
+            assert_eq!(Some(2), modifier_side(right, generic));
+        }
+        assert!(bind_key_matches(0x70, 0x70));
+        assert!(!bind_key_matches(0x41, 0x10));
+        assert_eq!(None, modifier_side(0x70, 0x70));
     }
 
     #[test]
-    fn matches_trigger_shift_variants() {
-        // These values are the `VK_LSHIFT` and `VK_RSHIFT` virtual-key codes.
-        assert!(matches_trigger(0xA0, 0x10));
-        assert!(matches_trigger(0xA1, 0x10));
-    }
+    fn a_modifier_key_bind_does_not_count_its_own_key_as_a_chord_modifier() {
+        let _guard = keyboard_guard();
+        let bind = configured_bind(
+            "search-control",
+            crate::config::BindAction::Search,
+            "Ctrl",
+            TriggerMode::Press,
+        );
+        Hooks::set_configured_binds(std::slice::from_ref(&bind));
 
-    #[test]
-    fn matches_trigger_ctrl_variants() {
-        assert!(matches_trigger(0xA2, 0x11));
-        assert!(matches_trigger(0xA3, 0x11));
+        assert!(!action_hotkey_hit(true, 0xA2, crate::config::MOD_CTRL));
+        assert_eq!(
+            vec![BindEvent { id: Arc::from("search-control"), action: crate::config::BindAction::Search, down: true }],
+            Hooks::take_configured_binds(),
+        );
+        assert!(!action_hotkey_hit(false, 0xA2, 0));
+        let side_bind = configured_bind(
+            "search-left-control",
+            crate::config::BindAction::Search,
+            "0xA2",
+            TriggerMode::Press,
+        );
+        Hooks::set_configured_binds(std::slice::from_ref(&side_bind));
+        assert!(!action_hotkey_hit(true, 0xA2, crate::config::MOD_CTRL));
+        assert_eq!(
+            vec![BindEvent { id: Arc::from("search-left-control"), action: crate::config::BindAction::Search, down: true }],
+            Hooks::take_configured_binds(),
+        );
+        Hooks::set_configured_binds(&[]);
     }
-
-    #[test]
-    fn matches_trigger_alt_variants() {
-        assert!(matches_trigger(0xA4, 0x12));
-        assert!(matches_trigger(0xA5, 0x12));
-    }
-
-    #[test]
-    fn matches_trigger_unrelated_vk() {
-        assert!(!matches_trigger(0x41, 0x10));
-        assert!(!matches_trigger(0x70, 0x10));
-    }
-
-    #[test]
-    fn matches_trigger_arbitrary_letter_key() {
-        assert!(matches_trigger(0x41, 0x41));
-        assert!(!matches_trigger(0x42, 0x41));
-    }
-
     #[test]
     fn modifier_variants_known() {
         assert_eq!(Some((0xA0, 0xA1)), modifier_variants(0x10));
@@ -1327,201 +1236,452 @@ mod tests {
         assert_eq!(None, modifier_variants(0x70));
     }
 
-    // ---- add-to-anki hotkey ----
 
-    /// The tests share the hotkey state.
-    static ADD_HOTKEY_STATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    fn configured_bind(
+        id: &str,
+        action: crate::config::BindAction,
+        chord: &str,
+        mode: TriggerMode,
+    ) -> crate::config::Bind {
+        let mut bind = crate::config::Bind::new(id.to_string(), action);
+        bind.windows = chord.to_string();
+        bind.mode = mode;
+        bind
+    }
+    #[test]
+    fn a_held_lookup_modifier_stays_owned_until_both_sides_are_up() {
+        let _guard = keyboard_guard();
+        let bind = configured_bind(
+            "lookup-control",
+            crate::config::BindAction::Lookup,
+            "Ctrl",
+            TriggerMode::HoldKey,
+        );
+        Hooks::set_configured_binds(std::slice::from_ref(&bind));
 
-    pub(super) fn add_hotkey_guard() -> std::sync::MutexGuard<'static, ()> {
-        ADD_HOTKEY_STATE.lock().unwrap_or_else(|e| e.into_inner())
+        assert!(!action_hotkey_hit(true, 0xA2, 0));
+        assert_eq!(
+            vec![BindEvent { id: Arc::from("lookup-control"), action: crate::config::BindAction::Lookup, down: true }],
+            Hooks::take_configured_binds(),
+        );
+        assert!(!action_hotkey_hit(true, 0xA3, crate::config::MOD_CTRL));
+        assert!(Hooks::take_configured_binds().is_empty());
+        assert!(!action_hotkey_hit(false, 0xA2, crate::config::MOD_CTRL));
+        assert!(Hooks::take_configured_binds().is_empty());
+        assert!(!action_hotkey_hit(false, 0xA3, crate::config::MOD_CTRL));
+        assert_eq!(
+            vec![BindEvent { id: Arc::from("lookup-control"), action: crate::config::BindAction::Lookup, down: false }],
+            Hooks::take_configured_binds(),
+        );
     }
 
     #[test]
-    fn search_focus_clears_held_trigger_and_pending_actions() {
-        let _trigger = trigger_guard();
-        let _actions = add_hotkey_guard();
-        let _back = back_guard();
-        KEY_DOWN.store(true, Ordering::SeqCst);
-        TRIGGER_PHYSICAL.store(true, Ordering::SeqCst);
-        PENDING_PRESS.store(true, Ordering::SeqCst);
-        PENDING_ADD.store(true, Ordering::SeqCst);
-        PENDING_BACK.store(true, Ordering::SeqCst);
-        for pending in &PENDING_ACTION { pending.store(true, Ordering::SeqCst); }
-        clear_keyboard_actions();
-        for state in [&KEY_DOWN, &TRIGGER_PHYSICAL, &PENDING_PRESS, &PENDING_ADD, &PENDING_BACK] {
-            assert!(!state.load(Ordering::SeqCst));
+    fn a_rebound_modifier_bind_does_not_claim_an_already_held_chord() {
+        let _guard = keyboard_guard();
+        PHYSICAL_KEYS[0xA2].store(true, Ordering::SeqCst);
+        let bind = configured_bind(
+            "search-control",
+            crate::config::BindAction::Search,
+            "Ctrl",
+            TriggerMode::Press,
+        );
+        Hooks::set_configured_binds(std::slice::from_ref(&bind));
+
+        assert!(!action_hotkey_hit(true, 0xA3, crate::config::MOD_CTRL));
+        assert!(Hooks::take_configured_binds().is_empty());
+        assert!(!action_hotkey_hit(false, 0xA2, crate::config::MOD_CTRL));
+        assert!(!action_hotkey_hit(false, 0xA3, 0));
+        assert!(!action_hotkey_hit(true, 0xA2, 0));
+        assert_eq!(
+            vec![BindEvent { id: Arc::from("search-control"), action: crate::config::BindAction::Search, down: true }],
+            Hooks::take_configured_binds(),
+        );
+    }
+
+    #[test]
+    fn displaced_lookup_release_keeps_its_original_bind_id() {
+        let _guard = keyboard_guard();
+        let first = configured_bind(
+            "lookup-first",
+            crate::config::BindAction::Lookup,
+            "F6",
+            TriggerMode::HoldKey,
+        );
+        let second = configured_bind(
+            "lookup-second",
+            crate::config::BindAction::Lookup,
+            "F7",
+            TriggerMode::HoldKey,
+        );
+        Hooks::set_configured_binds(&[first, second]);
+
+        assert!(!action_hotkey_hit(true, 0x75, 0));
+        assert!(!action_hotkey_hit(true, 0x76, 0));
+        assert_eq!(
+            vec![
+                BindEvent { id: Arc::from("lookup-first"), action: crate::config::BindAction::Lookup, down: true },
+                BindEvent { id: Arc::from("lookup-second"), action: crate::config::BindAction::Lookup, down: true },
+            ],
+            Hooks::take_configured_binds(),
+        );
+        assert!(!action_hotkey_hit(false, 0x75, 0));
+        assert_eq!(
+            vec![BindEvent { id: Arc::from("lookup-first"), action: crate::config::BindAction::Lookup, down: false }],
+            Hooks::take_configured_binds(),
+        );
+        assert!(!action_hotkey_hit(false, 0x76, 0));
+        assert_eq!(
+            vec![BindEvent { id: Arc::from("lookup-second"), action: crate::config::BindAction::Lookup, down: false }],
+            Hooks::take_configured_binds(),
+        );
+    }
+
+    #[test]
+    fn configured_binds_are_dynamic_and_fire_once_per_physical_press() {
+        let _guard = keyboard_guard();
+        PHYSICAL_KEYS[0x53].store(false, Ordering::SeqCst);
+        let mut binds: Vec<_> = (0..12)
+            .map(|index| configured_bind(
+                &format!("bind-{index}"),
+                crate::config::BindAction::Search,
+                "",
+                TriggerMode::Press,
+            ))
+            .collect();
+        binds[11].windows = "Ctrl+S".into();
+        Hooks::set_configured_binds(&binds);
+
+        assert!(!action_hotkey_hit(true, 0x53, 0));
+        assert!(Hooks::take_configured_binds().is_empty());
+        assert!(!action_hotkey_hit(false, 0x53, 0));
+        assert!(!action_hotkey_hit(
+            true,
+            0x53,
+            crate::config::MOD_CTRL | crate::config::MOD_SHIFT,
+        ));
+        assert!(Hooks::take_configured_binds().is_empty());
+        assert!(!action_hotkey_hit(false, 0x53, 0));
+        assert!(!action_hotkey_hit(true, 0x53, crate::config::MOD_CTRL));
+        assert_eq!(
+            vec![BindEvent {
+                id: Arc::from("bind-11"),
+                action: crate::config::BindAction::Search,
+                down: true,
+            }],
+            Hooks::take_configured_binds(),
+        );
+        assert!(!action_hotkey_hit(true, 0x53, crate::config::MOD_CTRL));
+        assert!(Hooks::take_configured_binds().is_empty());
+        assert!(!action_hotkey_hit(false, 0x53, 0));
+        assert!(!action_hotkey_hit(true, 0x53, crate::config::MOD_CTRL));
+        assert_eq!(1, Hooks::take_configured_binds().len());
+
+        Hooks::set_configured_binds(&[]);
+        PHYSICAL_KEYS[0x53].store(false, Ordering::SeqCst);
+    }
+
+    #[test]
+    fn anki_add_keys_pass_through_unarmed_and_stay_consumed_through_release() {
+        let _guard = keyboard_guard();
+        let bind = configured_bind(
+            "anki-add",
+            crate::config::BindAction::AnkiAdd,
+            "A",
+            TriggerMode::Press,
+        );
+        Hooks::set_configured_binds(std::slice::from_ref(&bind));
+
+        Hooks::set_add_armed(false);
+        assert!(!action_hotkey_hit(true, 0x41, 0));
+        assert!(!add_key_swallowed(true, 0x41));
+        assert!(Hooks::take_configured_binds().is_empty());
+        assert!(!action_hotkey_hit(false, 0x41, 0));
+        assert!(!add_key_swallowed(false, 0x41));
+
+        Hooks::set_add_armed(true);
+        assert!(!action_hotkey_hit(true, 0x41, 0));
+        assert!(add_key_swallowed(true, 0x41));
+        assert!(!action_hotkey_hit(true, 0x41, 0));
+        assert!(add_key_swallowed(true, 0x41));
+        Hooks::set_add_armed(false);
+        assert!(!action_hotkey_hit(false, 0x41, 0));
+        assert!(add_key_swallowed(false, 0x41));
+        assert!(!add_key_swallowed(false, 0x41));
+        assert_eq!(
+            vec![BindEvent { id: Arc::from("anki-add"), action: crate::config::BindAction::AnkiAdd, down: true }],
+            Hooks::take_configured_binds(),
+        );
+        Hooks::set_configured_binds(&[]);
+    }
+
+    #[test]
+    fn lookup_hold_release_survives_rebind_and_keeps_its_identity() {
+        let _guard = keyboard_guard();
+        PHYSICAL_KEYS[0x75].store(false, Ordering::SeqCst);
+        let bind = configured_bind(
+            "lookup-old",
+            crate::config::BindAction::Lookup,
+            "F6",
+            TriggerMode::HoldKey,
+        );
+        Hooks::set_configured_binds(std::slice::from_ref(&bind));
+        assert!(!action_hotkey_hit(true, 0x75, 0));
+        assert_eq!(
+            vec![BindEvent {
+                id: Arc::from("lookup-old"),
+                action: crate::config::BindAction::Lookup,
+                down: true,
+            }],
+            Hooks::take_configured_binds(),
+        );
+
+        Hooks::set_configured_binds(&[]);
+        assert!(!action_hotkey_hit(false, 0x75, 0));
+        assert_eq!(
+            vec![BindEvent {
+                id: Arc::from("lookup-old"),
+                action: crate::config::BindAction::Lookup,
+                down: false,
+            }],
+            Hooks::take_configured_binds(),
+        );
+        assert!(!action_hotkey_hit(true, 0x75, 0), "a retired bind cannot activate again");
+        assert!(Hooks::take_configured_binds().is_empty());
+        Hooks::set_configured_binds(&[]);
+        PHYSICAL_KEYS[0x75].store(false, Ordering::SeqCst);
+    }
+
+    #[test]
+    fn bind_replacement_keeps_queued_lookup_release_and_drops_queued_activation() {
+        let _guard = keyboard_guard();
+        PHYSICAL_KEYS[0x75].store(false, Ordering::SeqCst);
+        PHYSICAL_KEYS[0x76].store(false, Ordering::SeqCst);
+        let lookup = configured_bind(
+            "lookup",
+            crate::config::BindAction::Lookup,
+            "F6",
+            TriggerMode::HoldKey,
+        );
+        let search = configured_bind(
+            "search",
+            crate::config::BindAction::Search,
+            "F7",
+            TriggerMode::Press,
+        );
+        Hooks::set_configured_binds(&[lookup, search]);
+        assert!(!action_hotkey_hit(true, 0x75, 0));
+        assert_eq!(
+            vec![BindEvent {
+                id: Arc::from("lookup"),
+                action: crate::config::BindAction::Lookup,
+                down: true,
+            }],
+            Hooks::take_configured_binds(),
+        );
+
+        assert!(!action_hotkey_hit(false, 0x75, 0));
+        assert!(!action_hotkey_hit(true, 0x76, 0));
+        Hooks::set_configured_binds(&[]);
+        assert_eq!(
+            vec![BindEvent {
+                id: Arc::from("lookup"),
+                action: crate::config::BindAction::Lookup,
+                down: false,
+            }],
+            Hooks::take_configured_binds(),
+        );
+        PHYSICAL_KEYS[0x75].store(false, Ordering::SeqCst);
+        PHYSICAL_KEYS[0x76].store(false, Ordering::SeqCst);
+    }
+
+    #[test]
+    fn a_mode_change_keeps_the_displaced_hold_release() {
+        let _guard = keyboard_guard();
+        PHYSICAL_KEYS[0x75].store(false, Ordering::SeqCst);
+        let hold = configured_bind(
+            "lookup",
+            crate::config::BindAction::Lookup,
+            "F6",
+            TriggerMode::HoldKey,
+        );
+        let press = configured_bind(
+            "lookup",
+            crate::config::BindAction::Lookup,
+            "F6",
+            TriggerMode::Press,
+        );
+        Hooks::set_configured_binds(std::slice::from_ref(&hold));
+        assert!(!action_hotkey_hit(true, 0x75, 0));
+        assert_eq!(1, Hooks::take_configured_binds().len());
+
+        Hooks::set_configured_binds(std::slice::from_ref(&press));
+        assert!(!action_hotkey_hit(false, 0x75, 0));
+        assert_eq!(
+            vec![BindEvent {
+                id: Arc::from("lookup"),
+                action: crate::config::BindAction::Lookup,
+                down: false,
+            }],
+            Hooks::take_configured_binds(),
+        );
+        Hooks::set_configured_binds(&[]);
+        PHYSICAL_KEYS[0x75].store(false, Ordering::SeqCst);
+    }
+
+    #[test]
+    fn a_held_key_does_not_retrigger_after_bind_table_replacement() {
+        let _guard = keyboard_guard();
+        PHYSICAL_KEYS[0x74].store(false, Ordering::SeqCst);
+        let bind = configured_bind(
+            "search",
+            crate::config::BindAction::Search,
+            "F5",
+            TriggerMode::Press,
+        );
+        Hooks::set_configured_binds(std::slice::from_ref(&bind));
+        assert!(!action_hotkey_hit(true, 0x74, 0));
+        assert_eq!(1, Hooks::take_configured_binds().len());
+
+        Hooks::set_configured_binds(std::slice::from_ref(&bind));
+        assert!(!action_hotkey_hit(true, 0x74, 0));
+        assert!(Hooks::take_configured_binds().is_empty());
+        assert!(!action_hotkey_hit(false, 0x74, 0));
+        assert!(!action_hotkey_hit(true, 0x74, 0));
+        assert_eq!(1, Hooks::take_configured_binds().len());
+
+        Hooks::set_configured_binds(&[]);
+        PHYSICAL_KEYS[0x74].store(false, Ordering::SeqCst);
+    }
+
+    #[test]
+    fn selected_text_consumes_repeats_and_release_after_rebinding() {
+        let _guard = keyboard_guard();
+        let bind = configured_bind(
+            "selected",
+            crate::config::BindAction::SelectedText,
+            "Ctrl+G",
+            TriggerMode::Press,
+        );
+        Hooks::set_configured_binds(std::slice::from_ref(&bind));
+
+        let matched = action_hotkey_hit(true, 0x47, crate::config::MOD_CTRL);
+        assert!(selected_text_key(true, 0x47, true, matched));
+        assert!(selected_text_key(true, 0x47, false, false));
+        Hooks::set_configured_binds(&[]);
+        assert!(Hooks::take_configured_binds().is_empty());
+        assert!(!action_hotkey_hit(false, 0x47, 0));
+        assert!(selected_text_key(false, 0x47, false, false));
+        assert!(!selected_text_key(false, 0x47, false, false));
+
+        PHYSICAL_KEYS[0x47].store(false, Ordering::SeqCst);
+    }
+
+    #[test]
+    fn overlapping_selected_text_keys_stay_swallowed_until_each_release() {
+        let _guard = keyboard_guard();
+        let binds = [
+            configured_bind(
+                "selected-g",
+                crate::config::BindAction::SelectedText,
+                "Ctrl+G",
+                TriggerMode::Press,
+            ),
+            configured_bind(
+                "selected-h",
+                crate::config::BindAction::SelectedText,
+                "Ctrl+H",
+                TriggerMode::Press,
+            ),
+        ];
+        Hooks::set_configured_binds(&binds);
+
+        for release_order in [[0x47, 0x48], [0x48, 0x47]] {
+            for vk in [0x47, 0x48] {
+                let matched = action_hotkey_hit(true, vk, crate::config::MOD_CTRL);
+                assert!(selected_text_key(true, vk, true, matched));
+            }
+            for vk in [0x47, 0x48] {
+                assert!(!action_hotkey_hit(true, vk, crate::config::MOD_CTRL));
+                assert!(selected_text_key(true, vk, false, false), "repeats stay swallowed");
+            }
+            for vk in release_order {
+                assert!(!action_hotkey_hit(false, vk, 0));
+                assert!(selected_text_key(false, vk, false, false), "each release stays swallowed");
+            }
+            assert!(!selected_text_key(false, 0x47, false, false));
+            assert!(!selected_text_key(false, 0x48, false, false));
         }
-        assert!(PENDING_ACTION.iter().all(|pending| !pending.load(Ordering::SeqCst)));
-    }
-
-    #[test]
-    fn add_hotkey_hit_requires_a_keydown() {
-        let _g = add_hotkey_guard();
-        Hooks::set_add_hotkey(0x41);
-        Hooks::set_add_armed(true);
-        assert!(!add_hotkey_hit(false, 0x41), "a keyup must not fire");
-        Hooks::set_add_armed(false);
-    }
-
-    #[test]
-    fn add_hotkey_hit_requires_the_configured_vk() {
-        let _g = add_hotkey_guard();
-        Hooks::set_add_hotkey(0x41);
-        Hooks::set_add_armed(true);
-        assert!(!add_hotkey_hit(true, 0x42), "the wrong key must not fire");
-        assert!(add_hotkey_hit(true, 0x41));
-        Hooks::set_add_armed(false);
-    }
-
-    #[test]
-    fn add_hotkey_hit_requires_arming() {
-        let _g = add_hotkey_guard();
-        Hooks::set_add_hotkey(0x41);
-        Hooks::set_add_armed(false);
-        assert!(!add_hotkey_hit(true, 0x41), "disarmed must not fire");
-    }
-
-    #[test]
-    fn take_add_hotkey_is_a_one_shot_swap() {
-        let _g = add_hotkey_guard();
-        PENDING_ADD.store(true, Ordering::SeqCst);
-        assert!(Hooks::take_add_hotkey());
-        assert!(!Hooks::take_add_hotkey(), "a second take sees it cleared");
-    }
-
-    /// Exercises the real `KBDLLHOOKSTRUCT`.
-    #[test]
-    fn record_key_state_arms_pending_for_the_add_key() {
-        let _g = add_hotkey_guard();
-        Hooks::set_add_hotkey(0x41);
-        Hooks::set_add_armed(true);
-        let _ = Hooks::take_add_hotkey();
-
-        let data = KBDLLHOOKSTRUCT {
-            vkCode: 0x41,
-            ..Default::default()
-        };
-        let lparam = LPARAM(&data as *const KBDLLHOOKSTRUCT as isize);
-        // SAFETY: `data` is a live, aligned `KBDLLHOOKSTRUCT` on this stack
-        // frame for the whole call. This matches the contract that
-        // `record_key_state` receives from the real `WH_KEYBOARD_LL` hook.
-        unsafe { record_key_state(WPARAM(WM_KEYDOWN as usize), lparam) };
-
-        assert!(Hooks::take_add_hotkey());
-        Hooks::set_add_armed(false);
-    }
-
-    /// A different key must not arm the hotkey.
-    #[test]
-    fn record_key_state_ignores_an_unrelated_key() {
-        let _g = add_hotkey_guard();
-        Hooks::set_add_hotkey(0x41);
-        Hooks::set_add_armed(true);
-        let _ = Hooks::take_add_hotkey();
-
-        let data = KBDLLHOOKSTRUCT {
-            vkCode: 0x42,
-            ..Default::default()
-        };
-        let lparam = LPARAM(&data as *const KBDLLHOOKSTRUCT as isize);
-        // SAFETY: This test uses the same contract as the test above.
-        unsafe { record_key_state(WPARAM(WM_KEYDOWN as usize), lparam) };
-
-        assert!(!Hooks::take_add_hotkey(), "a different key must not arm it");
-        Hooks::set_add_armed(false);
-    }
-
-    #[test]
-    fn selected_text_shortcut_consumes_repeats_and_release_after_reconfiguration() {
-        let _guard = add_hotkey_guard();
-        SELECTED_TEXT_SWALLOWED.store(0, Ordering::SeqCst);
-        Hooks::set_action_hotkey(SELECTED_TEXT_SLOT, 0x47, crate::config::MOD_CTRL);
-        assert!(!selected_text_key(true, 0x47, 0, true));
-        assert!(!selected_text_key(true, 0x47, crate::config::MOD_CTRL, false));
-        assert!(selected_text_key(true, 0x47, crate::config::MOD_CTRL, true));
-        assert!(action_hotkey_hit(true, 0x47, crate::config::MOD_CTRL));
-        assert!(Hooks::take_action_hotkey(SELECTED_TEXT_SLOT));
-        assert!(selected_text_key(true, 0x47, 0, false));
-        assert!(!action_hotkey_hit(true, 0x47, 0));
-        Hooks::set_action_hotkey(SELECTED_TEXT_SLOT, 0, 0);
-        assert!(selected_text_key(false, 0x47, 0, false));
-        assert!(!selected_text_key(false, 0x47, 0, false));
-        assert!(!selected_text_key(true, 0x47, 0, true));
-    }
-
-    #[test]
-    fn selected_text_rebinding_discards_queued_capture() {
-        let _guard = add_hotkey_guard();
-        Hooks::set_action_hotkey(SELECTED_TEXT_SLOT, 0x47, 0);
-        assert!(action_hotkey_hit(true, 0x47, 0));
-        Hooks::set_action_hotkey(SELECTED_TEXT_SLOT, 0, 0);
-        assert!(!Hooks::take_action_hotkey(SELECTED_TEXT_SLOT));
-    }
-
-    #[test]
-    fn action_hotkey_fires_on_matching_key_and_mods() {
-        let _g = add_hotkey_guard();
-        Hooks::set_action_hotkey(0, 0x53, 0b011);
-        let _ = Hooks::take_action_hotkey(0);
-        assert!(action_hotkey_hit(true, 0x53, 0b011));
-        assert!(Hooks::take_action_hotkey(0));
-    }
-
-    #[test]
-    fn action_hotkey_ignores_wrong_modifiers() {
-        let _g = add_hotkey_guard();
-        Hooks::set_action_hotkey(0, 0x53, 0b011);
-        let _ = Hooks::take_action_hotkey(0);
-        assert!(!action_hotkey_hit(true, 0x53, 0b001));
-        assert!(!Hooks::take_action_hotkey(0));
-    }
-
-    #[test]
-    fn action_hotkey_ignores_wrong_key() {
-        let _g = add_hotkey_guard();
-        Hooks::set_action_hotkey(0, 0x53, 0b011);
-        let _ = Hooks::take_action_hotkey(0);
-        assert!(!action_hotkey_hit(true, 0x41, 0b011));
-        assert!(!Hooks::take_action_hotkey(0));
-    }
-
-    #[test]
-    fn action_hotkey_take_is_one_shot() {
-        let _g = add_hotkey_guard();
-        Hooks::set_action_hotkey(0, 0x53, 0);
-        let _ = Hooks::take_action_hotkey(0);
-        PENDING_ACTION[0].store(true, Ordering::SeqCst);
-        assert!(Hooks::take_action_hotkey(0));
-        assert!(!Hooks::take_action_hotkey(0));
-    }
-
-    #[test]
-    fn action_hotkey_out_of_bounds_returns_false() {
-        assert!(!Hooks::take_action_hotkey(99));
     }
 
     #[test]
     fn selection_active_suppresses_mouse_moves() {
-        let _guard = search_keyboard_test_guard();
+        let _guard = keyboard_guard();
+        LAST_ACCEPTED.store(NO_POINT, Ordering::SeqCst);
+        PENDING.store(NO_POINT, Ordering::SeqCst);
         Hooks::set_selection_active(true);
-        assert!(selection_active());
+        let data = MSLLHOOKSTRUCT { pt: POINT { x: 12, y: 34 }, ..Default::default() };
+        // SAFETY: The test keeps the Win32 hook payload live for the callback.
+        unsafe { record_mouse_move(LPARAM(&data as *const MSLLHOOKSTRUCT as isize)); }
+        assert_eq!(None, Hooks::take_pending());
         Hooks::set_selection_active(false);
-        assert!(!selection_active());
+        // SAFETY: The same live payload is valid for this second callback.
+        unsafe { record_mouse_move(LPARAM(&data as *const MSLLHOOKSTRUCT as isize)); }
+        assert_eq!(Some(PhysPoint { x: 12, y: 34 }), Hooks::take_pending());
+    }
+
+    #[test]
+    fn selection_exit_keeps_hold_release_and_discards_other_keyboard_actions() {
+        for cancelled in [false, true] {
+            let _guard = keyboard_guard();
+            Hooks::set_configured_binds(&[
+                configured_bind("lookup", crate::config::BindAction::Lookup, "F8", TriggerMode::HoldKey),
+                configured_bind("clipboard", crate::config::BindAction::OcrClipboard, "F9", TriggerMode::Press),
+                configured_bind("search", crate::config::BindAction::Search, "F10", TriggerMode::Press),
+            ]);
+            action_hotkey_hit(true, 0x77, 0);
+            assert_eq!(1, Hooks::take_configured_binds().len());
+            action_hotkey_hit(true, 0x78, 0);
+            assert_eq!(1, Hooks::take_configured_binds().len());
+            Hooks::set_back_armed(true);
+            Hooks::set_selection_active(true);
+
+            let mut keys = vec![(0x77, WM_KEYUP), (0x79, WM_KEYDOWN), (0x78, WM_KEYUP)];
+            if cancelled {
+                keys.push((VK_ESCAPE as u32, WM_KEYDOWN));
+            }
+            for (vk, message) in keys {
+                let data = KBDLLHOOKSTRUCT { vkCode: vk, ..Default::default() };
+                // SAFETY: The payload stays live for the hook call.
+                unsafe {
+                    record_key_state(
+                        WPARAM(message as usize),
+                        LPARAM(&data as *const KBDLLHOOKSTRUCT as isize),
+                    );
+                }
+            }
+            Hooks::set_selection_active(false);
+            discard_keyboard_actions();
+            assert_eq!(
+                vec![BindEvent {
+                    id: Arc::from("lookup"),
+                    action: crate::config::BindAction::Lookup,
+                    down: false,
+                }],
+                Hooks::take_configured_binds(),
+                "selection cancellation: {cancelled}",
+            );
+            assert!(!Hooks::take_back());
+            assert!(!Hooks::take_escape());
+            assert!(Hooks::take_configured_binds().is_empty());
+        }
     }
 
     // ---- back (Escape) ----
 
-    static BACK_STATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    pub(super) fn back_guard() -> std::sync::MutexGuard<'static, ()> {
-        let guard = BACK_STATE.lock().unwrap_or_else(|e| e.into_inner());
-        ESCAPE_DOWN.store(false, Ordering::SeqCst);
-        guard
-    }
 
     #[test]
     fn back_requires_arming() {
-        let _g = back_guard();
+        let _g = keyboard_guard();
         Hooks::set_back_armed(false);
         let _ = Hooks::take_back();
 
@@ -1532,7 +1692,7 @@ mod tests {
             ..Default::default()
         };
         let lparam = LPARAM(&data as *const KBDLLHOOKSTRUCT as isize);
-        // SAFETY: This test uses the same contract as the add-hotkey tests.
+        // SAFETY: The test keeps a valid keyboard payload alive for the callback.
         unsafe { record_key_state(WPARAM(WM_KEYDOWN as usize), lparam) };
 
         assert!(!Hooks::take_back());
@@ -1545,62 +1705,32 @@ mod tests {
     }
 
     #[test]
-    fn cancellation_blocks_held_trigger_repeats_until_release() {
-        let _guard = search_keyboard_test_guard();
-        clear_keyboard_actions();
-        transition_trigger_state(true, false, TriggerMode::HoldKey);
-        assert!(KEY_DOWN.load(Ordering::SeqCst));
-        cancel_keyboard_actions();
-        transition_trigger_state(true, false, TriggerMode::HoldKey);
-        assert!(!KEY_DOWN.load(Ordering::SeqCst));
-        transition_trigger_state(false, false, TriggerMode::HoldKey);
-        transition_trigger_state(true, false, TriggerMode::HoldKey);
-        assert!(KEY_DOWN.load(Ordering::SeqCst));
-        clear_keyboard_actions();
-    }
-
-    #[test]
     fn cancellation_blocks_action_repeats_until_release() {
         let _guard = search_keyboard_test_guard();
-        for slot in 0..MAX_ACTION_SLOTS { Hooks::set_action_hotkey(slot, 0, 0); }
-        Hooks::set_action_hotkey(7, 0x79, 0);
-        assert!(action_hotkey_hit(true, 0x79, 0));
-        assert!(Hooks::take_action_hotkey(7));
+        PHYSICAL_KEYS[0x79].store(false, Ordering::SeqCst);
+        let bind = configured_bind(
+            "repeat",
+            crate::config::BindAction::Search,
+            "F10",
+            TriggerMode::Press,
+        );
+        Hooks::set_configured_binds(std::slice::from_ref(&bind));
+        assert!(!action_hotkey_hit(true, 0x79, 0));
+        assert_eq!(1, Hooks::take_configured_binds().len());
         cancel_keyboard_actions();
         assert!(!action_hotkey_hit(true, 0x79, 0));
-        assert!(!Hooks::take_action_hotkey(7));
+        assert!(Hooks::take_configured_binds().is_empty());
         assert!(!action_hotkey_hit(false, 0x79, 0));
-        assert!(action_hotkey_hit(true, 0x79, 0));
-        Hooks::set_action_hotkey(7, 0, 0);
+        assert!(!action_hotkey_hit(true, 0x79, 0));
+        assert_eq!(1, Hooks::take_configured_binds().len());
+        Hooks::set_configured_binds(&[]);
         clear_keyboard_actions();
-    }
-
-    #[test]
-    fn selection_cancellation_preserves_held_lookup_and_observes_release() {
-        let _guard = search_keyboard_test_guard();
-        Hooks::set_mode(TriggerMode::HoldKey);
-        Hooks::set_trigger_key(0x77);
-        clear_keyboard_actions();
-        transition_trigger_state(true, false, TriggerMode::HoldKey);
-        Hooks::set_selection_active(true);
-        let escape = KBDLLHOOKSTRUCT { vkCode: u32::from(VK_ESCAPE), ..Default::default() };
-        let trigger = KBDLLHOOKSTRUCT { vkCode: 0x77, ..Default::default() };
-        // SAFETY: Both hook payloads remain alive for these synchronous calls.
-        unsafe {
-            record_key_state(WPARAM(WM_KEYDOWN as usize), LPARAM(&escape as *const _ as isize));
-            assert!(KEY_DOWN.load(Ordering::SeqCst));
-            assert!(!Hooks::take_escape());
-            record_key_state(WPARAM(WM_KEYUP as usize), LPARAM(&trigger as *const _ as isize));
-        }
-        Hooks::set_selection_active(false);
-        assert!(!KEY_DOWN.load(Ordering::SeqCst));
-        assert!(!TRIGGER_PHYSICAL.load(Ordering::SeqCst));
-        clear_keyboard_actions();
+        PHYSICAL_KEYS[0x79].store(false, Ordering::SeqCst);
     }
 
     #[test]
     fn back_fires_on_escape_when_armed() {
-        let _g = back_guard();
+        let _g = keyboard_guard();
         Hooks::set_back_armed(true);
         let _ = Hooks::take_back();
 
@@ -1609,7 +1739,7 @@ mod tests {
             ..Default::default()
         };
         let lparam = LPARAM(&data as *const KBDLLHOOKSTRUCT as isize);
-        // SAFETY: This test uses the same contract as the add-hotkey tests.
+        // SAFETY: The test keeps a valid keyboard payload alive for the callback.
         unsafe { record_key_state(WPARAM(WM_KEYDOWN as usize), lparam) };
 
         assert!(Hooks::take_back());
@@ -1619,7 +1749,7 @@ mod tests {
 
     #[test]
     fn back_ignores_non_escape_keys() {
-        let _g = back_guard();
+        let _g = keyboard_guard();
         Hooks::set_back_armed(true);
         let _ = Hooks::take_back();
 
@@ -1628,7 +1758,7 @@ mod tests {
             ..Default::default()
         };
         let lparam = LPARAM(&data as *const KBDLLHOOKSTRUCT as isize);
-        // SAFETY: This test uses the same contract as the add-hotkey tests.
+        // SAFETY: The test keeps a valid keyboard payload alive for the callback.
         unsafe { record_key_state(WPARAM(WM_KEYDOWN as usize), lparam) };
 
         assert!(!Hooks::take_back());

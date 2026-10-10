@@ -130,21 +130,17 @@ Worker: capture -> mask -> OCR -> lookup -> present --result--> Controller
   platform is unsupported. A startup diagnostic names the missing capability.
 - Trigger rungs: the GlobalShortcuts portal, then a native compositor keybind into the
   control socket.
-- The portal shortcut identifiers are `trigger`, `anki-add`, `search`, `sentence-search`,
-  `selected-text`, `ocr-clipboard`, and `static-region`. Register only enabled actions with configured chords.
+- Portal shortcut identifiers are enabled configured Bind IDs.
+  Register only Binds with configured chords.
 - Hyprland uses native compositor bindings because its portal does not assign keys.
-- Apply replaces changed portal registrations without a daemon restart. Retired sessions cannot fire actions.
-- Each settings row reports its confirmed portal binding or copies a native bind with `chibipop ctl`.
-- The system rejects evdev completely, even as a setting.
-- `keyboard_interactivity: none` is a strict rule. The popup never takes focus.
-- The control-socket verb set has one verb for each global action. It has `lookup` for Press
-  mode. A verb exists only if a user can bind a key to it. No verb reads state, takes an
-  argument, or composes.
-- A portal press event and its native-bind verb use one code path.
-  `shortcuts::action` maps the identifier and trigger mode to a `Verb`. In Toggle mode,
-  it maps the trigger identifier to the `toggle` verb. In Press mode, it maps an activated
-  trigger identifier to the `lookup` verb and a release to `Action::Nothing`.
-  `App::apply_verb` is the only target function.
+- Apply replaces changed portal registrations without a daemon restart.
+  Retired sessions cannot fire actions.
+- Each settings row reports its confirmed portal binding or copies a native
+  `bind-down ID` or `bind-up ID` command.
+- The fixed control-socket verbs remain supported for compatibility.
+  Configured Bind IDs use `bind-down` and `bind-up`.
+- A portal event and its native Bind command use one action path.
+  `shortcuts::action` maps the Bind ID and trigger mode to that path.
 
 ## Popup and measurement
 
@@ -226,15 +222,17 @@ Worker: capture -> mask -> OCR -> lookup -> present --result--> Controller
   drives dispatch.
 - It has no settle delay and no velocity gate.
 - The damage-gated dwell re-check runs only while a popup is visible.
-- At key press in hold-key mode, the system freezes one full grab of the output under the cursor
-  before any popup exists. No capture and no mask run while the user holds the key.
-- Release drops the Frozen grab, and each hold-key press captures again. The `toggle` command
-  latches the trigger and reads live grabs with the popup masked until toggle-off.
-  Toggle mode uses this path on both platforms: Linux sends the `toggle` verb, and Windows flips
-  the hook latch.
-- Press mode has no Frozen grab or Dwell re-check. Each trigger press performs one live masked
-  grab. Text found keeps the popup shown. A press with no text hides it. A press over the popup
-  also hides it because the mask gives no text. Screen cursor movement and key release do nothing, and
+- At Hold Bind activation, the system freezes one full grab under the cursor
+  before any popup exists. No capture or mask runs during the hold.
+- Release drops the Frozen grab, and each Hold Bind activation captures again.
+  Toggle mode latches the trigger and reads live grabs with the popup masked
+  until toggle-off. Configured Linux Toggle Binds use `bind-down ID`.
+  The fixed `chibipop ctl toggle` verb remains supported. Windows flips the
+  hook latch for both configured and fixed Toggle actions.
+- Press mode has no Frozen grab or Dwell re-check. Each Press Bind activation
+  performs one live masked grab. Text found keeps the popup shown. A press with
+  no text hides the popup. A press over the popup also hides it because the
+  mask gives no text. Screen cursor movement and key release do nothing, and
   per-character lookup is inert.
   Hovering text inside an existing popup can still open a child popup.
 - A wrap probe follows pass 1 when the lookup would run past the line end and the box did
@@ -260,8 +258,9 @@ Worker: capture -> mask -> OCR -> lookup -> present --result--> Controller
   `text::sentence::probe_regions` names, trims interior tile edges, and cuts the sentence
   with `text::sentence::sentence_at`. The result returns as `LookupOutcome::Sentence`. The
   Controller then builds the note. A failed probe or a probe with no anchor word keeps the
-  hover-time sentence. `drain` never drops a `Sentence` trigger, because the user pressed a
-  key. The reach is `SENTENCE_REACH_LINES` (6) above and below. Every number is a constant.
+  hover-time sentence. `drain` never drops a `Sentence` trigger, because an
+  AnkiAdd activation requests it. The reach is `SENTENCE_REACH_LINES` (6)
+  above and below. Every number is a constant.
 - Every cadence number is a hardcoded constant. No cadence number is a setting.
 
 ## OCR engine
@@ -335,6 +334,8 @@ Worker: capture -> mask -> OCR -> lookup -> present --result--> Controller
   retained window, and tray Quit exits after active edits finish. When disabled, live Settings
   X exits after active edits finish. Standalone Settings X always exits. The Debug viewer
   closes independently.
+- Windows ignores edit notifications when it rebuilds settings controls.
+  It keeps the footer controls and their status.
 - Interactive Windows commands tee output into a bounded live log. Machine-readable commands
   keep their output contract. Restore original streams before spawning a replacement daemon.
 - Settings reject conflicting platform shortcuts before applying or saving changes.
@@ -359,6 +360,34 @@ Worker: capture -> mask -> OCR -> lookup -> present --result--> Controller
   back to the platform default font with a visible warning.
 - Each platform bin renders only the fields of its own platform. A save operation
   preserves the fields of the other platform without changes.
+
+### Profiles and sessions
+
+- `Config` stores the profile catalog. `ResolvedConfig` is one effective profile view, not the saved root.
+- A Full profile stores all profile-owned fields. A Derived profile inherits one Full profile and stores field overrides.
+- Profile IDs and Bind IDs are stable. Profile names and platform chords can change without changing IDs.
+- Profile fields include PopupConfig, OcrConfig, per-character lookup, Dictionary role lists, Anki fields, actions, and nested routing.
+- Frequency arrays and the Ranking strategy remain shared in `Config`. Installed resources, plugins, diagnostics, and lifecycle settings remain shared.
+- A role-list override replaces the complete ordered enabled and disabled lists. An explicit empty list remains empty.
+- Legacy configuration loads through `src/config/migration.rs`. `ProfileCatalog::new` completes Dictionary list migration after installed identities are known.
+- Imports enable detected Dictionary roles in the edited profile. Other explicit profile lists receive the Dictionary as disabled.
+- Deletion rejects profiles that the default, a Bind, nested routing, or a Derived parent still references.
+- `ProfileCatalog` retains the saved catalog. A `ProfileSession` retains one resolved profile and uses it until its surface closes.
+- Existing popup chains and Search windows keep their Profile session. New sessions use later saved settings.
+- Nested routing selects the profile for hover links and clicked dictionary links. It is separate from inheritance.
+- Back restores profile, content, scroll, and selections. Same-headword suppression includes Profile ID.
+- Lookup Binds support Press, Hold, and Toggle. Other Bind actions activate once.
+- Lookup, SelectedText, Search, SentenceSearch, and OcrClipboard accept profile overrides. AnkiAdd and StaticRegion use the displayed profile.
+- A new lookup Bind replaces the root and owns its chain. Live lookup pauses until the chain ends. Displaced releases do nothing.
+- Search identity is Search mode plus Profile ID. Linux Search text stays bounded stdin, and Linux has no profile picker.
+
+### Bind transport
+
+- Linux accepts `chibipop ctl bind-down ID` and `chibipop ctl bind-up ID` for enabled configured Bind IDs.
+- The daemon rejects IDs absent from the saved enabled Binds.
+- The fixed socket verbs remain supported for compatibility. They do not replace configured Bind records.
+- Portal sessions and native bind registrations retire when Apply replaces their configuration.
+
 - The app derives autostart state by reading `~/.config/autostart/chibipop.desktop`.
   No TOML field stores this state.
 - A dictionary rebuild writes beside the old database and atomically renames the new file
@@ -376,8 +405,8 @@ Worker: capture -> mask -> OCR -> lookup -> present --result--> Controller
 - Windows search reads CSS beside the executable. Linux search reads it beside the active config file.
 - Escape dismisses active search windows and invalidates pending replies. Native IME composition handles its own Escape first.
 - Windows capture operations observe Escape independently of selector focus. Cancelled OCR waits discard late results without clipboard changes.
-- The optional search shortcuts belong to shared `Config` and participate in platform shortcut validation.
-- The tray Search item and configured shortcut use the same platform entry point.
+- Configured Search, SentenceSearch, and SelectedText Binds own chords and profile overrides.
+- Fixed socket verbs remain supported. The tray Search item uses the default Profile session.
 - Linux Search holds a runtime focus lock while its input window has focus. The daemon suppresses lookup and actions during that interval.
 - Linux replaces portal shortcuts on reload. Only confirmed IDs from the current session can dispatch actions.
 
@@ -394,7 +423,8 @@ Worker: capture -> mask -> OCR -> lookup -> present --result--> Controller
   roles from a filename, and a user never declares them.
 - Each role has an ordered, independently enabled list. Enabled state belongs to each
   role for each Dictionary.
-- New imports go to the end of each relevant list in the enabled state.
+- New imports enter the edited profile's term and pitch lists as enabled.
+  Other explicit profile lists add them as disabled. Shared frequency lists add them as enabled.
 - The identity of a Dictionary is its exact installed name.
 - `term.freq` is a denormalized column. The hot lookup path reads it without a join.
 - Reindex is an in-place SQL transaction that must never read an archive. It runs after

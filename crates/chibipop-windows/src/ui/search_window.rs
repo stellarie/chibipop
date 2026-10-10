@@ -4,7 +4,7 @@
 use super::search_popup::{self, Action, SearchPopup};
 use super::theme::Theme;
 use anyhow::{Context, Result};
-use chibipop::config::Config;
+use chibipop::config::{Config, FrequencyConfig, PluginsConfig, ProfileSession, ResolvedConfig};
 use chibipop::geom::PhysPoint;
 use chibipop::search::{candidates, selected_presentation, SearchMode, SearchResult,
     SearchService, SentenceToken};
@@ -12,7 +12,7 @@ use std::cell::{Cell, RefCell};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 use windows::core::*;
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::*;
@@ -36,6 +36,22 @@ const WM_IME_START: u32 = 0x010D;
 const WM_IME_END: u32 = 0x010E;
 const CLASS: PCWSTR = w!("ChibipopSearchWindow");
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FileSignature {
+    length: u64,
+    modified: Option<SystemTime>,
+    created: Option<SystemTime>,
+}
+
+fn file_signature(path: &Path) -> Option<FileSignature> {
+    let metadata = std::fs::metadata(path).ok()?;
+    Some(FileSignature {
+        length: metadata.len(),
+        modified: metadata.modified().ok(),
+        created: metadata.created().ok(),
+    })
+}
+
 struct Palette {
     theme: Theme,
     background: HBRUSH,
@@ -52,7 +68,7 @@ struct Palette {
 }
 
 impl Palette {
-    fn new(config: &Config, scale: f32) -> Result<Self> {
+    fn new(config: &ResolvedConfig, scale: f32) -> Result<Self> {
         let theme = search_popup::controls_theme(config);
         let face = wide(&theme.font_name);
         let sentence_size = (theme.body_size * 1.35)
@@ -116,24 +132,75 @@ struct State {
     palette: RefCell<Palette>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+struct SharedPolicy {
+    dictionaries: FrequencyConfig,
+    plugins: PluginsConfig,
+}
+
+impl From<&Config> for SharedPolicy {
+    fn from(config: &Config) -> Self {
+        Self { dictionaries: config.dictionaries.clone(), plugins: config.plugins.clone() }
+    }
+}
+
 struct Query {
-    generation: u64, text: String, config: Config, mode: SearchMode,
+    generation: u64, text: String, session: ProfileSession, mode: SearchMode,
     clicked: Option<usize>, definition: Option<(usize, bool)>,
+    click_generation: Option<u64>, click_epoch: u64,
 }
 
 struct Reply {
     generation: u64, result: std::result::Result<SearchResult, String>,
-    tokens: Vec<SentenceToken>, selected: Option<Range<usize>>, definition: Option<(usize, bool)>,
+    tokens: Vec<SentenceToken>, selected: Option<Range<usize>>,
+    definition: Option<(usize, bool)>, click_generation: Option<u64>, session: ProfileSession,
+}
+
+impl Reply {
+    fn is_current(&self, generation: u64, click_generation: u64) -> bool {
+        match self.definition {
+            Some((_, false)) => self.click_generation == Some(click_generation),
+            _ => self.click_generation.is_none() && self.generation == generation,
+        }
+    }
+}
+
+enum SearchRequest { Run(Query), Clear }
+
+fn coalesce_request(query: &mut Option<Query>, request: SearchRequest) -> bool {
+    match request {
+        SearchRequest::Run(next) => {
+            let passive_hover = next.definition.is_some_and(|(_, hover)| hover);
+            let preserve_current_click = passive_hover && query.as_ref().is_some_and(|pending| {
+                pending.definition.is_some_and(|(_, hover)| !hover)
+                    && pending.click_generation == Some(next.click_epoch)
+            });
+            if !preserve_current_click {
+                *query = Some(next);
+            }
+            false
+        }
+        SearchRequest::Clear => {
+            *query = None;
+            true
+        }
+    }
 }
 
 pub struct SearchWindow {
     hwnd: HWND,
     state: Box<State>,
-    config: Config,
-    config_path: Option<PathBuf>,
+    session: ProfileSession,
     database: PathBuf,
+    rules: PathBuf,
+    resource_config_path: Option<PathBuf>,
+    resource_policy: Option<SharedPolicy>,
+    resource_check: Instant,
+    database_signature: Option<FileSignature>,
     generation: u64,
-    requests: Sender<Query>,
+    click_generation: u64,
+    click_parent: Option<usize>,
+    requests: Sender<SearchRequest>,
     replies: Receiver<Reply>,
     result: SearchResult,
     tokens: Vec<SentenceToken>,
@@ -174,11 +241,11 @@ pub fn is_foreground() -> bool {
 }
 
 impl SearchWindow {
-    pub fn open(database: &Path, rules: &Path, config: &Config) -> Result<Self> {
-        Self::open_mode(database, rules, config, SearchMode::Dictionary, None)
+    pub fn open(database: &Path, rules: &Path, session: ProfileSession) -> Result<Self> {
+        Self::open_mode(database, rules, session, SearchMode::Dictionary, None)
     }
 
-    pub fn open_mode(database: &Path, rules: &Path, config: &Config,
+    pub fn open_mode(database: &Path, rules: &Path, session: ProfileSession,
         mode: SearchMode, text: Option<&str>) -> Result<Self> {
         let state = Box::new(State {
             input: Cell::default(), results: Cell::default(), button: Cell::default(),
@@ -189,7 +256,7 @@ impl SearchWindow {
             switch: Cell::new(false), dpi_changed: Cell::new(false), dismissed: Cell::new(false),
             preserve_definitions: Cell::new(false), clicked: Cell::new(None),
             selected: Cell::new(None),
-            palette: RefCell::new(Palette::new(config, 1.0)?),
+            palette: RefCell::new(Palette::new(session.config(), 1.0)?),
         });
         // SAFETY: The stable State allocation outlives every native callback.
         let hwnd = unsafe {
@@ -210,14 +277,31 @@ impl SearchWindow {
                 return Err(Error::from_thread()).context("starting search window wake timer");
             }
         }
-        let (requests, inbox) = mpsc::channel::<Query>();
+        let (requests, inbox) = mpsc::channel::<SearchRequest>();
         let (outbox, replies) = mpsc::channel();
         let db = database.to_path_buf();
-        let rules = rules.to_path_buf();
+        let rules_path = rules.to_path_buf();
         if let Err(error) = std::thread::Builder::new().name("dictionary-search".into()).spawn(move || {
-            while let Ok(mut query) = inbox.recv() {
-                while let Ok(newer) = inbox.try_recv() { query = newer; }
-                let reply = search(&db, &rules, &query);
+            let mut service = None;
+            while let Ok(first) = inbox.recv() {
+                let mut query = None;
+                if coalesce_request(&mut query, first) { service = None; }
+                while let Ok(request) = inbox.try_recv() {
+                    if coalesce_request(&mut query, request) { service = None; }
+                }
+                let Some(query) = query else { continue };
+                let reply = if let Some(service) = &service {
+                    search(service, &query)
+                } else {
+                    match SearchService::open(&db, &rules_path, query.session.config()) {
+                        Ok(opened) => {
+                            let reply = search(&opened, &query);
+                            service = Some(opened);
+                            reply
+                        }
+                        Err(error) => search_error(query, error),
+                    }
+                };
                 if outbox.send(reply).is_err() { break; }
             }
         }) {
@@ -225,10 +309,13 @@ impl SearchWindow {
             unsafe { let _ = DestroyWindow(hwnd); }
             return Err(error).context("starting search worker");
         }
-        let mut window = Self { hwnd, state, config: config.clone(), config_path: None,
-            database: database.to_path_buf(), generation: 0, requests, replies,
-            result: SearchResult::Empty, tokens: Vec::new(), definitions: Vec::new(), hover: None };
-        window.update_config(config);
+        let mut window = Self { hwnd, state, session, database: database.to_path_buf(),
+            rules: rules.to_path_buf(), resource_config_path: None, resource_policy: None,
+            resource_check: Instant::now(), database_signature: file_signature(database),
+            generation: 0, click_generation: 0, click_parent: None, requests, replies, result: SearchResult::Empty,
+            tokens: Vec::new(), definitions: Vec::new(), hover: None };
+        window.update_dpi();
+        window.size_initial()?;
         window.switch_mode(mode, text);
         Ok(window)
     }
@@ -275,6 +362,42 @@ impl SearchWindow {
         unsafe { IsWindowVisible(self.hwnd).as_bool() }
     }
 
+    pub fn identity(&self) -> (SearchMode, &str) {
+        (self.state.mode.get(), self.session.id())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn session(&self) -> &ProfileSession {
+        &self.session
+    }
+
+    #[cfg(test)]
+    pub(crate) fn request_mode_switch(&self) {
+        self.state.switch.set(true);
+    }
+
+    pub fn query_text(&self) -> String {
+        read_text(self.state.input.get())
+    }
+
+    pub fn activate(&mut self, text: Option<&str>) {
+        self.switch_mode(self.state.mode.get(), text);
+    }
+
+    pub fn close(&mut self) {
+        self.dismiss();
+        self.invalidate();
+        self.state.preserve_definitions.set(false);
+    }
+
+    pub fn set_resource_config_path(&mut self, path: &Path) {
+        self.resource_config_path = Some(path.to_path_buf());
+        self.resource_policy = if path.is_file() {
+            chibipop::config::load_or_create(path).ok().map(|config| SharedPolicy::from(&config))
+        } else { None };
+        self.resource_check = Instant::now();
+    }
+
     pub fn handle_message(&mut self, message: &MSG) -> bool {
         let controls = [self.state.input.get(), self.state.button.get(), self.state.mode_button.get(),
             self.state.sentence.get(), self.state.results.get()];
@@ -318,13 +441,30 @@ impl SearchWindow {
         }
     }
 
-    pub fn update_config(&mut self, config: &Config) {
-        self.config = config.clone();
-        self.cancel_pending();
-        self.state.preserve_definitions.set(true);
-        // SAFETY: The DPI query reads this thread's live window.
+    fn size_initial(&self) -> Result<()> {
+        let mut rect = RECT::default();
+        let mut monitor = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default() };
+        // SAFETY: The live HWND and monitor write to local output buffers.
+        unsafe {
+            GetWindowRect(self.hwnd, &mut rect)?;
+            GetMonitorInfoW(MonitorFromWindow(self.hwnd, MONITOR_DEFAULTTONEAREST), &mut monitor).ok()?;
+            let work = monitor.rcWork;
+            let scale = self.state.palette.borrow().scale;
+            let width = scaled(760.0, scale).min(work.right - work.left);
+            let height = scaled(680.0, scale).min(work.bottom - work.top);
+            SetWindowPos(self.hwnd, None,
+                rect.left.clamp(work.left, work.right - width),
+                rect.top.clamp(work.top, work.bottom - height), width, height,
+                SWP_NOZORDER | SWP_NOACTIVATE).context("Cannot size the Search window")?;
+        }
+        Ok(())
+    }
+
+    fn update_dpi(&mut self) {
         let scale = unsafe { GetDpiForWindow(self.hwnd) }.max(96) as f32 / 96.0;
-        match Palette::new(config, scale) {
+        if self.state.palette.borrow().scale == scale { return; }
+        match Palette::new(self.session.config(), scale) {
             Ok(palette) => {
                 // SAFETY: Controls switch fonts before old GDI objects drop.
                 unsafe {
@@ -337,36 +477,74 @@ impl SearchWindow {
             }
             Err(error) => self.set_status(&format!("Cannot apply search theme: {error:#}")),
         }
-        let mut definition_error = None;
-        for popup in &mut self.definitions {
-            if let Err(error) = popup.update_config(config) {
-                definition_error = Some(error);
-                break;
-            }
-        }
-        if let Some(error) = definition_error {
-            self.set_status(&format!("Cannot apply definition theme: {error:#}"));
-        }
-        self.state.submit.set(true);
     }
 
-    /// Drop displayed lookup results and pending replies.
     pub fn clear_lookup_cache(&mut self) {
         self.invalidate();
         self.clear_results();
         self.tokens.clear();
         self.state.preserve_definitions.set(false);
+        if self.requests.send(SearchRequest::Clear).is_err() {
+            self.set_status("Search stopped. Reopen the application to retry.");
+        }
     }
 
-    pub fn set_config_path(&mut self, path: &Path) { self.config_path = Some(path.to_path_buf()); }
+    fn check_resource_changes(&mut self) -> bool {
+        let signature = file_signature(&self.database);
+        if signature != self.database_signature {
+            self.database_signature = signature;
+            self.invalidate_resources();
+            return true;
+        }
+        let Some(path) = self.resource_config_path.clone() else { return false };
+        if !path.is_file() { return false; }
+        let saved = match chibipop::config::load_or_create(&path) {
+            Ok(saved) => saved,
+            Err(error) => {
+                self.set_status(&format!("Cannot check shared Search resources: {error:#}"));
+                return false;
+            }
+        };
+        let policy = SharedPolicy::from(&saved);
+        if self.resource_policy.as_ref().is_some_and(|current| current == &policy) { return false; }
+        match SearchService::open_catalog(&self.database, &self.rules, &saved, &saved.default_profile) {
+            Ok((_, latest)) => {
+                let changed = latest.catalog.config.dictionaries != self.session.catalog.config.dictionaries
+                    || latest.catalog.config.plugins != self.session.catalog.config.plugins;
+                self.resource_policy = Some(policy);
+                if changed {
+                    self.invalidate_resources();
+                    return true;
+                }
+            }
+            Err(error) => self.set_status(&format!("Cannot check shared Search resources: {error:#}")),
+        }
+        false
+    }
+
+    fn invalidate_resources(&mut self) {
+        self.clear_lookup_cache();
+        self.close();
+    }
 
     fn invalidate(&mut self) {
         self.cancel_pending();
         self.definitions.clear();
     }
 
+    fn invalidate_clicks(&mut self) {
+        self.click_generation = self.click_generation.wrapping_add(1);
+        self.click_parent = None;
+    }
+
+    fn begin_click(&mut self, parent: usize) {
+        self.click_generation = self.click_generation.wrapping_add(1);
+        self.click_parent = Some(parent);
+    }
+
     fn cancel_pending(&mut self) {
         self.generation = self.generation.wrapping_add(1);
+        self.invalidate_clicks();
         self.hover = None;
         self.state.selected.set(None);
     }
@@ -396,7 +574,11 @@ impl SearchWindow {
             self.state.preserve_definitions.set(false);
             return;
         }
-        if self.state.dpi_changed.replace(false) { self.update_config(&self.config.clone()); }
+        if self.resource_check.elapsed() >= Duration::from_secs(1) {
+            self.resource_check = Instant::now();
+            if self.check_resource_changes() { return; }
+        }
+        if self.state.dpi_changed.replace(false) { self.update_dpi(); }
         if self.state.switch.replace(false) {
             let mode = if self.state.mode.get() == SearchMode::Dictionary { SearchMode::Sentence } else { SearchMode::Dictionary };
             self.switch_mode(mode, None);
@@ -410,31 +592,25 @@ impl SearchWindow {
         if !self.state.composing.get() && self.state.submit.replace(false) {
             if self.state.preserve_definitions.replace(false) { self.cancel_pending(); }
             else { self.invalidate(); }
-            if let Some(path) = &self.config_path {
-                match chibipop::config::load_or_create(path) {
-                    Ok(config) if config != self.config => {
-                        self.update_config(&config); self.state.submit.set(false);
-                    }
-                    Ok(_) => {}
-                    Err(error) => { self.set_status(&format!("Cannot load search settings: {error:#}")); return; }
-                }
-            }
             let text = read_text(self.state.input.get());
             if self.state.mode.get() == SearchMode::Sentence {
                 // SAFETY: The view copies the current input synchronously.
                 unsafe { let _ = SetWindowTextW(self.state.sentence.get(), PCWSTR(wide(&text).as_ptr())); }
             }
             self.clear_results(); self.set_status("Searching…");
-            self.enqueue(text, self.state.mode.get(), self.state.clicked.take(), None);
+            self.enqueue(text, self.state.mode.get(), self.state.clicked.take(), None, self.session.clone());
         } else if !self.state.composing.get() {
             if let Some(offset) = self.state.clicked.take() {
                 self.invalidate(); self.clear_results();
-                self.enqueue(read_text(self.state.input.get()), SearchMode::Sentence, Some(offset), None);
+                self.enqueue(read_text(self.state.input.get()), SearchMode::Sentence, Some(offset), None, self.session.clone());
             }
         }
+        self.poll_definitions();
         while let Ok(reply) = self.replies.try_recv() {
-            if reply.generation != self.generation || self.state.composing.get() { continue; }
+            if !reply.is_current(self.generation, self.click_generation) || self.state.composing.get() { continue; }
             if let Some((parent, hover)) = reply.definition {
+                if self.definitions.get(parent).is_none()
+                    || (!hover && self.click_parent != Some(parent)) { continue; }
                 if hover {
                     let expected = self.hover.as_ref().filter(|(index, _, _, sent)| *index == parent && *sent)
                         .map(|(_, query, _, _)| query.clone());
@@ -444,10 +620,23 @@ impl SearchWindow {
                 }
                 if let Ok(SearchResult::Found(presentation)) = reply.result {
                     if let Some(popup) = self.definitions.get(parent) {
+                        let same_word = popup.session == reply.session
+                            && presentation.top.as_ref().zip(popup.presentation.top.as_ref())
+                                .is_some_and(|(a, b)| a.written == b.written && a.reading == b.reading);
+                        if same_word { continue; }
                         if let Ok(anchor) = popup.child_anchor() {
-                            self.definitions.truncate(parent + 1);
-                            match SearchPopup::open(&self.database, &self.config, self.hwnd, *presentation, anchor, true) {
-                                Ok(popup) => self.definitions.push(popup),
+                            match SearchPopup::open(&self.database, reply.session.clone(), self.hwnd,
+                                *presentation, anchor, true) {
+                                Ok(child) => {
+                                    if !hover {
+                                        self.generation = self.generation.wrapping_add(1);
+                                        self.hover = None;
+                                    }
+                                    self.invalidate_clicks();
+                                    self.definitions[parent].note_child_opened();
+                                    self.definitions.truncate(parent + 1);
+                                    self.definitions.push(child);
+                                }
                                 Err(error) => self.set_status(&format!("Cannot open definition: {error:#}")),
                             }
                         }
@@ -466,23 +655,28 @@ impl SearchWindow {
         if let Some(index) = self.state.selected.take() {
             if let Some(presentation) = selected_presentation(&self.result, index) {
                 self.generation = self.generation.wrapping_add(1);
+                self.invalidate_clicks();
                 self.definitions.clear(); self.hover = None;
                 let mut point = POINT { x: 24, y: 48 };
                 // SAFETY: Conversion uses the owned listbox HWND and point storage.
                 unsafe { let _ = ClientToScreen(self.state.results.get(), &mut point); }
-                match SearchPopup::open(&self.database, &self.config, self.hwnd, presentation,
+                match SearchPopup::open(&self.database, self.session.clone(), self.hwnd, presentation,
                     PhysPoint { x: point.x, y: point.y }, false) {
                     Ok(popup) => self.definitions.push(popup),
                     Err(error) => self.set_status(&format!("Cannot open definition: {error:#}")),
                 }
             }
         }
-        self.poll_definitions();
     }
 
-    fn enqueue(&self, text: String, mode: SearchMode, clicked: Option<usize>, definition: Option<(usize, bool)>) {
-        if self.requests.send(Query { generation: self.generation, text, config: self.config.clone(),
-            mode, clicked, definition }).is_err() { self.set_status("Search stopped. Reopen the application to retry."); }
+    fn enqueue(&self, text: String, mode: SearchMode, clicked: Option<usize>,
+        definition: Option<(usize, bool)>, session: ProfileSession) {
+        let click_generation = definition.filter(|(_, hover)| !*hover).map(|_| self.click_generation);
+        let query = Query { generation: self.generation, text, session, mode, clicked, definition,
+            click_generation, click_epoch: self.click_generation };
+        if self.requests.send(SearchRequest::Run(query)).is_err() {
+            self.set_status("Search stopped. Reopen the application to retry.");
+        }
     }
 
     fn poll_definitions(&mut self) {
@@ -490,19 +684,42 @@ impl SearchWindow {
             match self.definitions[index].poll() {
                 Ok(Some(Action::Back)) => {
                     self.generation = self.generation.wrapping_add(1);
+                    self.invalidate_clicks();
                     self.definitions.truncate(index); self.hover = None; self.restore_focus(); return;
                 }
+                Ok(Some(Action::ExpandEntry(entry))) => {
+                    self.cancel_pending();
+                    self.definitions.truncate(index + 1);
+                    if let Err(error) = self.definitions[index].expand_entry(entry) {
+                        self.set_status(&format!("Cannot expand definition: {error:#}"));
+                    }
+                    return;
+                }
                 Ok(Some(Action::Lookup(query))) => {
-                    if index >= 15 { self.set_status("Use Back before opening another nested definition."); return; }
+                    if index >= 15 {
+                        self.invalidate_clicks();
+                        self.set_status("Use Back before opening another nested definition."); return;
+                    }
                     self.generation = self.generation.wrapping_add(1);
+                    self.begin_click(index);
                     self.hover = None;
-                    self.enqueue(query, SearchMode::Dictionary, None, Some((index, false))); return;
+                    let session = self.definitions[index].session.nested();
+                    self.enqueue(query, SearchMode::Dictionary, None, Some((index, false)), session); return;
                 }
                 Err(error) => self.set_status(&format!("Definition display failed: {error:#}")),
                 _ => {}
             }
         }
         let hovered = self.definitions.iter().rposition(SearchPopup::contains_pointer);
+        if let Some(parent) = hovered.filter(|parent| self.definitions.len() > *parent + 1) {
+            if !self.definitions[parent].pointer_moved_since_child_open() { return; }
+            if self.click_parent.is_some_and(|owner| owner > parent) {
+                self.invalidate_clicks();
+            }
+            self.generation = self.generation.wrapping_add(1);
+            self.definitions.truncate(parent + 1);
+            self.hover = None;
+        }
         let next = hovered.and_then(|index| self.definitions[index].hover().map(|query| (index, query)));
         let Some((index, query)) = next else {
             if self.hover.as_ref().is_some_and(|(_, _, _, sent)| *sent) {
@@ -519,7 +736,8 @@ impl SearchWindow {
                 *sent = true;
                 let (index, query) = (*index, query.clone());
                 self.generation = self.generation.wrapping_add(1);
-                self.enqueue(query, SearchMode::Dictionary, None, Some((index, true)));
+                let session = self.definitions[index].session.nested();
+                self.enqueue(query, SearchMode::Dictionary, None, Some((index, true)), session);
             }
         }
     }
@@ -572,25 +790,34 @@ impl Drop for SearchWindow {
     }
 }
 
-fn search(database: &Path, rules: &Path, query: &Query) -> Reply {
+fn search(service: &SearchService, query: &Query) -> Reply {
     let run = || -> Result<_> {
-    let service = SearchService::open(database, rules, &query.config)?;
-    let tokens = if query.mode == SearchMode::Sentence { service.sentence_tokens(&query.text)? } else { Vec::new() };
-    let selected = query.clicked.and_then(|offset| tokens.iter()
-        .find(|token| token.selectable && token.range.contains(&offset)).map(|token| token.range.clone()));
-    let text = if query.mode == SearchMode::Dictionary { query.text.as_str() }
-        else { selected.as_ref().and_then(|range| query.text.get(range.clone())).unwrap_or("") };
-    let result = if query.mode == SearchMode::Sentence {
-        service.search_word(text)
-    } else { service.search(text) }?;
-    Ok((tokens, selected, result))
+        let tokens = if query.mode == SearchMode::Sentence {
+            service.sentence_tokens_in(&query.session, &query.text)?
+        } else { Vec::new() };
+        let selected = query.clicked.and_then(|offset| tokens.iter()
+            .find(|token| token.selectable && token.range.contains(&offset)).map(|token| token.range.clone()));
+        let text = if query.mode == SearchMode::Dictionary { query.text.as_str() }
+            else { selected.as_ref().and_then(|range| query.text.get(range.clone())).unwrap_or("") };
+        let result = if query.mode == SearchMode::Sentence {
+            service.search_word_in(&query.session, text)
+        } else { service.search_in(&query.session, text) }?;
+        Ok((tokens, selected, result))
     };
     match run() {
         Ok((tokens, selected, result)) => Reply { generation: query.generation, result: Ok(result),
-            tokens, selected, definition: query.definition },
+            tokens, selected, definition: query.definition, click_generation: query.click_generation,
+            session: query.session.clone() },
         Err(error) => Reply { generation: query.generation, result: Err(format!("{error:#}")),
-            tokens: Vec::new(), selected: None, definition: query.definition },
+            tokens: Vec::new(), selected: None, definition: query.definition,
+            click_generation: query.click_generation, session: query.session.clone() },
     }
+}
+
+fn search_error(query: Query, error: impl std::fmt::Display) -> Reply {
+    Reply { generation: query.generation, result: Err(format!("{error}")), tokens: Vec::new(),
+        selected: None, definition: query.definition, click_generation: query.click_generation,
+        session: query.session }
 }
 
 fn utf16_range(text: &str, range: Range<usize>) -> Option<Range<usize>> {
@@ -789,10 +1016,19 @@ unsafe fn layout(hwnd: HWND, state: &State) {
         let label_h = (scaled(palette.theme.dimmed_size + 6.0, palette.scale)).max(20);
         let width = (rect.right - pad * 2).max(80);
         let sentence = state.mode.get() == SearchMode::Sentence;
-        let input_h = if sentence { (line * 4).max(scaled(160.0, palette.scale)) }
+        let mut input_h = if sentence { (line * 4).max(scaled(160.0, palette.scale)) }
             else { (line * 2).max(scaled(72.0, palette.scale)) };
         let top = pad.max(scaled(12.0, palette.scale));
         let gap = scaled(8.0 + palette.theme.border_width, palette.scale);
+        let mut sentence_h = if sentence { line * 3 } else { 0 };
+        let fixed_h = top + label_h * 3 + gap * 2 + line * 2
+            + pad * if sentence { 4 } else { 3 };
+        let text_h = (rect.bottom - fixed_h - card_height(&palette))
+            .max(if sentence { line * 2 } else { line });
+        if input_h + sentence_h > text_h {
+            input_h = text_h * input_h / (input_h + sentence_h);
+            sentence_h = text_h - input_h;
+        }
         let _ = MoveWindow(state.input_label.get(), pad, top, width, label_h, true);
         let input_y = top + label_h + gap;
         let _ = MoveWindow(state.input.get(), pad, input_y, width, input_h, true);
@@ -806,8 +1042,8 @@ unsafe fn layout(hwnd: HWND, state: &State) {
         let _ = MoveWindow(state.sentence_label.get(), pad, sentence_label_y, width, label_h, true);
         let sentence_y = sentence_label_y + label_h + gap;
         let _ = ShowWindow(state.sentence.get(), if sentence { SW_SHOW } else { SW_HIDE });
-        let _ = MoveWindow(state.sentence.get(), pad, sentence_y, width, line * 3, true);
-        let status_y = if sentence { sentence_y + line * 3 + pad } else { sentence_y };
+        let _ = MoveWindow(state.sentence.get(), pad, sentence_y, width, sentence_h, true);
+        let status_y = if sentence { sentence_y + sentence_h + pad } else { sentence_y };
         let _ = MoveWindow(state.status.get(), pad, status_y, width, line, true);
         let results_label_y = status_y + line;
         let _ = MoveWindow(state.results_label.get(), pad, results_label_y, width, label_h, true);
@@ -1044,16 +1280,157 @@ mod tests {
         assert_eq!(byte_offset(text, 6), 10);
     }
 
+    #[test]
+    fn explicit_definition_click_survives_hover_and_clear_preserves_order() {
+        let saved = Config::default();
+        let session = chibipop::config::ProfileCatalog::new(&saved, &[]).unwrap()
+            .session(None).unwrap();
+        let run = |text: &str, definition: Option<(usize, bool)>, generation, click_epoch| SearchRequest::Run(Query {
+            generation, text: text.into(), session: session.clone(),
+            mode: SearchMode::Dictionary, clicked: None,
+            click_generation: definition.filter(|(_, hover)| !*hover).map(|_| click_epoch),
+            click_epoch, definition,
+        });
+        let mut pending = None;
+        assert!(!coalesce_request(&mut pending, run("clicked definition", Some((0, false)), 1, 9)));
+        assert!(!coalesce_request(&mut pending, run("passive hover", Some((0, true)), 2, 9)));
+        let click = pending.as_ref().unwrap();
+        assert_eq!(click.text, "clicked definition");
+        assert_eq!(click.definition, Some((0, false)));
+
+        assert!(coalesce_request(&mut pending, SearchRequest::Clear));
+        assert!(pending.is_none());
+        assert!(!coalesce_request(&mut pending, run("older input", None, 1, 9)));
+        assert!(!coalesce_request(&mut pending, run("latest input", None, 2, 9)));
+        assert_eq!(pending.as_ref().unwrap().text, "latest input");
+    }
+
+    #[test]
+    fn canceled_queued_click_does_not_suppress_parent_hover() {
+        let saved = Config::default();
+        let session = chibipop::config::ProfileCatalog::new(&saved, &[]).unwrap()
+            .session(None).unwrap();
+        let request = |text: &str, definition: Option<(usize, bool)>, generation: u64, click_epoch: u64| SearchRequest::Run(Query {
+            generation, text: text.into(), session: session.clone(),
+            mode: SearchMode::Dictionary, clicked: None,
+            click_generation: definition.filter(|(_, hover)| !*hover).map(|_| click_epoch),
+            click_epoch, definition,
+        });
+        let mut pending = None;
+        assert!(!coalesce_request(&mut pending, request("queued click", Some((0, false)), 4, 9)));
+
+        // Back invalidates the click generation before the parent hover is queued.
+        assert!(!coalesce_request(&mut pending, request("parent hover", Some((0, true)), 6, 10)));
+        let hover = pending.as_ref().unwrap();
+        assert_eq!(hover.text, "parent hover");
+        assert_eq!(hover.definition, Some((0, true)));
+    }
+
+    #[test]
+    fn click_replies_survive_pointer_changes_but_not_navigation_or_new_clicks() {
+        let saved = Config::default();
+        let session = chibipop::config::ProfileCatalog::new(&saved, &[]).unwrap()
+            .session(None).unwrap();
+        let click = Reply {
+            generation: 11, result: Ok(SearchResult::Empty), tokens: Vec::new(),
+            selected: None, definition: Some((0, false)), click_generation: Some(4),
+            session: session.clone(),
+        };
+        assert!(click.is_current(12, 4));
+        assert!(!click.is_current(12, 5));
+
+        let hover = Reply {
+            generation: 11, result: Ok(SearchResult::Empty), tokens: Vec::new(),
+            selected: None, definition: Some((0, true)), click_generation: None, session,
+        };
+        assert!(!hover.is_current(12, 4));
+    }
+
     struct Fixture(PathBuf);
     impl Drop for Fixture { fn drop(&mut self) { let _ = std::fs::remove_file(&self.0); } }
 
     fn fixture() -> (SearchWindow, Fixture, impl Sized) {
+        use chibipop::config::{Profile, ProfileData};
         let guard = crate::input::hooks::search_keyboard_test_guard();
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let database = std::env::temp_dir().join(format!("chibipop-native-search-{}.sqlite", std::process::id()));
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let database = std::env::temp_dir()
+            .join(format!("chibipop-native-search-{}-{n}.sqlite", std::process::id()));
         chibipop::dict::build::build(&[root.join("tests/fixtures/yomitan/terms.zip")], &[], &database, &|_| {}).unwrap();
-        let window = SearchWindow::open(&database, &root.join("data/deconjugator.json"), &Config::default()).unwrap();
+        let rules = root.join("data/deconjugator.json");
+        let mut saved = Config::default();
+        let root_id = saved.default_profile.clone();
+        let mut root_settings = saved.resolve(&root_id).unwrap();
+        root_settings.dictionaries.terms.enabled = vec!["FixtureTerms".into()];
+        let nested_id = saved.next_profile_id();
+        let mut nested_settings = root_settings.clone();
+        nested_settings.popup.sub_popups = false;
+        saved.profiles.push(Profile { id: nested_id.clone(), name: "Nested".into(),
+            data: ProfileData::Full { settings: Box::new(nested_settings) } });
+        root_settings.nested_profile = Some(nested_id);
+        saved.update_profile(&root_id, &root_settings).unwrap();
+        let (_, session) = SearchService::open_catalog(&database, &rules, &saved, &root_id).unwrap();
+        let window = SearchWindow::open(&database, &rules, session).unwrap();
         (window, Fixture(database), guard)
+    }
+
+    #[test]
+    fn initial_palette_uses_window_dpi_without_dpi_changed_message() {
+        let (window, _fixture, _guard) = fixture();
+        // SAFETY: The window remains live during the DPI query.
+        let dpi = unsafe { GetDpiForWindow(window.hwnd) };
+        assert_ne!(dpi, 0);
+        let scale = dpi.max(96) as f32 / 96.0;
+        assert_eq!(window.state.palette.borrow().scale, scale);
+        assert!(!window.state.dpi_changed.get());
+    }
+
+    #[test]
+    fn native_initial_size_and_sentence_layout_fit_work_area_at_double_scale() {
+        let (mut window, _fixture, _guard) = fixture();
+        let palette = Palette::new(window.session.config(), 2.0).unwrap();
+        let previous = window.state.palette.replace(palette);
+        // SAFETY: Replace fonts before their previous GDI objects drop.
+        unsafe { apply_fonts(&window.state); }
+        drop(previous);
+        window.size_initial().unwrap();
+        window.switch_mode(SearchMode::Sentence, None);
+        let mut monitor = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default() };
+        let mut outer = RECT::default();
+        let mut client = RECT::default();
+        let mut results = RECT::default();
+        let mut origin = POINT::default();
+        // SAFETY: All HWNDs and rectangle output buffers remain live.
+        unsafe {
+            GetMonitorInfoW(MonitorFromWindow(window.hwnd, MONITOR_DEFAULTTONEAREST), &mut monitor).ok().unwrap();
+            GetWindowRect(window.hwnd, &mut outer).unwrap();
+            GetClientRect(window.hwnd, &mut client).unwrap();
+            GetWindowRect(window.state.results.get(), &mut results).unwrap();
+            ClientToScreen(window.hwnd, &mut origin).ok().unwrap();
+        }
+        let work = monitor.rcWork;
+        assert_eq!(outer.right - outer.left, 1520i32.min(work.right - work.left));
+        assert_eq!(outer.bottom - outer.top, 1360i32.min(work.bottom - work.top));
+        assert!(outer.left >= work.left && outer.top >= work.top);
+        assert!(outer.right <= work.right && outer.bottom <= work.bottom);
+        assert!(results.top >= origin.y);
+        assert!(results.bottom <= origin.y + client.bottom);
+        assert!(results.bottom > results.top);
+
+        // SAFETY: This test resizes only its own native window.
+        unsafe {
+            SetWindowPos(window.hwnd, None, 0, 0, outer.right - outer.left - 40,
+                outer.bottom - outer.top - 40, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE).unwrap();
+            GetWindowRect(window.hwnd, &mut outer).unwrap();
+        }
+        window.switch_mode(SearchMode::Dictionary, None);
+        window.switch_mode(SearchMode::Sentence, None);
+        let mut resized = RECT::default();
+        // SAFETY: This live HWND writes to local storage.
+        unsafe { GetWindowRect(window.hwnd, &mut resized).unwrap(); }
+        assert_eq!(resized, outer);
     }
 
     fn wait(window: &mut SearchWindow, expected: &str) {
@@ -1075,6 +1452,70 @@ mod tests {
         }
     }
 
+    fn click_definition(popup: &SearchPopup, action: chibipop::controller::HitAction) {
+        let point = search_popup::tests::action_point(popup, action);
+        // SAFETY: The point is inside this live HWND.
+        unsafe {
+            SendMessageW(popup.hwnd(), WM_LBUTTONUP, None,
+                Some(LPARAM(((point.y as isize) << 16) | point.x as isize)));
+        }
+    }
+
+    #[test]
+    fn native_expansion_retires_children_and_pending_link_and_hover_replies() {
+        use chibipop::controller::HitAction;
+        let (mut window, _fixture, _guard) = fixture();
+        replace_input(&window, "猫");
+        wait(&mut window, "candidate");
+        let mut presentation = selected_presentation(&window.result, 0).unwrap();
+        let mut card = presentation.top.clone().unwrap();
+        card.blocks = vec![chibipop::present::GlossBlock::parse("FixtureTerms",
+            r#"[{"type":"structured-content","content":{"tag":"a","href":"?query=犬","content":"犬"}}]"#)];
+        presentation.top = Some(card.clone());
+        presentation.all_cards[0] = card.clone();
+        card.written = Some("犬".into());
+        card.reading = Some("いぬ".into());
+        presentation.collapsed.push(chibipop::present::collapsed_from_card(&card, 40));
+        presentation.all_cards.push(card);
+        let parent = SearchPopup::open(&window.database, window.session.clone(), window.hwnd,
+            presentation, PhysPoint { x: 20, y: 20 }, false).unwrap();
+        let child_presentation = selected_presentation(&window.result, 0).unwrap();
+        let child = SearchPopup::open(&window.database, window.session.nested(), window.hwnd,
+            child_presentation.clone(), PhysPoint { x: 400, y: 40 }, true).unwrap();
+        window.definitions = vec![parent, child];
+        let (requests, inbox) = mpsc::channel();
+        window.requests = requests;
+        let (sender, replies) = mpsc::channel();
+        window.replies = replies;
+
+        click_definition(&window.definitions[0], HitAction::DrillDown("犬".into()));
+        window.poll();
+        let SearchRequest::Run(query) = inbox.try_recv().unwrap() else { panic!("Expected a link lookup"); };
+        assert_eq!(query.definition, Some((0, false)));
+        let old_generation = window.generation;
+        let old_click_generation = window.click_generation;
+        window.hover = Some((0, "犬".into(), Instant::now(), true));
+        for hover in [false, true] {
+            sender.send(Reply {
+                generation: old_generation,
+                result: Ok(SearchResult::Found(Box::new(child_presentation.clone()))),
+                tokens: Vec::new(), selected: None, definition: Some((0, hover)),
+                click_generation: (!hover).then_some(old_click_generation), session: query.session.clone(),
+            }).unwrap();
+        }
+        click_definition(&window.definitions[0], HitAction::ExpandEntry(0));
+        window.poll();
+
+        assert_eq!(window.definitions.len(), 1);
+        assert_eq!(window.definitions[0].presentation.top.as_ref().unwrap().written.as_deref(), Some("犬"));
+        assert_ne!(window.generation, old_generation);
+        assert_ne!(window.click_generation, old_click_generation);
+        assert!(window.click_parent.is_none());
+        assert!(window.hover.is_none());
+        window.poll();
+        assert_eq!(window.definitions.len(), 1);
+    }
+
     fn replace_input(window: &SearchWindow, value: &str) {
         let value = wide(value);
         // SAFETY: The edit owns its text. Replacement sends the normal edit-change notification.
@@ -1085,8 +1526,141 @@ mod tests {
     }
 
     #[test]
+    fn native_partial_wheel_deltas_survive_separate_polls() {
+        let (mut window, _fixture, _guard) = fixture();
+        replace_input(&window, "猫");
+        wait(&mut window, "candidate");
+        let mut presentation = selected_presentation(&window.result, 0).unwrap();
+        let card = presentation.top.as_mut().unwrap();
+        card.blocks = vec![chibipop::present::GlossBlock::parse("FixtureTerms",
+            &serde_json::to_string(&vec!["long definition"; 200]).unwrap())];
+        presentation.all_cards[0] = card.clone();
+        let mut popup = SearchPopup::open(&window.database, window.session.clone(), window.hwnd,
+            presentation, PhysPoint { x: 20, y: 20 }, false).unwrap();
+        for _ in 0..8 {
+            // SAFETY: The wheel message targets this live HWND.
+            unsafe { SendMessageW(popup.hwnd(), WM_MOUSEWHEEL,
+                Some(WPARAM(((-15i16) as u16 as usize) << 16)), None); }
+            assert!(popup.poll().unwrap().is_none());
+        }
+        assert_eq!(search_popup::tests::scroll(&popup), 48);
+        for delta in [15i16, -15, 30, 30, 30, 30] {
+            // SAFETY: The wheel message targets this live HWND.
+            unsafe { SendMessageW(popup.hwnd(), WM_MOUSEWHEEL,
+                Some(WPARAM(((delta as u16) as usize) << 16)), None); }
+            assert!(popup.poll().unwrap().is_none());
+        }
+        assert_eq!(search_popup::tests::scroll(&popup), 0);
+    }
+
+    #[test]
+    fn native_same_word_reply_requires_a_different_profile_session() {
+        let (mut window, _fixture, _guard) = fixture();
+        replace_input(&window, "猫");
+        wait(&mut window, "candidate");
+        window.state.selected.set(Some(0));
+        window.poll();
+        assert_eq!(window.definitions.len(), 1);
+        let presentation = selected_presentation(&window.result, 0).unwrap();
+        let (sender, replies) = mpsc::channel();
+        window.replies = replies;
+
+        for (session, expected) in [(window.session.clone(), 1), (window.session.nested(), 2)] {
+            window.begin_click(0);
+            sender.send(Reply {
+                generation: window.generation,
+                result: Ok(SearchResult::Found(Box::new(presentation.clone()))),
+                tokens: Vec::new(), selected: None, definition: Some((0, false)),
+                click_generation: Some(window.click_generation), session: session.clone(),
+            }).unwrap();
+            window.poll();
+            assert_eq!(window.definitions.len(), expected);
+            assert_eq!(window.definitions.last().unwrap().session, session);
+        }
+    }
+
+    #[test]
+    #[ignore = "Moves the real desktop pointer over native search definitions"]
+    fn native_parent_reentry_closes_children_before_a_replacement_miss() {
+        let (mut window, _fixture, _guard) = fixture();
+        replace_input(&window, "猫");
+        wait(&mut window, "candidate");
+        window.state.selected.set(Some(0));
+        window.poll();
+        let mut saved = POINT::default();
+        // SAFETY: This buffer receives the desktop pointer.
+        unsafe { GetCursorPos(&mut saved).unwrap(); }
+        struct RestorePointer(POINT);
+        impl Drop for RestorePointer {
+            fn drop(&mut self) {
+                // SAFETY: Restore the saved desktop pointer.
+                unsafe { let _ = SetCursorPos(self.0.x, self.0.y); }
+            }
+        }
+        let _restore = RestorePointer(saved);
+        let point = search_popup::tests::hover_point(&mut window.definitions[0], "猫");
+        let anchor = window.definitions[0].anchor().unwrap();
+        let position = LPARAM(((point.y as isize) << 16) | point.x as isize);
+        // SAFETY: This test moves the pointer to its own live HWND.
+        unsafe {
+            SetCursorPos(anchor.x + point.x, anchor.y + point.y).unwrap();
+            SendMessageW(window.definitions[0].hwnd(), WM_MOUSEMOVE, None, Some(position));
+        }
+        let mut monitor = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default() };
+        // SAFETY: The live parent selects a monitor for this local output buffer.
+        unsafe {
+            GetMonitorInfoW(MonitorFromWindow(window.definitions[0].hwnd(),
+                MONITOR_DEFAULTTONEAREST), &mut monitor).ok().unwrap();
+        }
+        let work = monitor.rcWork;
+        let child_x = if anchor.x + point.x < work.left + (work.right - work.left) / 2 {
+            work.right - 1
+        } else { work.left };
+        let child = SearchPopup::open(&window.database, window.session.nested(), window.hwnd,
+            selected_presentation(&window.result, 0).unwrap(),
+            PhysPoint { x: child_x, y: work.top }, true).unwrap();
+        window.definitions[0].note_child_opened();
+        window.definitions.push(child);
+        window.hover = Some((0, "猫".into(), Instant::now(), true));
+        window.poll();
+        assert_eq!(window.definitions.len(), 2, "A stationary pointer keeps the child");
+
+        let (requests, inbox) = mpsc::channel();
+        window.requests = requests;
+        let (sender, replies) = mpsc::channel();
+        window.replies = replies;
+        window.begin_click(1);
+        let old_click_generation = window.click_generation;
+        let child_anchor = window.definitions[1].anchor().unwrap();
+        // SAFETY: Both pointer positions belong to this explicit desktop test.
+        unsafe {
+            SetCursorPos(child_anchor.x + 2, child_anchor.y + 2).unwrap();
+            SetCursorPos(anchor.x + point.x, anchor.y + point.y).unwrap();
+            SendMessageW(window.definitions[0].hwnd(), WM_MOUSEMOVE, None, Some(position));
+        }
+        window.poll();
+        assert_eq!(window.definitions.len(), 1);
+        assert_ne!(window.click_generation, old_click_generation);
+        assert!(inbox.try_recv().is_err());
+        let (_, _, since, sent) = window.hover.as_mut().unwrap();
+        *since = Instant::now() - Duration::from_millis(400);
+        assert!(!*sent);
+        window.poll();
+        let SearchRequest::Run(query) = inbox.try_recv().unwrap() else { panic!("Expected a hover lookup"); };
+        assert_eq!(query.definition, Some((0, true)));
+        sender.send(Reply {
+            generation: query.generation, result: Ok(SearchResult::Miss),
+            tokens: Vec::new(), selected: None, definition: query.definition,
+            click_generation: None, session: query.session,
+        }).unwrap();
+        window.poll();
+        assert_eq!(window.definitions.len(), 1);
+    }
+
+    #[test]
     #[ignore = "Moves the real desktop pointer over a native search definition"]
-    fn native_definition_hover_and_disable_toggle() {
+    fn native_definition_hover_uses_nested_profile() {
         let (mut window, fixture, _guard) = fixture();
         let connection = rusqlite::Connection::open(&fixture.0).unwrap();
         connection.execute("UPDATE entry SET glossary = ?1 WHERE entry_id IN (SELECT entry_id FROM term WHERE written = '猫')",
@@ -1127,16 +1701,10 @@ mod tests {
             }
             if window.definitions.len() == 2 { chosen = Some(offset); break; }
         }
-        let offset = chosen.expect("hover over ruby-backed 食べる must open a child definition");
-        let mut config = Config::default(); config.popup.sub_popups = false;
-        window.update_config(&config); wait(&mut window, "candidate");
-        window.state.selected.set(Some(candidate)); window.poll();
-        let origin = window.definitions[0].anchor().unwrap();
-        // SAFETY: This explicit desktop test targets its own definition window.
-        unsafe { SetCursorPos(origin.x + 20, origin.y + offset).unwrap(); }
-        let deadline = Instant::now() + Duration::from_millis(600);
-        while Instant::now() < deadline { wait(&mut window, "candidate"); std::thread::sleep(Duration::from_millis(20)); }
-        assert_eq!(window.definitions.len(), 1);
+        assert!(chosen.is_some(), "hover over ruby-backed 食べる must open a child definition");
+        let nested = window.session.nested();
+        assert_eq!(window.definitions[1].session.id(), nested.id());
+        assert!(!window.definitions[1].session.config().popup.sub_popups);
     }
 
     #[test]
@@ -1197,7 +1765,7 @@ mod tests {
     }
 
     #[test]
-    fn native_ime_stale_results_empty_miss_and_config() {
+    fn native_ime_stale_results_empty_and_miss() {
         let (mut window, _fixture, _guard) = fixture();
         window.state.submit.set(false);
         // SAFETY: Messages target this test thread's native edit.
@@ -1211,10 +1779,6 @@ mod tests {
         // SAFETY: Setters copy text on the owner thread.
         unsafe { SendMessageW(window.state.input.get(), WM_IME_END, None, None); SetWindowTextW(window.state.input.get(), w!("猫")).unwrap(); }
         wait(&mut window, "candidate");
-        let mut config = Config::default();
-        config.dictionaries.terms_disabled = vec!["FixtureTerms".into()];
-        window.update_config(&config); wait(&mut window, "No matching entries");
-        window.update_config(&Config::default()); wait(&mut window, "candidate");
         // SAFETY: These are synchronous native text changes.
         replace_input(&window, "　 ");
         wait(&mut window, "Type a word");
@@ -1226,14 +1790,16 @@ mod tests {
         wait(&mut window, "candidate");
         let (sender, replies) = mpsc::channel(); window.replies = replies;
         sender.send(Reply { generation: window.generation.wrapping_sub(1), result: Ok(SearchResult::Miss),
-            tokens: vec![], selected: None, definition: None }).unwrap();
+            tokens: vec![], selected: None, definition: None, click_generation: None,
+            session: window.session.clone() }).unwrap();
         window.poll(); assert!(matches!(window.result, SearchResult::Found(_)));
         window.state.selected.set(Some(0));
         window.poll();
         assert_eq!(1, window.definitions.len());
         let cancelled_generation = window.generation;
         sender.send(Reply { generation: cancelled_generation, result: Ok(SearchResult::Miss),
-            tokens: vec![], selected: None, definition: None }).unwrap();
+            tokens: vec![], selected: None, definition: None, click_generation: None,
+            session: window.session.clone() }).unwrap();
         // SAFETY: This query reads the current test thread's actual keyboard focus.
         let focused = unsafe { windows::Win32::UI::Input::KeyboardAndMouse::GetFocus() };
         assert_eq!(focused, window.definitions[0].hwnd());

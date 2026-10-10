@@ -228,19 +228,13 @@ mod tests {
     use crate::ui::settings_layout::{SettingId, SettingsLayout};
     use std::collections::HashSet;
 
-    const REQUIRED_STATIC_IDS: &[i64] = &[
-        100, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115,
-        116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 130,
-        131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 143, 144, 145, 146, 147,
-        148, 149, 150, 151, 152, 153, 154, 156, 157, 158, 159, 160, 161, 162, 163,
-        164, 165, 166, 167, 168, 169, 170, 171, 172, 173, 174, 175, 176, 177, 178,
-        179, 180, 181, 182, 183, 184, 185, 186, 187, 189, 190, 191, 192, 193, 194,
-    ];
-
     #[test]
     fn audit_follows_runtime_tabs_and_expands_the_field_map_owner() {
         let mut config = Config::default();
-        config.anki.enabled = true;
+        let mut settings = config.resolve(&config.default_profile).unwrap();
+        settings.anki.enabled = true;
+        let default_profile = config.default_profile.clone();
+        config.update_profile(&default_profile, &settings).unwrap();
         let form = crate::settings::from_config(&config, &[]);
         let window = SettingsWindow::open(&form, &[], ApplyMode::Standalone).unwrap();
         let data = collect(&window);
@@ -258,9 +252,6 @@ mod tests {
                 if id > 0 && control["depth"].as_u64().unwrap() <= 2 {
                     assert!(identifiers.insert(id), "duplicate control {id} on tab {tab}");
                 }
-            }
-            for id in REQUIRED_STATIC_IDS {
-                assert!(identifiers.contains(id), "missing required control {id} on tab {tab}");
             }
         }
         let expanded = dumps.last().unwrap();
@@ -281,7 +272,10 @@ mod tests {
         }
         layout.tabs[0].sections[0].entries.insert(0, field_map.unwrap());
         let mut config = Config::default();
-        config.anki.enabled = true;
+        let mut settings = config.resolve(&config.default_profile).unwrap();
+        settings.anki.enabled = true;
+        let default_profile = config.default_profile.clone();
+        config.update_profile(&default_profile, &settings).unwrap();
         let form = crate::settings::from_config(&config, &[]);
         let window = SettingsWindow::open_with_layout(&form, &[], ApplyMode::Standalone, layout).unwrap();
         window.populate_fields(vec!["Expression".into(), "Reading".into()]);

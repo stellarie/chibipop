@@ -335,10 +335,12 @@ pub fn run() -> Result<()> {
 
                     // This keeps the probe highlight equal to the popup highlight.
                     let all_dicts = dictionary.dicts()?;
+                    let mut profile = chibipop::config::ResolvedConfig::default();
+                    profile.dictionaries.terms = all_dicts.iter().map(|dict| dict.name.clone()).collect();
                     let presentation = chibipop::present::build(
                         &hits,
                         &all_dicts,
-                        &chibipop::config::Config::default().present_config(&all_dicts),
+                        &profile.present_config(),
                         &dictionary,
                     );
                     match chibipop::present::match_highlight(&r.span, presentation.top.as_ref()) {
@@ -472,12 +474,14 @@ pub fn run() -> Result<()> {
             let rules = rules_path(rules);
             let config_path = config.unwrap_or_else(default_config_path);
             let cfg = chibipop::config::load_or_create(&config_path)?;
+            let dicts = SqliteDictionary::open(&dict)?.dicts()?;
+            let session = chibipop::config::ProfileCatalog::new(&cfg, &dicts)?.session(None)?;
             chibipop_windows::text::capture::init_dpi_awareness()?;
             let mode = if sentence { chibipop::search::SearchMode::Sentence }
                 else { chibipop::search::SearchMode::Dictionary };
             let mut search = chibipop_windows::ui::search_window::SearchWindow::open_mode(
-                &dict, &rules, &cfg, mode, text.as_deref())?;
-            search.set_config_path(&config_path);
+                &dict, &rules, session, mode, text.as_deref())?;
+            search.set_resource_config_path(&config_path);
             while search.is_visible() {
                 use windows::Win32::UI::WindowsAndMessaging::{MSG, PeekMessageW, TranslateMessage, DispatchMessageW, PM_REMOVE};
                 let mut message = MSG::default();
@@ -667,7 +671,7 @@ fn default_config_path() -> PathBuf {
 
 /// Returns the probe capture box from the configuration.
 fn probe_capture_size() -> chibipop::text::layout::CaptureSize {
-    match chibipop::config::load_or_create(&default_config_path()) {
+    match chibipop::config::load_or_create(&default_config_path()).and_then(|cfg| cfg.resolved(None)) {
         Ok(cfg) => chibipop::text::layout::CaptureSize {
             w: cfg.ocr.capture_width,
             h: cfg.ocr.capture_height,

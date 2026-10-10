@@ -85,9 +85,9 @@ pub struct TextEngine {
     /// offset. The popup re-shapes on every paint, and this cache makes
     /// each re-shape after the first frame free.
     swash: SwashCache,
-    /// The family the config resolved to. The paint path uses it.
-    /// `measure` takes its family from the run instead, because core
-    /// carries the theme's name through the scene.
+    /// The family that the active config resolved to.
+    /// Paint spans carry their own family from the theme.
+    /// `measure` and `draw_run` use those span families.
     family: String,
 }
 
@@ -112,12 +112,12 @@ impl TextEngine {
         }
     }
 
-    /// The family the paint path uses.
+    /// The family that the active config resolved to.
     pub fn family(&self) -> &str {
         &self.family
     }
 
-    /// Select another family for paints, and keep the loaded font db.
+    /// Select another config family, and keep the loaded font db.
     ///
     /// The engine exists *before* resolution: `resolve_font` asks the
     /// engine whether the configured family is installed. A reload can
@@ -125,10 +125,11 @@ impl TextEngine {
     /// installed face for one string swap would cost the better part
     /// of a second on the daemon thread.
     pub fn set_family(&mut self, family: &str) {
-        self.family.clear();
-        self.family.push_str(family);
+        if self.family != family {
+            self.family.clear();
+            self.family.push_str(family);
+        }
     }
-
     /// True when the font stack holds `family`.
     ///
     /// `chibipop::config::resolve_font` wants this closure, and the
@@ -404,15 +405,8 @@ impl PanelText for TextEngine {
     /// glyph. Therefore the walk lives here: cosmic-text's own two
     /// lines plus the shift, which enters as the glyph's own y offset.
     fn draw_run(&mut self, run: DrawRun<'_>, target: &mut PixmapMut<'_>) {
-        // Use the family the config resolved to, not the theme's name.
-        // Measurement takes the name the scene carries. Paint takes
-        // the name that is installed. The borrows must stay disjoint -
-        // `family` here, and `fonts` plus `swash` below - which is why
-        // `shape` is an associated function.
-        let family = self.family.as_str();
-        let spans: Vec<StyledSpan<'_>> =
-            run.spans.iter().map(|s| StyledSpan { font: family, ..*s }).collect();
-        let buffer = TextEngine::shape(&mut self.fonts, &spans, run.max_w);
+        let spans = run.spans;
+        let buffer = TextEngine::shape(&mut self.fonts, spans, run.max_w);
         // cosmic-text snaps the glyph raster to the pixel grid, so the
         // wrap box's own origin snaps too. A fractional pen would only
         // smear the hinting.
@@ -422,12 +416,12 @@ impl PanelText for TextEngine {
         let px = target.pixels_mut();
         let mut bases = LineBases::default();
         for line in buffer.layout_runs() {
-            let base = bases.advance(&spans, &line);
+            let base = bases.advance(spans, &line);
             for glyph in line.glyphs {
                 // A glyph that no span claims keeps the first span's
                 // color and sits on the baseline. The seam's own
                 // measurement skips such a glyph too.
-                let (index, span) = match span_at(&spans, base + glyph.start) {
+                let (index, span) = match span_at(spans, base + glyph.start) {
                     Some(found) => found,
                     None => (0, &spans[0]),
                 };
@@ -1429,7 +1423,7 @@ mod tests {
             // White on the black fill below, so the ink is visible.
             let spans = [StyledSpan {
                 text: PROBE_TEXT,
-                font: "",
+                font: JP,
                 size: 20.0,
                 weight: 400,
                 italic: false,

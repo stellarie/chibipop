@@ -4,7 +4,7 @@
 //! The platform bin supplies the two seams and the wake callback.
 //! The platform bin also drives its own event loop.
 
-use crate::config::SentenceMode;
+use crate::config::{SentenceMode, ProfileSession};
 use crate::controller::{LookupOutcome, RequestId};
 use crate::geom::{PhysPoint, PhysRect, ScanDisplay, ScanKind, ScanRect};
 use crate::lookup::engine::LookupEngine;
@@ -15,12 +15,13 @@ use crate::text::mask::CaptureMask;
 use crate::text::sentence;
 use crate::text::{OcrEngine, RegionCapture, SettingsSnapshot, TextSource};
 use anyhow::{Context, Result};
+use std::collections::VecDeque;
 use std::sync::mpsc;
 use std::thread;
 use std::time::Instant;
 
 /// One hover contains the cursor position and the mask for its grab.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct Hover {
     pub at: PhysPoint,
     /// The popup that the platform cannot exclude from a grab.
@@ -28,24 +29,26 @@ pub struct Hover {
     /// a frozen grab because that grab predates the popup. It also applies
     /// when the platform excludes the surface.
     pub mask: CaptureMask,
+    pub session: ProfileSession,
 }
 
 /// One sentence probe for an Anki add.
 ///
 /// This trigger is separate from [`Hover`]. It needs no hit scan or presentation.
 /// It must survive newer hovers until the add can answer.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct SentenceProbe {
     pub anchor: PhysRect,
     pub orientation: Orientation,
     pub mask: CaptureMask,
+    pub session: ProfileSession,
 }
 
 /// The Worker accepts lookups, state changes, and cache maintenance requests.
 pub enum TriggerKind {
     Hover(Hover),
     Sentence(SentenceProbe),
-    DrillDown(String),
+    DrillDown { text: String, session: ProfileSession },
     Reload(Box<WorkerSettings>),
     /// A trigger press takes one full grab of the output that contains this
     /// point. The Worker reads each lookup from that grab until
@@ -128,10 +131,7 @@ pub struct WorkerResult {
 /// new file so the Worker can use it.
 pub type ReopenDict = Box<dyn Fn() -> Result<Box<dyn Dictionary>>>;
 
-/// A job runner that uses the OCR facade between lookups.
-/// See `WorkerParts::serve`.
-pub type ServeHook = Box<dyn FnMut(&TextSource)>;
-
+pub type ServeHook = Box<dyn FnMut(&TextSource, Option<&ProfileSession>)>;
 /// The bin creates these parts on the Worker thread.
 ///
 /// This thread owns the parts because a backend can require a thread.
@@ -255,7 +255,7 @@ enum Pre {
 /// The newest lookup that a drained batch runs after its state changes.
 enum Lookup {
     Hover(Box<Hover>),
-    DrillDown(String),
+    DrillDown { text: String, session: ProfileSession },
 }
 
 impl Lookup {
@@ -263,7 +263,7 @@ impl Lookup {
     fn name(&self) -> &'static str {
         match self {
             Lookup::Hover(_) => "hover",
-            Lookup::DrillDown(_) => "drill_down",
+            Lookup::DrillDown { .. } => "drill_down",
         }
     }
 }
@@ -335,7 +335,9 @@ fn drain(
         TriggerKind::Sentence(probe) => pre.push(Pre::Sentence(t.id, probe)),
         TriggerKind::CacheBust(reply) => pre.push(Pre::CacheBust(t.id, reply)),
         TriggerKind::Hover(h) => lookup = Some((t.id, Lookup::Hover(Box::new(h)))),
-        TriggerKind::DrillDown(text) => lookup = Some((t.id, Lookup::DrillDown(text))),
+        TriggerKind::DrillDown { text, session } => {
+            lookup = Some((t.id, Lookup::DrillDown { text, session }))
+        }
         // The wake already arrived.
         TriggerKind::Serve => {}
     };
@@ -346,16 +348,74 @@ fn drain(
     (lookup, pre)
 }
 
-/// State that a lookup uses after a reload.
-/// A `Reload` replaces all of this state except the OCR settings in
-/// `TextSource` and the Dictionary handle.
-struct LookupState {
-    present_cfg: PresentConfig,
+/// Request-owned settings for one retained profile.
+#[derive(Clone)]
+struct ProfileRequestSettings {
+    session: ProfileSession,
+    snapshot: SettingsSnapshot,
+    language: String,
     scan_display: ScanDisplay,
     sentence_mode: SentenceMode,
     static_region: Option<PhysRect>,
-    /// The Worker refreshes this list after each Reload.
     dicts: Vec<DictInfo>,
+}
+
+const PROFILE_SETTINGS_CACHE_CAPACITY: usize = 8;
+
+/// Keep a bounded cache of session settings and installed Dictionary identities.
+struct LookupState {
+    profiles: VecDeque<ProfileRequestSettings>,
+    upscale: i32,
+    dicts: Vec<DictInfo>,
+    scan_display: ScanDisplay,
+}
+
+impl LookupState {
+    fn for_session(&mut self, session: &ProfileSession) -> &ProfileRequestSettings {
+        if let Some(index) = self.profiles.iter().position(|profile| profile.session == *session) {
+            if index != 0 {
+                let cached = self.profiles.remove(index).expect("the profile was found");
+                self.profiles.push_front(cached);
+            }
+        } else {
+            let config = session.config();
+            let settings = &config.ocr;
+            let profile = ProfileRequestSettings {
+                session: session.clone(),
+                snapshot: SettingsSnapshot {
+                    max_passes: settings.max_ocr_passes,
+                    upscale: self.upscale,
+                    prefer_vertical: settings.prefer_vertical,
+                    capture: CaptureSize {
+                        w: settings.capture_width,
+                        h: settings.capture_height,
+                    },
+                    scan_alphanumeric: settings.scan_alphanumeric,
+                    discard_furigana: settings.discard_furigana,
+                },
+                language: settings.language.clone(),
+                scan_display: ScanDisplay {
+                    captures: self.scan_display.captures,
+                    highlight: config.popup.highlight_match,
+                },
+                sentence_mode: config.anki.sentence_mode,
+                static_region: config.anki.static_region.map(|[x, y, w, h]| {
+                    PhysRect { x, y, w, h }
+                }),
+                dicts: self.dicts.clone(),
+            };
+            self.profiles.push_front(profile);
+            if self.profiles.len() > PROFILE_SETTINGS_CACHE_CAPACITY {
+                self.profiles.pop_back();
+            }
+        }
+        self.profiles.front().expect("profile settings are cached")
+    }
+}
+
+fn apply_profile_settings(source: &mut TextSource, profile: &ProfileRequestSettings) {
+    source.apply_settings(profile.snapshot, &profile.language);
+    source.set_profile_scope(&profile.session);
 }
 
 /// Apply one reload to the cache.
@@ -371,11 +431,10 @@ fn take_reload(
     dict: &mut Box<dyn Dictionary>,
     state: &mut LookupState,
 ) {
-    state.present_cfg = s.present_cfg;
-    state.scan_display = s.scan_display;
-    state.sentence_mode = s.sentence_mode;
-    state.static_region = s.static_region;
+    state.profiles.clear();
+    state.upscale = s.upscale;
     state.dicts = s.dicts;
+    state.scan_display = s.scan_display;
     let Some(reopen) = reopen else { return };
     match reopen().and_then(|fresh| {
         let identities = fresh.dicts().context("reading dictionary identities")?;
@@ -424,11 +483,10 @@ fn worker_main(
     let mut source = TextSource::new(capture, ocr, settings.snapshot());
     source.set_show_lookup_log(settings.show_lookup_log);
     let mut state = LookupState {
-        present_cfg: settings.present_cfg,
-        scan_display: settings.scan_display,
-        sentence_mode: settings.sentence_mode,
-        static_region: settings.static_region,
+        profiles: VecDeque::new(),
+        upscale: settings.upscale,
         dicts,
+        scan_display: settings.scan_display,
     };
 
     // Clone the list. An Arc adds no needed behavior.
@@ -448,7 +506,7 @@ fn worker_main(
         // An idle Worker with a hook waits. It does not poll
         // (ARCHITECTURE.md#hover-cadence).
         if let Some(hook) = &mut serve {
-            hook(&source);
+            hook(&source, None);
         }
         let Ok(first) = trigger_rx.recv() else { break };
         let (lookup, pre) = drain(first, &trigger_rx);
@@ -458,7 +516,7 @@ fn worker_main(
                     let started = Instant::now();
                     log_request_start(id, "reload");
                     if let Some(hook) = &mut serve {
-                        hook(&source);
+                        hook(&source, None);
                     }
                     source.apply_settings(s.snapshot(), &s.language);
                     source.set_show_lookup_log(s.show_lookup_log);
@@ -506,6 +564,7 @@ fn worker_main(
                             source.clear_lookup_cache();
                             dict = fresh;
                             state.dicts = identities.clone();
+                            state.profiles.clear();
                             let _ = reply.send(Ok(identities));
                             log_state_complete(id, "cache_bust", "cleared", started);
                         }
@@ -519,6 +578,11 @@ fn worker_main(
                 Pre::Sentence(id, probe) => {
                     let started = Instant::now();
                     log_request_start(id, "sentence");
+                    let profile = state.for_session(&probe.session);
+                    apply_profile_settings(&mut source, profile);
+                    if let Some(hook) = &mut serve {
+                        hook(&source, Some(&probe.session));
+                    }
                     let outcome = resolve_sentence_safe(&mut source, probe);
                     let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
                     eprintln!(
@@ -545,16 +609,28 @@ fn worker_main(
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             match lookup {
                 Lookup::Hover(h) => {
-                    resolve_trigger(id, &mut source, dict.as_ref(), &engine, &state, *h)
+                    let profile = state.for_session(&h.session);
+                    apply_profile_settings(&mut source, profile);
+                    if let Some(hook) = &mut serve {
+                        hook(&source, Some(&h.session));
+                    }
+                    resolve_trigger(id, &mut source, dict.as_ref(), &engine, profile, *h)
                 }
-                Lookup::DrillDown(text) => resolve_drilldown(
-                    id,
-                    dict.as_ref(),
-                    &engine,
-                    &state.dicts,
-                    &state.present_cfg,
-                    &text,
-                ),
+                Lookup::DrillDown { text, session } => {
+                    let profile = state.for_session(&session);
+                    apply_profile_settings(&mut source, profile);
+                    if let Some(hook) = &mut serve {
+                        hook(&source, Some(&session));
+                    }
+                    resolve_drilldown(
+                        id,
+                        dict.as_ref(),
+                        &engine,
+                        &profile.dicts,
+                        profile.session.present_config(),
+                        &text,
+                    )
+                }
             }
         }))
         .unwrap_or_else(|_| LookupOutcome::Failed("a hover lookup panicked".to_string()));
@@ -573,7 +649,7 @@ fn resolve_trigger(
     source: &mut TextSource,
     dict: &dyn Dictionary,
     engine: &LookupEngine,
-    state: &LookupState,
+    state: &ProfileRequestSettings,
     hover: Hover,
 ) -> LookupOutcome {
     if state.sentence_mode == SentenceMode::Static {
@@ -644,7 +720,7 @@ fn resolve_static(
     source: &mut TextSource,
     dict: &dyn Dictionary,
     engine: &LookupEngine,
-    state: &LookupState,
+    state: &ProfileRequestSettings,
     hover: Hover,
     region: PhysRect,
 ) -> LookupOutcome {
@@ -727,7 +803,7 @@ struct PresentLog {
 fn present_lookup(
     dict: &dyn Dictionary,
     engine: &LookupEngine,
-    state: &LookupState,
+    state: &ProfileRequestSettings,
     resolved: &Resolved,
     sentence: impl FnOnce() -> String,
     mut scan: Vec<ScanRect>,
@@ -764,7 +840,7 @@ fn present_lookup(
     }
 
     let presentation_started = Instant::now();
-    let mut presentation = present::build(&hits, &state.dicts, &state.present_cfg, dict);
+    let mut presentation = present::build(&hits, &state.dicts, state.session.present_config(), dict);
     presentation.sentence = Some(sentence());
     // `match_len` counts characters of the trimmed input, as `match_highlight` does.
     // Keep the complete trimmed source so a promoted Card can use its own length.
@@ -874,19 +950,26 @@ mod tests {
     #[test]
     fn popup_hover_uses_dictionary_prefixes_without_screen_text() {
         let state = state_with(vec![di(1, "FakeDict")]);
-        let outcome = resolve_drilldown(RequestId(1), &eating_dict(), &engine(), &state.dicts, &state.present_cfg, "食べる");
+        let outcome = resolve_drilldown(
+            RequestId(1),
+            &eating_dict(),
+            &engine(),
+            &state.dicts,
+            state.session.present_config(),
+            "食べる",
+        );
         let LookupOutcome::DrillDown(presentation) = outcome else { panic!("dictionary prefix must resolve") };
         assert_eq!(presentation.top.as_ref().and_then(|card| card.written.as_deref()), Some("食"));
         assert!(presentation.sentence.is_none());
         assert!(presentation.surface.is_none());
     }
-    use crate::config::Config;
+    use crate::config::ResolvedConfig;
     use crate::lookup::deconj::Deconjugator;
     use crate::lookup::model::FakeDictionary;
     use crate::text::layout::{Orientation, TextGeom};
     use crate::text::TextSpan;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    use std::sync::Arc;
+    use std::sync::{Arc, LazyLock};
     use std::time::Duration;
 
     struct ReadLog {
@@ -974,7 +1057,11 @@ mod tests {
             discard_furigana: true,
             show_lookup_log: false,
             language: "ja".to_string(),
-            present_cfg: Config::default().present_config(&[]),
+            present_cfg: {
+                let mut cfg = ResolvedConfig::default();
+                cfg.dictionaries.terms = vec!["FakeDict".to_string()];
+                cfg.present_config()
+            },
             scan_display: ScanDisplay { captures: false, highlight: false },
             sentence_mode: SentenceMode::Line,
             static_region: None,
@@ -1059,12 +1146,12 @@ mod tests {
         let reload = TriggerKind::Reload(Box::new(ws(2)));
         tx.send(Trigger { kind: reload, id: RequestId(2) }).unwrap();
         let at = PhysPoint { x: 9, y: 9 };
-        let newer = TriggerKind::Hover(Hover { at, mask: CaptureMask::NONE });
+        let newer = TriggerKind::Hover(Hover { at, mask: CaptureMask::NONE, session: test_session() });
         tx.send(Trigger { kind: newer, id: RequestId(3) }).unwrap();
         let second = TriggerKind::Reload(Box::new(ws(4)));
         tx.send(Trigger { kind: second, id: RequestId(4) }).unwrap();
         let at = PhysPoint { x: 1, y: 1 };
-        let older = TriggerKind::Hover(Hover { at, mask: CaptureMask::NONE });
+        let older = TriggerKind::Hover(Hover { at, mask: CaptureMask::NONE, session: test_session() });
         let first = Trigger { kind: older, id: RequestId(1) };
         let (hover, pre) = drain(first, &rx);
         let (id, lookup) = hover.expect("a hover survives");
@@ -1090,17 +1177,18 @@ mod tests {
                 anchor: PhysRect { x: 20, y: 30, w: 40, h: 40 },
                 orientation: Orientation::Horizontal,
                 mask: CaptureMask::NONE,
+                session: test_session(),
             }),
             id: RequestId(2),
         })
         .unwrap();
         tx.send(Trigger {
-            kind: TriggerKind::Hover(Hover { at: second_at, mask: CaptureMask::NONE }),
+            kind: TriggerKind::Hover(Hover { at: second_at, mask: CaptureMask::NONE, session: test_session() }),
             id: RequestId(3),
         })
         .unwrap();
         let first = Trigger {
-            kind: TriggerKind::Hover(Hover { at: first_at, mask: CaptureMask::NONE }),
+            kind: TriggerKind::Hover(Hover { at: first_at, mask: CaptureMask::NONE, session: test_session() }),
             id: RequestId(1),
         };
 
@@ -1125,8 +1213,11 @@ mod tests {
     fn drain_keeps_a_freeze_and_a_thaw_in_arrival_order() {
         let (tx, rx) = mpsc::channel::<Trigger>();
         let at = PhysPoint { x: 40, y: 50 };
-        tx.send(Trigger { kind: TriggerKind::Hover(Hover { at, mask: CaptureMask::NONE }), id: RequestId(2) })
-            .unwrap();
+        tx.send(Trigger {
+            kind: TriggerKind::Hover(Hover { at, mask: CaptureMask::NONE, session: test_session() }),
+            id: RequestId(2),
+        })
+        .unwrap();
         tx.send(Trigger { kind: TriggerKind::Thaw, id: RequestId(3) }).unwrap();
         drop(tx);
         let first = Trigger { kind: TriggerKind::Freeze(at), id: RequestId(1) };
@@ -1166,8 +1257,7 @@ mod tests {
 
     #[test]
     fn a_panicking_sentence_probe_returns_none_and_closes_live_read_before_later_hover() {
-        let mut settings = ws(1);
-        settings.present_cfg = Config::default().present_config(&[di(1, "FakeDict")]);
+        let settings = ws(1);
         let reads = Arc::new(ReadLog::new());
         let capture_reads = Arc::clone(&reads);
         let (worker, _) = Worker::spawn(
@@ -1193,6 +1283,7 @@ mod tests {
                     anchor: PhysRect { x: 480, y: 480, w: 40, h: 40 },
                     orientation: Orientation::Horizontal,
                     mask: CaptureMask::NONE,
+                    session: test_session(),
                 }),
                 id: RequestId(1),
             })
@@ -1211,6 +1302,7 @@ mod tests {
                 kind: TriggerKind::Hover(Hover {
                     at: PhysPoint { x: 480, y: 480 },
                     mask: CaptureMask::NONE,
+                    session: test_session(),
                 }),
                 id: RequestId(2),
             })
@@ -1275,11 +1367,12 @@ mod tests {
         worker
             .trigger()
             .send(Trigger {
+                id: RequestId(id),
                 kind: TriggerKind::Hover(Hover {
                     at: PhysPoint { x: 400, y: 400 },
                     mask: CaptureMask::NONE,
+                    session: cache_test_session(),
                 }),
-                id: RequestId(id),
             })
             .unwrap();
         worker
@@ -1292,8 +1385,7 @@ mod tests {
     fn cache_bust_reopens_dictionary_and_clears_text_source_before_reply() {
         let calls = Arc::new(AtomicUsize::new(0));
         let open_calls = Arc::clone(&calls);
-        let mut settings = ws(1);
-        settings.present_cfg = Config::default().present_config(&[di(7, "Before")]);
+        let settings = ws(1);
         let (worker, _) = Worker::spawn(
             settings,
             move || {
@@ -1334,8 +1426,7 @@ mod tests {
     fn failed_cache_bust_keeps_dictionary_and_ocr_cache_unchanged() {
         let calls = Arc::new(AtomicUsize::new(0));
         let open_calls = Arc::clone(&calls);
-        let mut settings = ws(1);
-        settings.present_cfg = Config::default().present_config(&[di(7, "Before")]);
+        let settings = ws(1);
         let (worker, _) = Worker::spawn(
             settings,
             move || {
@@ -1383,24 +1474,60 @@ mod tests {
         Box::new(d)
     }
 
-    /// Create a cache with these identities and no other reload state.
-    ///
-    /// Resolve the scope against these identities.
-    /// A config with no Dictionary names enables every Dictionary that it finds.
-    fn state_with(dicts: Vec<DictInfo>) -> LookupState {
+    fn profile_session(dicts: &[DictInfo]) -> ProfileSession {
+        let mut config = crate::config::Config::default();
+        let crate::config::ProfileData::Full { settings } = &mut config.profiles[0].data else {
+            panic!("the default fixture profile must be full");
+        };
+        settings.dictionaries.terms.enabled =
+            dicts.iter().map(|dict| dict.name.clone()).collect();
+        let catalog = crate::config::ProfileCatalog::new(&config, dicts)
+            .expect("the worker test profile must be valid");
+        catalog.session(None).expect("the default test profile must resolve")
+    }
+
+    fn test_session() -> ProfileSession {
+        profile_session(&[di(1, "FakeDict")])
+    }
+    fn cache_test_session() -> ProfileSession {
+        static SESSION: LazyLock<ProfileSession> =
+            LazyLock::new(|| profile_session(&[di(7, "Before"), di(8, "After")]));
+        SESSION.clone()
+    }
+
+    fn lookup_state_with(dicts: Vec<DictInfo>) -> LookupState {
         LookupState {
-            present_cfg: Config::default().present_config(&dicts),
-            scan_display: ScanDisplay { captures: false, highlight: false },
-            sentence_mode: SentenceMode::Line,
-            static_region: None,
+            profiles: VecDeque::new(),
+            upscale: 2,
             dicts,
+            scan_display: ScanDisplay { captures: false, highlight: false },
         }
+    }
+
+    fn state_with(dicts: Vec<DictInfo>) -> ProfileRequestSettings {
+        let session = profile_session(&dicts);
+        let mut state = lookup_state_with(dicts);
+        state.for_session(&session).clone()
+    }
+
+    #[test]
+    fn profile_settings_cache_stays_bounded_across_distinct_sessions() {
+        let sessions: Vec<ProfileSession> = (0..=PROFILE_SETTINGS_CACHE_CAPACITY)
+            .map(|_| profile_session(&[di(1, "FakeDict")]))
+            .collect();
+        let mut state = lookup_state_with(vec![di(1, "FakeDict")]);
+
+        for session in &sessions {
+            let _ = state.for_session(session);
+            assert!(state.profiles.len() <= PROFILE_SETTINGS_CACHE_CAPACITY);
+        }
+        assert_eq!(PROFILE_SETTINGS_CACHE_CAPACITY, state.profiles.len());
     }
 
     /// Keep the id and replace the Dictionary name.
     #[test]
     fn a_reload_replaces_the_cached_dictionary_identities() {
-        let mut state = state_with(vec![di(7, "Removed")]);
+        let mut state = lookup_state_with(vec![di(7, "Removed")]);
         let mut dict = one_dict("Removed");
         let mut s = ws(2);
         s.dicts = vec![di(7, "Added")];
@@ -1416,7 +1543,7 @@ mod tests {
     /// the identities from before the rebuild.
     #[test]
     fn a_reload_reopens_the_dictionary_and_takes_its_identities() {
-        let mut state = state_with(vec![di(7, "BeforeTheRebuild")]);
+        let mut state = lookup_state_with(vec![di(7, "BeforeTheRebuild")]);
         let mut dict = one_dict("BeforeTheRebuild");
         let reopen: ReopenDict = Box::new(|| Ok(one_dict("AfterTheRebuild")));
 
@@ -1434,7 +1561,7 @@ mod tests {
     /// An old Dictionary still answers lookups. A dropped handle answers nothing.
     #[test]
     fn a_failed_reopen_keeps_the_dictionary_already_open() {
-        let mut state = state_with(vec![di(7, "StillHere")]);
+        let mut state = lookup_state_with(vec![di(7, "StillHere")]);
         let mut dict = one_dict("StillHere");
         let reopen: ReopenDict = Box::new(|| anyhow::bail!("the database is a directory"));
 

@@ -70,28 +70,48 @@ impl PopupScene {
                 continue;
             }
             let y = local.1 + scroll - elem.pen.1;
-            if y < 0.0 || y >= elem.rect.h { continue; }
+            if !elem.spans.iter().any(|span| y + span.shift >= 0.0 && y + span.shift < elem.rect.h) {
+                continue;
+            }
             let spans: Vec<_> = elem.styled_spans(font).collect();
             let run = MeasureRun { spans: &spans, max_w: elem.wrap_w };
             let mut measured = Measured::default();
             m.measure(run, &mut measured)?;
-            let offsets: Vec<_> = elem.text.char_indices()
-                .map(|(byte, _)| utf16_offset(&elem.text, byte as u32)).collect();
             let mut boxes = Vec::new();
-            m.caret_boxes(run, &offsets, &mut boxes)?;
-            for ((byte, ch), glyph) in elem.text.char_indices().zip(boxes) {
-                let line = measured.lines.get(line_index(&measured, glyph.y));
-                let slack = line.map_or(0.0, |line| (elem.wrap_w - line.w).max(0.0))
-                    * elem.align.slack_before();
+            for piece in &measured.spans {
+                let Some(line) = measured.lines.get(piece.line as usize) else { continue };
+                let Some(span) = elem.spans.get(piece.span as usize) else { continue };
+                let y = y + span.shift;
+                let slack = (elem.wrap_w - line.w).max(0.0) * elem.align.slack_before();
                 let x = local.0 - elem.pen.0 - slack;
-                if x < glyph.x || x >= glyph.x + glyph.w || y < glyph.y || y >= glyph.y + glyph.h {
+                if x < piece.x || x >= piece.x + piece.w || y < line.y || y >= line.y + line.h {
                     continue;
                 }
-                if !lookup_character(ch) { return Ok(None); }
-                let query: String = elem.text[byte..].chars()
-                    .take_while(|ch| lookup_character(*ch) || *ch == '\u{2060}')
-                    .filter(|ch| *ch != '\u{2060}').take(32).collect();
-                return Ok(Some(query));
+                let offset = m.hit_offset(run, x, y)?;
+                let candidates = hover_candidates(&elem.text, offset).map(|candidate| {
+                    candidate.filter(|(byte, _, _)| {
+                        *byte >= span.at as usize && *byte < (span.at + span.len) as usize
+                    })
+                });
+                let mut offsets = [0; 2];
+                let mut count = 0;
+                for &(_, _, at) in candidates.iter().flatten() {
+                    offsets[count] = at;
+                    count += 1;
+                }
+                if count == 0 { continue; }
+                boxes.clear();
+                m.caret_boxes(run, &offsets[..count], &mut boxes)?;
+                for ((byte, ch, _), glyph) in candidates.into_iter().flatten().zip(&boxes) {
+                    if x < glyph.x || x >= glyph.x + glyph.w || y < glyph.y || y >= glyph.y + glyph.h {
+                        continue;
+                    }
+                    if !lookup_character(ch) { return Ok(None); }
+                    let query: String = elem.text[byte..].chars()
+                        .take_while(|ch| lookup_character(*ch) || *ch == '\u{2060}')
+                        .filter(|ch| *ch != '\u{2060}').take(32).collect();
+                    return Ok(Some(query));
+                }
             }
         }
         Ok(None)
@@ -142,6 +162,23 @@ impl PopupScene {
 
 fn lookup_character(ch: char) -> bool {
     ch.is_alphanumeric() || matches!(ch, '々' | '〆' | 'ヶ' | 'ー')
+}
+
+fn hover_candidates(text: &str, offset: u32) -> [Option<(usize, char, u32)>; 2] {
+    let mut previous = None;
+    let mut units = 0;
+    for (byte, ch) in text.char_indices() {
+        let end = units + ch.len_utf16() as u32;
+        if ch != '\u{2060}' {
+            let candidate = Some((byte, ch, offset.clamp(units, end - 1)));
+            if end > offset {
+                return [previous, candidate];
+            }
+            previous = candidate;
+        }
+        units = end;
+    }
+    [previous, None]
 }
 
 fn source_ranges(elem: &SceneElem, selection: &CardSelection, entry: u32) -> Vec<(u32, u32)> {

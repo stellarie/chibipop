@@ -2,7 +2,8 @@
 
 use crate::anki;
 use crate::config::{
-    resolve_engine, Config, EngineChoice, SelectionButtons, SelectionSeparator, TripleClick,
+    resolve_engine, Config, EngineChoice, ProfileCatalog, ProfileSession, ResolvedConfig,
+    SelectionButtons, SelectionSeparator, TripleClick,
 };
 use crate::controller::{
     Button, Command, Controller, ControllerConfig, Event, LookupOutcome, NoteWriteStatus,
@@ -33,7 +34,9 @@ use crate::ui::layout::anki_button_label;
 use crate::ui::overlay::Overlay;
 use crate::ui::placement;
 use crate::ui::render::{Renderer, SceneInputs};
-use crate::ui::settings_window::{ApplyMode, ApplyState, SettingsClick, SettingsOutcome, SettingsWindow};
+use crate::ui::settings_window::{
+    ApplyMode, ApplyState, ProfileAction, SettingsClick, SettingsOutcome, SettingsWindow,
+};
 use crate::ui::static_overlay::StaticRegionOverlay;
 use crate::ui::theme::Theme;
 use crate::ui::tray::{Tray, TrayCommand};
@@ -49,7 +52,7 @@ use std::mem::size_of;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{LPARAM, POINT, WPARAM};
@@ -60,8 +63,8 @@ use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::WindowsAndMessaging::{
     DispatchMessageW, GetCursorPos, GetMessageW, IsDialogMessageW, IsWindowVisible, KillTimer,
     LoadCursorW, MessageBoxW, PostQuitMessage, PostThreadMessageW, SetCursor, SetTimer, ShowWindow,
-    TranslateMessage, IDC_HAND, MSG, SW_HIDE, SW_SHOWNOACTIVATE, WM_APP, WM_KEYDOWN, WM_SYSKEYDOWN,
-    WM_TIMER, IDYES, MB_ICONQUESTION, MB_YESNO,
+    TranslateMessage, IDC_HAND, MSG, SW_HIDE, SW_SHOWNOACTIVATE, WM_APP, WM_KEYDOWN, WM_KEYUP,
+    WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, IDYES, MB_ICONQUESTION, MB_YESNO,
 };
 
 /// The Worker posts this message after it pushes a result.
@@ -118,10 +121,14 @@ enum CacheBustPoll {
 fn poll_cache_bust(
     pending: &mut Option<PendingCacheBust>,
     now: std::time::Instant,
+    dismiss_popup: impl FnOnce(),
 ) -> Option<CacheBustPoll> {
     let wait = pending.as_mut()?;
     match wait.rx.try_recv() {
         Ok(result) => {
+            if result.is_ok() {
+                dismiss_popup();
+            }
             *pending = None;
             Some(CacheBustPoll::Complete(result))
         }
@@ -170,16 +177,6 @@ fn sentence_send_feedback(
     })
 }
 
-/// Builds the Events that the timer sends for one hook poll.
-fn route_hook_events(
-    press: Option<PhysPoint>,
-    moved: Option<PhysPoint>,
-) -> [Option<Event>; 2] {
-    [
-        press.map(|pos| Event::TriggerPressed { pos }),
-        moved.map(|pos| Event::CursorMoved { pos }),
-    ]
-}
 
 fn route_escape(search_focused: bool, popup_depth: usize) -> Option<Event> {
     if search_focused {
@@ -193,7 +190,8 @@ fn route_escape(search_focused: bool, popup_depth: usize) -> Option<Event> {
 
 /// The result of one duplicate check.
 struct AnkiDupeResult {
-    gen: u64,
+    generation: u64,
+    session: ProfileSession,
     /// `None` means that the connection failed.
     dupes: Option<HashSet<String>>,
 }
@@ -212,8 +210,15 @@ fn unique_exprs(exprs: Vec<String>) -> Vec<String> {
 
 /// The result of one add-note operation.
 struct AddNoteResult {
+    id: RequestId,
+    session: ProfileSession,
     expr: String,
     result: std::result::Result<anki::WriteResult, String>,
+}
+struct RuntimeScreenshotResult {
+    id: RequestId,
+    session: ProfileSession,
+    result: crate::action::ScreenshotResult,
 }
 
 struct SettingsStatus {
@@ -228,10 +233,10 @@ struct SaveResult {
     result: Result<()>,
 }
 
-#[derive(Clone, Copy)]
 struct PendingApplySave {
     generation: u64,
     partial_failure: bool,
+    applied: Option<settings::AppliedSettings>,
 }
 
 fn saved_apply_state(pending: &mut Option<PendingApplySave>, saved: &SaveResult) -> Option<ApplyState> {
@@ -249,16 +254,37 @@ fn saved_apply_state(pending: &mut Option<PendingApplySave>, saved: &SaveResult)
 }
 
 fn finish_save(
-    window: Option<&SettingsWindow>,
+    mut window: Option<&mut SettingsWindow>,
+    form: &mut SettingsForm,
+    dicts: &[DictInfo],
     pending: &mut Option<PendingApplySave>,
     saved: SaveResult,
     path: &Path,
     latest_sequence: u64,
 ) {
     let latest = saved.sequence == latest_sequence;
+    let matches_apply = pending.as_ref()
+        .is_some_and(|current| saved.generation == Some(current.generation));
+    let applied = if latest && matches_apply && saved.result.is_ok() {
+        pending.as_mut().and_then(|current| current.applied.take())
+    } else {
+        None
+    };
     let current = if latest { saved_apply_state(pending, &saved) } else { None };
+    if let Some(applied) = applied {
+        match form.accept_applied(applied, dicts) {
+            Ok(()) => {
+                if let Some(window) = window.as_deref_mut() {
+                    if let Err(error) = window.replace_form(form) {
+                        eprintln!("chibipop: refreshing applied settings failed: {error:#}");
+                    }
+                }
+            }
+            Err(error) => eprintln!("chibipop: accepting saved settings failed: {error:#}"),
+        }
+    }
     if let Some(state) = current {
-        if let Some(window) = window {
+        if let Some(window) = window.as_deref() {
             window.set_busy(false);
             window.set_apply_state(state);
         }
@@ -266,7 +292,7 @@ fn finish_save(
     if let Err(error) = saved.result {
         eprintln!("chibipop: could not save settings to {}: {error:#}", path.display());
         if latest {
-            if let Some(window) = window {
+            if let Some(window) = window.as_deref() {
                 window.set_status(if saved.generation.is_some() {
                     "Could not save settings. See live logs. Changes will be lost on restart."
                 } else {
@@ -275,19 +301,12 @@ fn finish_save(
             }
         }
     } else if latest && saved.generation.is_none() {
-        if let Some(window) = window {
+        if let Some(window) = window.as_deref() {
             window.set_status("Sentence area saved.");
         }
     }
 }
 
-fn preserve_live_capture_targets(updated: &mut Config, live: &Config, reset_screenshot: bool) {
-    updated.anki.static_region = live.anki.static_region;
-    if !reset_screenshot {
-        updated.actions.screenshot.fixed_region = live.actions.screenshot.fixed_region;
-        updated.actions.screenshot.fixed_window = live.actions.screenshot.fixed_window.clone();
-    }
-}
 
 fn quit_when_idle(outcome: Option<SettingsOutcome>, working: bool, pending: &mut bool) -> bool {
     if matches!(outcome, Some(SettingsOutcome::Quit)) {
@@ -331,14 +350,6 @@ fn remember_settings_position(window: &SettingsWindow) {
     }
 }
 
-/// Stores the corner when the window goes away.
-struct RememberPosition<'a>(&'a SettingsWindow);
-
-impl Drop for RememberPosition<'_> {
-    fn drop(&mut self) {
-        remember_settings_position(self.0);
-    }
-}
 
 impl SettingsStatus {
     fn any(text: String) -> Self {
@@ -366,19 +377,17 @@ pub fn settings_only(
 ) -> Result<()> {
     crate::text::capture::init_dpi_awareness()?;
     let library = library_dir();
-    let form = form_with_library(&cfg, dicts, &library);
+    let mut form = form_with_library(&cfg, dicts, &library);
     let stale = settings::stale_order_entries(&cfg, dicts);
-    let window = SettingsWindow::open(&form, &stale, ApplyMode::Standalone)
+    let mut window = SettingsWindow::open(&form, &stale, ApplyMode::Standalone)
         .context("opening the settings window")?;
-    let _remember = RememberPosition(&window);
 
-    window.set_runtime_status("Not scanning", "Not running", cfg.anki.enabled);
+    window.set_runtime_status("Not scanning", "Not running", cfg.resolved(None)?.anki.enabled);
     let mut rebuild: Option<InFlight> = None;
-    let mut pending: Option<Config> = None;
     let mut quit_requested = false;
     let mut tick = 0usize;
     let mut css_editor_so: Option<crate::ui::editor::CssEditor> = None;
-    let mut search_window: Option<crate::ui::search_window::SearchWindow> = None;
+    let mut search_windows: Vec<crate::ui::search_window::SearchWindow> = Vec::new();
     let (settings_tx, settings_rx) = mpsc::channel::<SettingsStatus>();
     let (detect_tx, detect_rx) = mpsc::channel::<AnkiDetect>();
     let mut detect_gen = 0u64;
@@ -390,21 +399,22 @@ pub fn settings_only(
     // the whole loop. It drops only after this function returns.
     while unsafe { GetMessageW(&mut msg, None, 0, 0) }.as_bool() {
         if let Some(editor) = &css_editor_so {
-            if matches!(editor.take_outcome(), Some(crate::ui::editor::EditorOutcome::Applied)) {
-                if let Some(search) = &mut search_window { search.update_config(&cfg); }
-            }
             if !editor.is_visible() { css_editor_so = None; }
         }
-        if let Some(search) = &mut search_window {
-            search.poll();
-            if search.handle_message(&msg) { continue; }
-        }
+        poll_search_windows(&mut search_windows);
+        if search_windows_handle_message(&mut search_windows, &msg) { continue; }
         // The settings window has no hooks, so there is nothing to disarm.
         window.pump(|| {});
 
 
         if matches!(msg.message, WM_KEYDOWN | WM_SYSKEYDOWN)
             && window.handle_capture_key(msg.wParam.0 as u16)
+        {
+            crate::input::hooks::clear_keyboard_actions();
+            continue;
+        }
+        if matches!(msg.message, WM_KEYUP | WM_SYSKEYUP)
+            && window.handle_capture_key_up(msg.wParam.0 as u16)
         {
             crate::input::hooks::clear_keyboard_actions();
             continue;
@@ -445,9 +455,21 @@ pub fn settings_only(
             window.set_status("Lookup cache unchanged: Chibipop is not running.");
         }
         if let Some(mode) = window.take_search_request() {
-            let config = crate::config::load_or_create(config_path)?;
-            open_search_window_mode(&mut search_window, dict_path,
-                &crate::paths::data_file("data/deconjugator.json"), &config, mode, None);
+            let session = crate::config::load_or_create(config_path)
+                .and_then(|latest| ProfileCatalog::new(&latest, dicts))
+                .and_then(|catalog| catalog.session(Some(&form.profile_id)));
+            match session {
+                Ok(session) => open_search_window_mode(
+                    &mut search_windows,
+                    dict_path,
+                    &crate::paths::data_file("data/deconjugator.json"),
+                    session,
+                    config_path,
+                    mode,
+                    None,
+                ),
+                Err(error) => window.set_status(&format!("Could not open Search: {error:#}")),
+            }
         }
 
         // A tab switch starts deck, model, and field detection.
@@ -475,6 +497,9 @@ pub fn settings_only(
                 tid,
             );
         }
+        if let Err(error) = apply_profile_action(&mut window, &mut form, dicts) {
+            refuse_apply(&window, &error);
+        }
 
         if rebuild.is_some() {
             let outcome = match window.take_outcome() {
@@ -497,21 +522,40 @@ pub fn settings_only(
             match built {
                 Ok(()) => {
                     keep_apply(&flight, &window);
-                    let updated = pending.take().unwrap_or_else(|| cfg.clone());
+                    let latest = match crate::config::load_or_create(config_path) {
+                        Ok(latest) => latest,
+                        Err(error) => {
+                            refuse_apply(&window, &error);
+                            continue;
+                        }
+                    };
+                    let applied = settings::apply_to(&form, &latest);
+                    let updated = &applied.config;
+                    if let Err(error) = updated.resolve(&applied.profile_id)
+                        .and_then(|_| updated.validate_hotkeys(crate::config::Platform::Windows))
+                    {
+                        refuse_apply(&window, &error);
+                        continue;
+                    }
                     if let Err(error) = updated.save(config_path) {
                         refuse_apply(&window, &error);
                         if quit_requested {
+                            remember_settings_position(&window);
                             return Err(error);
                         }
                         continue;
                     }
+                    form.staged_adds.clear();
+                    form.staged_removes.clear();
+                    form.accept_applied(applied, dicts)?;
+                    window.replace_form(&form)?;
                     window.set_apply_state(ApplyState::Applied);
                     println!("chibipop: rebuilt {}.", dict_path.display());
                     println!("chibipop: settings saved to {}.", config_path.display());
                     if quit_when_idle(None, false, &mut quit_requested) {
+                        remember_settings_position(&window);
                         return Ok(());
                     }
-                    // Start the popup process with the new Dictionary.
                     match start_run(config_path, dict_path) {
                         Ok(()) => println!("chibipop: starting."),
                         Err(e) => {
@@ -519,6 +563,7 @@ pub fn settings_only(
                             eprintln!("chibipop: the dictionary is ready - start it yourself.");
                         }
                     }
+                    remember_settings_position(&window);
                     return Ok(());
                 }
                 Err(e) => {
@@ -534,14 +579,26 @@ pub fn settings_only(
         }
 
         match window.take_outcome() {
-            // Without a tray, the window's X acts like Quit.
             Some(SettingsOutcome::Cancel)
             | Some(SettingsOutcome::Close)
-            | Some(SettingsOutcome::Quit) => return Ok(()),
+            | Some(SettingsOutcome::Quit) => {
+                remember_settings_position(&window);
+                return Ok(());
+            }
             Some(SettingsOutcome::Apply) => {
-                let edited = window.read(&form);
-                let updated = settings::apply_to(&edited, &cfg);
-                if let Err(error) = window.validate_hotkeys(&updated) {
+                let mut edited = window.read(&form);
+                let latest = match crate::config::load_or_create(config_path) {
+                    Ok(latest) => latest,
+                    Err(error) => {
+                        refuse_apply(&window, &error);
+                        continue;
+                    }
+                };
+                let applied = settings::apply_to(&edited, &latest);
+                let updated = &applied.config;
+                if let Err(error) = updated.resolve(&applied.profile_id)
+                    .and_then(|_| updated.validate_hotkeys(crate::config::Platform::Windows))
+                {
                     refuse_apply(&window, &error);
                     continue;
                 }
@@ -552,19 +609,29 @@ pub fn settings_only(
                         refuse_apply(&window, &error);
                         continue;
                     }
+                    edited.accept_applied(applied, dicts)?;
+                    window.replace_form(&edited)?;
                     window.set_apply_state(ApplyState::Applied);
                     println!("chibipop: settings saved to {}.", config_path.display());
                     println!("chibipop: restart chibipop for them to take effect.");
+                    remember_settings_position(&window);
                     return Ok(());
                 }
+                // SAFETY: This loop owns the thread timer and kills it after the rebuild.
+                tick = unsafe { SetTimer(None, 0, REBUILD_TICK_MS, None) };
+                if tick == 0 {
+                    refuse_apply(&window, &anyhow::anyhow!("Windows could not start the rebuild timer."));
+                    continue;
+                }
                 match start_rebuild(&edited, &library, dict_path) {
-                    Err(e) => refuse_apply(&window, &e),
+                    Err(e) => {
+                        // SAFETY: `tick` is the timer that this loop just created.
+                        unsafe { let _ = KillTimer(None, tick); }
+                        refuse_apply(&window, &e);
+                    }
                     Ok(flight) => {
                         begin_rebuild(&window);
-                        // SAFETY: This thread timer is killed after every rebuild exit, as in
-                        // `run`.
-                        tick = unsafe { SetTimer(None, 0, REBUILD_TICK_MS, None) };
-                        pending = Some(updated);
+                        form = edited;
                         rebuild = Some(flight);
                     }
                 }
@@ -572,6 +639,7 @@ pub fn settings_only(
             None => {}
         }
     }
+    remember_settings_position(&window);
     Ok(())
 }
 
@@ -588,6 +656,52 @@ pub(crate) fn form_with_library(cfg: &Config, dicts: &[DictInfo], dir: &Path) ->
         Err(e) => {
             eprintln!("chibipop: reading {} failed: {e:#}", dir.display());
             form
+        }
+    }
+}
+
+fn apply_profile_action(
+    window: &mut SettingsWindow,
+    form: &mut SettingsForm,
+    dicts: &[DictInfo],
+) -> Result<()> {
+    let Some(action) = window.take_profile_action() else {
+        return Ok(());
+    };
+    let mut edited = window.read(form);
+    let restored = edited.clone();
+    let result = (|| {
+        match action {
+            ProfileAction::CreateFull { name } => edited.create_profile(name, None, dicts).map(|_| ())?,
+            ProfileAction::CreateDerived { name, parent } => {
+                edited.create_profile(name, Some(&parent), dicts).map(|_| ())?
+            }
+            ProfileAction::Duplicate { name } => edited.duplicate_profile(name, dicts).map(|_| ())?,
+            ProfileAction::Rename { name } => {
+                edited.save_current()?;
+                edited.rename_profile(name)?;
+            }
+            ProfileAction::Delete { id } => edited.delete_profile(&id, dicts)?,
+            ProfileAction::Select { id } => edited.select_profile(&id, dicts)?,
+            ProfileAction::SetDefault { id } => {
+                edited.save_current()?;
+                edited.set_default_profile(&id)?;
+            }
+            ProfileAction::ResetOverride { path } => edited.reset_profile_override(&path, dicts)?,
+        }
+        Ok::<_, anyhow::Error>(())
+    })();
+
+    match result {
+        Ok(()) => {
+            window.replace_form(&edited)?;
+            *form = edited;
+            Ok(())
+        }
+        Err(error) => {
+            window.replace_form(&restored)?;
+            *form = restored;
+            Err(error)
         }
     }
 }
@@ -825,16 +939,16 @@ fn open_writer(path: &Path) -> Result<Connection> {
 fn reindex_ranks(
     db: &Path,
     cfg: &Config,
-    dicts: &[DictInfo],
     w: &SettingsWindow,
 ) -> Result<u64> {
     let mut conn = open_writer(db)?;
-    let enabled = cfg.dictionaries.enabled(Role::Frequency, dicts);
+    let resolved = cfg.resolved(None)?;
+    let enabled = resolved.dictionaries.enabled(Role::Frequency);
     w.set_status("Updating frequency rankings\u{2026}");
     crate::dict::reindex::reindex(
         &mut conn,
         &enabled,
-        cfg.dictionaries.ranking_strategy,
+        resolved.dictionaries.ranking_strategy,
         &|text| w.set_status(text),
     )
 }
@@ -1346,14 +1460,25 @@ fn service_settings_click(
 }
 struct WorkerUi {
     requests: mpsc::Receiver<crate::action::OcrRequest>,
-    engine_reloads: mpsc::Receiver<OcrReload>,
     monitor: OcrMonitor,
+    pending_reload: Arc<Mutex<Option<ProfileSession>>>,
 }
 
-struct OcrReload {
+#[derive(Clone, PartialEq, Eq)]
+struct OcrSelection {
     engine: String,
     enabled_plugins: Vec<String>,
     language: String,
+}
+
+impl OcrSelection {
+    fn from_session(session: &ProfileSession) -> Self {
+        Self {
+            engine: session.config().ocr.engine.clone(),
+            enabled_plugins: session.config().plugins.enabled.clone(),
+            language: session.config().ocr.language.clone(),
+        }
+    }
 }
 
 struct OcrBackend {
@@ -1406,6 +1531,66 @@ fn runtime_status_labels(runtime: &OcrRuntime) -> (String, String) {
     (language.to_string(), engine)
 }
 
+fn activate_session_ocr(
+    source: &chibipop::text::TextSource,
+    active: &mut OcrSelection,
+    session: &ProfileSession,
+    monitor: &OcrMonitor,
+) {
+    let requested = OcrSelection::from_session(session);
+    if *active == requested {
+        return;
+    }
+    match open_ocr_backend(
+        &requested.engine,
+        &requested.enabled_plugins,
+        &requested.language,
+        monitor,
+    ) {
+        Ok(backend) => {
+            source.replace_ocr(backend.engine);
+            monitor.publish(&backend.name, &backend.language, true);
+        }
+        Err(error) => {
+            let reason = format!("{error:#}");
+            eprintln!("chibipop: replacing OCR engine failed: {reason}");
+            source.replace_ocr(Box::new(UnavailableOcr {
+                name: requested.engine.clone(),
+                reason,
+            }));
+            monitor.publish(&requested.engine, &requested.language, false);
+        }
+    }
+    *active = requested;
+}
+
+fn worker_serve(ui: WorkerUi, mut active: OcrSelection) -> chibipop::worker::ServeHook {
+    Box::new(move |source, session| {
+        let reload = ui.pending_reload.lock().ok().and_then(|mut pending| pending.take());
+        if let Some(session) = reload {
+            activate_session_ocr(source, &mut active, &session, &ui.monitor);
+        }
+        while let Ok(request) = ui.requests.try_recv() {
+            activate_session_ocr(source, &mut active, &request.session, &ui.monitor);
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                source
+                    .recognise_for_session(
+                        &request.session,
+                        &request.bgra_buf,
+                        request.width,
+                        request.height,
+                    )
+                    .map_err(|e| format!("{e:#}"))
+            }))
+            .unwrap_or_else(|_| Err("OCR worker panicked".to_string()));
+            let _ = request.result_tx.send(result);
+        }
+        if let Some(session) = session {
+            activate_session_ocr(source, &mut active, session, &ui.monitor);
+        }
+    })
+}
+
 fn sync_runtime_status(
     window: Option<&SettingsWindow>,
     monitor: &OcrMonitor,
@@ -1425,6 +1610,7 @@ fn sync_runtime_status(
     *shown = Some(next);
 }
 
+
 /// Capture and OCR objects stay on the Worker thread. Only their status crosses back.
 fn worker_open(
     dict_path: PathBuf,
@@ -1439,10 +1625,13 @@ fn worker_open(
     ui: WorkerUi,
 ) -> impl FnOnce() -> Result<WorkerParts> + Send + 'static {
     move || {
-        let WorkerUi { requests: ocr_request_rx, engine_reloads, monitor } = ui;
-        let backend = open_ocr_backend(&ocr_engine, &enabled_plugins, &language, &monitor)?;
+        let backend = open_ocr_backend(&ocr_engine, &enabled_plugins, &language, &ui.monitor)?;
         let OcrBackend { engine: ocr, name: active_engine, language: active_language } = backend;
-        let reload_monitor = monitor.clone();
+        let active_selection = OcrSelection {
+            engine: ocr_engine,
+            enabled_plugins,
+            language,
+        };
         // Contract 3 needs DPI before GDI.
         let capture = WinCapture::new(Some(guard)).context("preparing screen capture")?;
         let dict = SqliteDictionary::open(&dict_path).with_context(|| {
@@ -1453,7 +1642,7 @@ fn worker_open(
         })?;
         let rules = load_rules(&rules_path)?;
         let engine = LookupEngine::new(Deconjugator::new(rules));
-        monitor.publish(&active_engine, &active_language, true);
+        ui.monitor.publish(&active_engine, &active_language, true);
         Ok(WorkerParts {
             capture: Box::new(capture),
             ocr,
@@ -1466,50 +1655,10 @@ fn worker_open(
                 }
             })),
             engine,
-            // The OCR-to-clipboard request runs on this thread because the engine is
-            // thread-affine. The closure uses the core facade because the OCR request
-            // loop belongs to the core seam.
-            serve: Some(Box::new(move |source| {
-                while let Ok(request) = engine_reloads.try_recv() {
-                    match open_ocr_backend(
-                        &request.engine,
-                        &request.enabled_plugins,
-                        &request.language,
-                        &reload_monitor,
-                    ) {
-                        Ok(backend) => {
-                            source.replace_ocr(backend.engine);
-                            reload_monitor.publish(&backend.name, &backend.language, true);
-                        }
-                        Err(error) => {
-                            let reason = format!("{error:#}");
-                            eprintln!("chibipop: replacing OCR engine failed: {reason}");
-                            source.replace_ocr(Box::new(UnavailableOcr {
-                                name: request.engine.clone(),
-                                reason,
-                            }));
-                            reload_monitor.publish(
-                                &request.engine,
-                                &request.language,
-                                false,
-                            );
-                        }
-                    }
-                }
-                while let Ok(request) = ocr_request_rx.try_recv() {
-                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        source
-                            .recognise(&request.bgra_buf, request.width, request.height)
-                            .map_err(|e| format!("{e:#}"))
-                    }))
-                    .unwrap_or_else(|_| Err("OCR worker panicked".to_string()));
-                    let _ = request.result_tx.send(result);
-                }
-            })),
+            serve: Some(worker_serve(ui, active_selection)),
         })
     }
 }
-
 /// Runs the Windows message loop until the user quits.
 pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path) -> Result<()> {
     // The Dictionary or rules file does not exist yet.
@@ -1520,19 +1669,18 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
     let library = library_dir();
     let db_path = dict_path.to_path_buf();
     let rules_path = rules_path.to_path_buf();
-    // One-off OCR pixels for the Worker engine (OCR-to-clipboard).
-    // Lookup requests use the core Worker's channels.
+    // One-off OCR pixels for OCR-to-clipboard. Lookup requests use core channels.
     let (ocr_tx, ocr_request_rx) = mpsc::channel::<crate::action::OcrRequest>();
-    let (ocr_reload_tx, ocr_reload_rx) = mpsc::channel::<OcrReload>();
-    // This state is unknown until `Popup::create`.
     let capture_guard_active = Arc::new(AtomicBool::new(false));
     let (capture_guard_tx, capture_guard_rx) = mpsc::channel::<CaptureGuardMsg>();
 
     // SAFETY: This FFI call has no preconditions and always succeeds.
     // It returns the ID of the thread that calls it.
     let main_tid = unsafe { GetCurrentThreadId() };
-    let mut live = derive(&cfg);
+    let initial_resolved = cfg.resolved(None)?;
+    let mut live = derive(&initial_resolved);
     let ocr_monitor = OcrMonitor::default();
+    let pending_ocr_reload = Arc::new(Mutex::new(None));
     // Do not join the Worker. `join` hangs.
     let (worker, mut dicts) = Worker::spawn(
         // `Worker::spawn` reads the file itself.
@@ -1546,12 +1694,12 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                 main_tid,
                 request_tx: capture_guard_tx.clone(),
             },
-            cfg.ocr.engine.clone(),
-            cfg.plugins.enabled.clone(),
+            initial_resolved.ocr.engine.clone(),
+            initial_resolved.plugins.enabled.clone(),
             WorkerUi {
                 requests: ocr_request_rx,
-                engine_reloads: ocr_reload_rx,
                 monitor: ocr_monitor.clone(),
+                pending_reload: pending_ocr_reload.clone(),
             },
         ),
         // The Worker posts a message after it pushes a result.
@@ -1559,7 +1707,18 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
             let _ = PostThreadMessageW(main_tid, WM_APP_RESULT, WPARAM(0), LPARAM(0));
         },
     )?;
-    // The analysis service loads the bundled model only when the first Card needs it.
+    let mut catalog = ProfileCatalog::new(&cfg, &dicts)?;
+    cfg = catalog.config.clone();
+    let mut default_session = catalog.session(None)?;
+    *pending_ocr_reload
+        .lock()
+        .map_err(|_| anyhow!("the Worker OCR reload lock is poisoned"))? =
+        Some(default_session.clone());
+    live = derive_session(&default_session);
+    worker.trigger().send(Trigger {
+        kind: TriggerKind::Reload(Box::new(worker_settings(&live, &dicts))),
+        id: RequestId(0),
+    }).map_err(|_| anyhow!("the Worker stopped before its initial profile reload"))?;
     let analysis_service = chibipop::analysis::Service::spawn(
         crate::paths::data_file(chibipop::analysis::MODEL_FILE),
         move || unsafe {
@@ -1667,7 +1826,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
         );
     }
 
-    // `apply_live` recomputes this state.
+    // Initialize the capture guard from these surfaces.
     capture_guard_active.store(
         capture_guard_needed(
             popup.capture_exclusion(),
@@ -1681,7 +1840,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
     // The Worker owns the Dictionary connection on another thread.
     let mut renderer = Renderer::new(popup.hwnd(), &db_path)
         .context("creating the D2D/DirectWrite renderer")?;
-    let mut theme = theme_from_config(&live.popup);
+    let theme = theme_from_config(&live.popup);
     let alpha = (theme.opacity * 255.0).round().clamp(0.0, 255.0) as u8;
     popup.set_alpha(alpha);
     if live.show_lookup_log {
@@ -1689,23 +1848,10 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
     }
 
     let mut hooks = Some(Hooks::install().context("installing the low-level input hooks")?);
-    sync_search_hotkey(3, live.actions_search_hotkey.as_deref());
-    sync_search_hotkey(4, live.actions_sentence_search_hotkey.as_deref());
-    sync_search_hotkey(crate::input::hooks::SELECTED_TEXT_SLOT, live.actions_selected_text_hotkey.as_deref());
-    Hooks::set_mode(live.trigger_mode);
-    Hooks::set_trigger_key(crate::config::parse_trigger_key(&live.trigger_key).unwrap_or(0));
-    Hooks::set_add_hotkey(anki_add_hotkey(&live));
-    sync_static_region_hotkey(&live);
-    if let Some(vk) = live
-        .actions_ocr_clipboard_hotkey
-        .as_deref()
-        .and_then(crate::config::parse_trigger_key)
-    {
-        Hooks::set_action_hotkey(2, vk, 0);
-    }
+    Hooks::set_configured_binds(&catalog.config.binds);
 
     // The tray provides the control surface for this process.
-    let tray = Tray::create(popup.hwnd()).context("creating the tray icon")?;
+    let mut tray = Tray::create(popup.hwnd(), &cfg).context("creating the tray icon")?;
 
     // Use a thread timer without a window.
     let timer_id = unsafe { SetTimer(None, 0, DISPATCH_TICK_MS, None) };
@@ -1716,8 +1862,6 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
     println!("chibipop: running - hover Japanese text anywhere on screen.");
     println!("chibipop: right-click the tray icon to change mode or quit.");
 
-    // The Worker started before the Dictionary identities were known.
-    rescope_lookups(&mut live, &cfg, &dicts, worker.trigger());
     // Record visibility immediately before `Hide`.
     //
     // Other hide paths clear these values.
@@ -1727,17 +1871,14 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
     // Visibility of the Anki button.
     let btn_prev_visible = std::cell::Cell::new(false);
     // Send each Event through the state machine and handle each Command.
-    let mut controller = Controller::new(controller_config(&live));
+    let mut controller = Controller::new(controller_config(&live), default_session.clone());
     // Defer OpenSettings to the message loop.
-    let mut want_settings = false;
-    let mut search_window: Option<crate::ui::search_window::SearchWindow> = None;
-    let mut search_config = cfg.clone();
+    let mut search_windows: Vec<crate::ui::search_window::SearchWindow> = Vec::new();
     let mut search_was_focused = false;
     // An authorized add that waits for a region.
     // See `PendingShot`.
-    let mut pending_shot: Option<PendingShot> = None;
-    // Track each key edge.
-    let mut trigger_was_held = false;
+    let mut pending_shots = std::collections::VecDeque::<PendingShot>::new();
+    let mut want_settings = false;
     // Track popup pointer edges and the latest drag point.
     let mut pointer_buttons = 0u8;
     let mut last_pointer: Option<PhysPoint> = None;
@@ -1759,24 +1900,24 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
     let mut quit_requested = false;
     let mut shown_runtime = None;
     let mut css_editor: Option<crate::ui::editor::CssEditor> = None;
-    let (screenshot_tx, screenshot_rx) = mpsc::channel::<crate::action::ScreenshotCommand>();
-    let (screenshot_done_tx, screenshot_done_rx) =
-        mpsc::channel::<crate::action::ScreenshotResult>();
+    let (screenshot_tx, screenshot_rx) = mpsc::channel::<(RequestId, ProfileSession, crate::action::ScreenshotCommand)>();
+    let (screenshot_done_tx, screenshot_done_rx) = mpsc::channel::<RuntimeScreenshotResult>();
     let exe_dir = std::env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(Path::to_path_buf))
         .unwrap_or_else(|| PathBuf::from("."));
     let mut region_selection = crate::action::selection::RegionSelection::new()?;
     let mut action_registry = crate::action::ActionRegistry::new();
-    sync_ocr_clipboard_action(
-        &mut action_registry,
-        live.actions_ocr_clipboard_hotkey.as_deref(),
+    action_registry.register(
+        crate::config::BindAction::OcrClipboard,
+        Box::new(crate::action::ocr_clipboard::OcrClipboardAction),
     );
     // Allow one writer at a time.
     let mut save_job: Option<thread::JoinHandle<()>> = None;
     // BACKLOG 7: this is the only entry point.
+    let mut settings_form = form_with_library(&cfg, &dicts, &library);
     let mut settings: Option<SettingsWindow> = match SettingsWindow::open(
-        &form_with_library(&cfg, &dicts, &library),
+        &settings_form,
         &settings::stale_order_entries(&cfg, &dicts),
         ApplyMode::Live,
     ) {
@@ -1792,8 +1933,8 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
     };
     // Store the active in-place edit here.
     let mut edit: Option<EditFlight> = None;
-    let mut edit_cfg: Option<(Config, bool)> = None;
-    sync_runtime_status(settings.as_ref(), &ocr_monitor, cfg.anki.enabled, &mut shown_runtime);
+    let mut edit_cfg: Option<SettingsForm> = None;
+    sync_runtime_status(settings.as_ref(), &ocr_monitor, live.anki_enabled, &mut shown_runtime);
 
     // I4: keep all capture-guard code in one place.
     let cancel_hidden_hover = std::cell::Cell::new(false);
@@ -1877,12 +2018,11 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                     capture_restore: [&capture_guard_prev_visible, &overlay_prev_visible, &btn_prev_visible],
                     db_path: &db_path,
                     renderer: &mut renderer,
-                    theme: &theme,
-                    cfg: &cfg,
                     live: &live,
                     exe_dir: &exe_dir,
                     overlay: overlay.as_ref(),
                     anki_button: anki_button.as_ref(),
+                    static_overlay: static_overlay.as_ref(),
                     trigger_tx: worker.trigger(),
                     selected_text: &mut selected_text,
                     pending_selected_sentence: &mut pending_selected_sentence,
@@ -1891,7 +2031,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                     add_tx: &add_tx,
                     main_tid,
                     want_settings: &mut want_settings,
-                    pending_shot: &mut pending_shot,
+                    pending_shots: &mut pending_shots,
                     analysis: &analysis_service,
                     pointer_buttons: &mut pointer_buttons,
                     last_pointer: &mut last_pointer,
@@ -1900,9 +2040,47 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
             )
         };
     }
+    macro_rules! install_runtime_catalog {
+        ($updated:expr, $previous:expr, $previous_dicts:expr) => {{
+            let updated: Config = $updated;
+            let previous: Config = $previous;
+            let previous_dicts: Vec<DictInfo> = $previous_dicts;
+            let next_catalog = ProfileCatalog::new(&updated, &dicts)?;
+            cfg = next_catalog.config.clone();
+            catalog = next_catalog;
+            default_session = catalog.session(None)?;
+            live = derive_session(&default_session);
+            *pending_ocr_reload
+                .lock()
+                .map_err(|_| anyhow!("the Worker OCR reload lock is poisoned"))? =
+                Some(default_session.clone());
+            Hooks::set_configured_binds(&catalog.config.binds);
+            tray.update_profiles(&cfg);
+            if live.show_lookup_log {
+                crate::ui::console::show();
+            } else {
+                crate::ui::console::hide();
+            }
+            let controller_cfg = Box::new(controller_config(&live));
+            if shared_resources_changed(&previous, &cfg, &previous_dicts, &dicts) {
+                drive!(Event::SharedResourcesReloaded {
+                    cfg: controller_cfg,
+                    session: default_session.clone(),
+                });
+            } else {
+                drive!(Event::ConfigReloaded {
+                    cfg: controller_cfg,
+                    session: default_session.clone(),
+                });
+            }
+        }};
+    }
 
     // The Worker started before the Dictionary identities were known.
-    drive!(Event::ConfigReloaded(Box::new(controller_config(&live))));
+    drive!(Event::ConfigReloaded {
+        cfg: Box::new(controller_config(&live)),
+        session: default_session.clone(),
+    });
 
     // The screenshot worker uses pure Rust, so it needs no WinRT apartment.
     {
@@ -1910,9 +2088,9 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
         let tx = screenshot_done_tx;
         let tid = main_tid;
         thread::spawn(move || {
-            for cmd in rx {
+            for (id, session, cmd) in rx {
                 let result = handle_screenshot_save(cmd);
-                let _ = tx.send(result);
+                let _ = tx.send(RuntimeScreenshotResult { id, session, result });
                 // SAFETY: This call wakes the main loop.
                 unsafe {
                     let _ = PostThreadMessageW(tid, WM_APP_SCREENSHOT_DONE, WPARAM(0), LPARAM(0));
@@ -1950,22 +2128,44 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
             }
         }
 
-        if search_window.as_mut().is_some_and(|window| window.handle_message(&msg)) {
+        poll_search_windows(&mut search_windows);
+        if search_windows_handle_message(&mut search_windows, &msg) {
             continue;
         }
 
-        sync_runtime_status(settings.as_ref(), &ocr_monitor, cfg.anki.enabled, &mut shown_runtime);
+        sync_runtime_status(settings.as_ref(), &ocr_monitor, live.anki_enabled, &mut shown_runtime);
         // Route messages for the modeless settings window.
-        if let Some(w) = &settings {
+        if let Some(w) = settings.as_mut() {
             // The region picker runs a nested message pump.
             w.pump(|| {
                 Hooks::set_scroll_armed(false);
                 Hooks::set_click_armed(false);
                 drain_capture_guard();
             });
+            join_save_if_finished(&mut save_job);
+            while let Ok(result) = save_rx.try_recv() {
+                finish_save(
+                    Some(w),
+                    &mut settings_form,
+                    &dicts,
+                    &mut pending_apply_save,
+                    result,
+                    config_path,
+                    save_sequence,
+                );
+            }
+            if let Err(error) = apply_profile_action(w, &mut settings_form, &dicts) {
+                refuse_apply(w, &error);
+            }
 
             if matches!(msg.message, WM_KEYDOWN | WM_SYSKEYDOWN)
                 && w.handle_capture_key(msg.wParam.0 as u16)
+            {
+                crate::input::hooks::clear_keyboard_actions();
+                continue;
+            }
+            if matches!(msg.message, WM_KEYUP | WM_SYSKEYUP)
+                && w.handle_capture_key_up(msg.wParam.0 as u16)
             {
                 crate::input::hooks::clear_keyboard_actions();
                 continue;
@@ -1988,8 +2188,9 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                 if cache_bust.is_some() {
                     w.set_status("Clearing lookup cache...");
                 } else {
-                    trigger_was_held = false;
-                    drive!(Event::TriggerUp);
+                    if let Some(id) = controller.active_bind_id().map(str::to_string) {
+                        drive!(Event::LookupBindUp { bind_id: id });
+                    }
                     drive!(Event::DismissRequested);
                     let (reply_tx, reply_rx) = mpsc::channel();
                     let sent = worker.trigger().send(Trigger {
@@ -2012,11 +2213,25 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                 }
             }
             if let Some(mode) = w.take_search_request() {
+                let session = match catalog.session(Some(&settings_form.profile_id)) {
+                    Ok(session) => session,
+                    Err(error) => {
+                        w.set_status(&format!("Cannot open Search for this profile: {error:#}"));
+                        continue;
+                    }
+                };
                 drive!(Event::DismissRequested);
-                open_search_window_mode(&mut search_window, &db_path, &rules_path, &cfg, mode, None);
+                open_search_window_mode(
+                    &mut search_windows,
+                    &db_path,
+                    &rules_path,
+                    session,
+                    config_path,
+                    mode,
+                    None,
+                );
                 search_focused = crate::ui::search_window::is_foreground();
             }
-
             // Start deck, model, and field detection after a tab switch.
             if let Some(tab) = w.take_tab_change() {
                 w.switch_tab(tab);
@@ -2049,12 +2264,16 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
         }
 
         if msg.message == WM_TIMER && msg.wParam.0 == timer_id {
-            if let Some(result) = poll_cache_bust(&mut cache_bust, std::time::Instant::now()) {
+            if let Some(result) = poll_cache_bust(
+                &mut cache_bust,
+                std::time::Instant::now(),
+                || drive!(Event::DismissRequested),
+            ) {
                 match result {
                     CacheBustPoll::Complete(Ok(new_dicts)) => {
                         dicts = new_dicts;
                         let media_warning = renderer.replace_lookup_cache(&db_path);
-                        if let Some(search) = &mut search_window {
+                        for search in &mut search_windows {
                             search.clear_lookup_cache();
                         }
                         if let Some(w) = &settings {
@@ -2082,42 +2301,274 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                     }
                 }
             }
-            if Hooks::take_action_hotkey(crate::input::hooks::SELECTED_TEXT_SLOT) {
-                drive!(Event::SelectedTextRequested { pos: cursor_now() });
+            let cursor_pos = cursor_now();
+            for edge in Hooks::take_configured_binds() {
+                if edge.action == crate::config::BindAction::Lookup {
+                    if edge.down && !search_focused {
+                        let Some(bind) = catalog.config.binds.iter().find(|bind| {
+                            bind.id == edge.id.as_ref()
+                                && bind.action == edge.action
+                                && bind.enabled
+                        }).cloned() else {
+                            continue;
+                        };
+                        match catalog.for_bind(&bind.id) {
+                            Ok(session) => drive!(Event::LookupBindDown {
+                                bind_id: bind.id,
+                                mode: bind.mode,
+                                session,
+                                pos: cursor_pos,
+                            }),
+                            Err(error) => eprintln!("chibipop: resolving lookup bind failed: {error:#}"),
+                        }
+                    } else if !edge.down {
+                        drive!(Event::LookupBindUp { bind_id: edge.id.to_string() });
+                    }
+                    continue;
+                }
+                if !edge.down || search_focused {
+                    continue;
+                }
+                let Some(bind) = catalog.config.binds.iter().find(|bind| {
+                    bind.id == edge.id.as_ref()
+                        && bind.action == edge.action
+                        && bind.enabled
+                }).cloned() else {
+                    continue;
+                };
+                let mut bind_session = match catalog.for_bind(&bind.id) {
+                    Ok(session) => session,
+                    Err(error) => {
+                        eprintln!("chibipop: resolving configured bind failed: {error:#}");
+                        continue;
+                    }
+                };
+                let action = bind.action;
+                if action == crate::config::BindAction::StaticRegion {
+                    bind_session = controller.popup()
+                        .map(|view| view.session.clone())
+                        .unwrap_or_else(|| default_session.clone());
+                }
+                if action != crate::config::BindAction::AnkiAdd
+                    && !bind_session.config().actions.enabled
+                {
+                    continue;
+                }
+                match action {
+                    crate::config::BindAction::Lookup => {}
+                    crate::config::BindAction::Search
+                    | crate::config::BindAction::SentenceSearch => {
+                        capture_guard_prev_visible.set(false);
+                        overlay_prev_visible.set(false);
+                        btn_prev_visible.set(false);
+                        drive!(Event::DismissRequested);
+                        let mode = if action == crate::config::BindAction::Search {
+                            chibipop::search::SearchMode::Dictionary
+                        } else {
+                            chibipop::search::SearchMode::Sentence
+                        };
+                        open_search_window_mode(
+                            &mut search_windows,
+                            &db_path,
+                            &rules_path,
+                            bind_session,
+                            config_path,
+                            mode,
+                            None,
+                        );
+                        search_focused = crate::ui::search_window::is_foreground();
+                    }
+                    crate::config::BindAction::SelectedText => {
+                        drive!(Event::SelectedTextRequested {
+                            pos: cursor_pos,
+                            session: bind_session,
+                        });
+                    }
+                    crate::config::BindAction::AnkiAdd => {
+                        let eligible = controller.popup().is_some_and(|view| {
+                            view.session.config().anki.enabled && view.anki.connected
+                        });
+                        if eligible {
+                            drive!(Event::AddRequested);
+                        }
+                    }
+                    crate::config::BindAction::StaticRegion => {
+                        let session = bind_session;
+                        let had_popup = controller.popup().is_some();
+                        drive!(Event::PopupHover {
+                            local: PhysPoint { x: 0, y: 0 },
+                            query: None,
+                        });
+                        if had_popup {
+                            set_parent_visibility(&parent_popups, false);
+                            let _ = popup.hide();
+                            if let Some(button) = &anki_button {
+                                button.hide();
+                            }
+                        }
+                        if let Some(overlay) = &overlay {
+                            overlay.hide();
+                        }
+                        if let Some(overlay) = &static_overlay {
+                            overlay.hide();
+                        }
+                        disarm_for_selection(&popup, &mut pointer_buttons);
+                        if let Some(rect) = region_selection.run() {
+                            join_save(&mut save_job);
+                            while let Ok(result) = save_rx.try_recv() {
+                                finish_save(
+                                    settings.as_mut(),
+                                    &mut settings_form,
+                                    &dicts,
+                                    &mut pending_apply_save,
+                                    result,
+                                    config_path,
+                                    save_sequence,
+                                );
+                            }
+                            let previous = cfg.clone();
+                            let previous_dicts = dicts.clone();
+                            let mut save_failed = false;
+                            let updated = persist_static_region(
+                                config_path,
+                                session.id(),
+                                rect,
+                                |error| {
+                                    save_failed = true;
+                                    if let Some(window) = &settings {
+                                        window.set_status(&format!(
+                                            "Could not save the static region: {error:#}"
+                                        ));
+                                    }
+                                    eprintln!("chibipop: saving static region failed: {error:#}");
+                                },
+                            );
+                            if let Some(updated) = updated {
+                                install_runtime_catalog!(updated, previous, previous_dicts);
+                            }
+                            let selected = derive_session(&session);
+                            if save_failed {
+                                sync_static_region_overlay(static_overlay.as_ref(), &selected);
+                            } else {
+                                if selected.sentence_mode == crate::config::SentenceMode::Static
+                                    && selected.show_static_overlay
+                                {
+                                    if let Some(overlay) = &static_overlay {
+                                        if let Err(error) = overlay.show(rect) {
+                                            eprintln!("chibipop: showing static region overlay failed: {error:#}");
+                                        }
+                                    }
+                                }
+                                eprintln!(
+                                    "chibipop: static region set to ({}, {}, {}x{})",
+                                    rect.x, rect.y, rect.w, rect.h
+                                );
+                            }
+                        }
+                        for event in selection_release_events(Hooks::take_configured_binds()) {
+                            drive!(event);
+                        }
+                        if had_popup && controller.popup().is_some() {
+                            set_parent_visibility(&parent_popups, true);
+                            let _ = popup.show_without_activating();
+                            sync_anki_button(anki_button.as_ref(), controller.popup());
+                        }
+                    }
+                    crate::config::BindAction::OcrClipboard => {
+                        let session = bind_session;
+                        let had_popup = controller.popup().is_some();
+                        drive!(Event::PopupHover {
+                            local: PhysPoint { x: 0, y: 0 },
+                            query: None,
+                        });
+                        if had_popup {
+                            set_parent_visibility(&parent_popups, false);
+                            let _ = popup.hide();
+                            if let Some(button) = &anki_button {
+                                button.hide();
+                            }
+                        }
+                        if let Some(overlay) = &overlay {
+                            overlay.hide();
+                        }
+                        disarm_for_selection(&popup, &mut pointer_buttons);
+                        let outcome = {
+                            let view = controller.popup();
+                            let state = crate::action::AppState {
+                                popup_visible: had_popup,
+                                presentation: view.as_ref().map(|view| view.presentation),
+                                anchor: view.as_ref().map(|view| view.anchor),
+                                anki_connected: view.as_ref().is_some_and(|view| view.anki.connected),
+                            };
+                            let mut context = crate::action::ActionContext {
+                                selection: &mut region_selection,
+                                session: session.clone(),
+                                ocr_jobs: ocr_jobs.clone(),
+                            };
+                            action_registry.dispatch(action, &state, &mut context)
+                        };
+                        match outcome {
+                            Some(crate::action::ActionOutcome::Cancelled) => {
+                                crate::input::hooks::discard_keyboard_actions();
+                            }
+                            Some(crate::action::ActionOutcome::Failed(message)) => {
+                                eprintln!("chibipop: action failed: {message}");
+                            }
+                            Some(crate::action::ActionOutcome::TextCaptured { text }) => {
+                                if let Err(error) = crate::clipboard::set_text(&text) {
+                                    eprintln!("chibipop: copying OCR text failed: {error:#}");
+                                }
+                                if session.config().actions.ocr_clipboard.as_ref()
+                                    .is_some_and(|options| options.open_sentence_search)
+                                    && !text.trim().is_empty()
+                                {
+                                    drive!(Event::DismissRequested);
+                                    open_search_window_mode(
+                                        &mut search_windows,
+                                        &db_path,
+                                        &rules_path,
+                                        session.clone(),
+                                        config_path,
+                                        chibipop::search::SearchMode::Sentence,
+                                        Some(&text),
+                                    );
+                                    search_focused = crate::ui::search_window::is_foreground();
+                                }
+                            }
+                            _ => {}
+                        }
+                        for event in selection_release_events(Hooks::take_configured_binds()) {
+                            drive!(event);
+                        }
+                        if had_popup && controller.popup().is_some() {
+                            set_parent_visibility(&parent_popups, true);
+                            let _ = popup.show_without_activating();
+                            sync_anki_button(anki_button.as_ref(), controller.popup());
+                        }
+                    }
+                }
             }
-            if let Some((id, selection)) = selected_text.poll() {
-                if selection.is_none() { eprintln!("chibipop: selected text unavailable, empty, or timed out"); }
-                let (text, bounds) = selection.map_or((None, None), |selection| (Some(selection.text), selection.bounds));
+            if let Some((id, _session, selection)) = selected_text.poll() {
+                if selection.is_none() {
+                    eprintln!("chibipop: selected text unavailable, empty, or timed out");
+                }
+                let (text, bounds) = selection
+                    .map_or((None, None), |selection| (Some(selection.text), selection.bounds));
                 drive!(Event::SelectedTextReady { id, text, bounds });
             }
-            if let Some(text) = pending_selected_sentence.take() {
-                open_search_window_mode(&mut search_window, &db_path, &rules_path, &cfg,
-                    chibipop::search::SearchMode::Sentence, Some(&text));
+            if let Some((session, text)) = pending_selected_sentence.take() {
+                open_search_window_mode(
+                    &mut search_windows,
+                    &db_path,
+                    &rules_path,
+                    session,
+                    config_path,
+                    chibipop::search::SearchMode::Sentence,
+                    Some(&text),
+                );
                 search_focused = crate::ui::search_window::is_foreground();
             }
-            if Hooks::take_action_hotkey(3) {
-                capture_guard_prev_visible.set(false);
-                overlay_prev_visible.set(false);
-                btn_prev_visible.set(false);
-                drive!(Event::DismissRequested);
-                open_search_window(&mut search_window, &db_path, &rules_path, &cfg);
-                search_focused = crate::ui::search_window::is_foreground();
-            }
-            if Hooks::take_action_hotkey(4) {
-                drive!(Event::DismissRequested);
-                open_search_window_mode(&mut search_window, &db_path, &rules_path, &cfg,
-                    chibipop::search::SearchMode::Sentence, None);
-                search_focused = crate::ui::search_window::is_foreground();
-            }
-            if let Some(window) = &mut search_window {
-                if search_config != cfg {
-                    window.update_config(&cfg);
-                    search_config = cfg.clone();
-                }
-                window.poll();
-            }
-            // Read the popup's current rect.
-            let cursor_pos = cursor_now();
+            poll_search_windows(&mut search_windows);
             if pointer_buttons == 0 && popup.is_visible() {
                 if let Some(depth) = controller.popup_at(cursor_pos) {
                     drive!(Event::PopupEntered { depth });
@@ -2242,141 +2693,19 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                 drive!(Event::AddRequested);
             }
 
-            // Every add path sends one Event. The state machine chooses the result,
-            // and `AddNote` handles any screenshot.
-            if Hooks::take_add_hotkey() && !search_focused {
-                drive!(Event::AddRequested);
-            }
-
-            // Handle the static-region hotkey in slot 1.
-            if Hooks::take_action_hotkey(1)
-                && !search_focused
-                && live.sentence_mode == crate::config::SentenceMode::Static
-            {
-                drive!(Event::PopupHover { local: PhysPoint { x: 0, y: 0 }, query: None });
-                let had_popup = controller.popup().is_some();
-                set_parent_visibility(&parent_popups, false);
-                let _ = popup.hide();
-                if let Some(b) = &anki_button {
-                    b.hide();
-                }
-                if let Some(ov) = &static_overlay {
-                    ov.hide();
-                }
-                disarm_for_selection(&popup, &mut pointer_buttons);
-                let rect = region_selection.run();
-                if let Some(rect) = rect {
-                    live.static_region = Some(rect);
-                    cfg.anki.static_region = Some([rect.x, rect.y, rect.w, rect.h]);
-                    save_in_background(
-                        &mut save_job,
-                        cfg.clone(),
-                        config_path.to_path_buf(),
-                        save_tx.clone(),
-                        main_tid,
-                        pending_apply_save.as_ref().map(|pending| pending.generation),
-                        &mut save_sequence,
-                    );
-                    if let Some(ov) = &static_overlay {
-                        if let Err(e) = ov.show(rect) {
-                            eprintln!("chibipop: showing static region overlay failed: {e:#}");
-                        }
-                    }
-                    // `Controller` returns a reload with fresh `WorkerSettings`.
-                    drive!(Event::ConfigReloaded(Box::new(controller_config(&live))));
-                    eprintln!(
-                        "chibipop: static region set to ({}, {}, {}x{})",
-                        rect.x, rect.y, rect.w, rect.h
-                    );
-                }
-                if had_popup {
-                    set_parent_visibility(&parent_popups, true);
-                    let _ = popup.show_without_activating();
-                    if let Some(b) = &anki_button {
-                        b.show_without_activating();
-                    }
-                }
-            }
-
-            // Dispatch action hotkeys.
-            for slot in 0..crate::input::hooks::MAX_ACTION_SLOTS {
-                if slot == 0 || slot == 1 || slot == 3 || slot == 4 {
-                    continue;
-                }
-                if !Hooks::take_action_hotkey(slot) || search_focused {
-                    continue;
-                }
-                drive!(Event::PopupHover { local: PhysPoint { x: 0, y: 0 }, query: None });
-                let had_popup = controller.popup().is_some();
-                if had_popup {
-                    set_parent_visibility(&parent_popups, false);
-                    let _ = popup.hide();
-                    if let Some(b) = &anki_button {
-                        b.hide();
-                    }
-                }
-                disarm_for_selection(&popup, &mut pointer_buttons);
-
-                let outcome = {
-                    let view = controller.popup();
-                    let state = crate::action::AppState {
-                        popup_visible: had_popup,
-                        presentation: view.as_ref().map(|v| v.presentation),
-                        anchor: view.as_ref().map(|v| v.anchor),
-                        anki_connected: view.as_ref().is_some_and(|v| v.anki.connected),
-                    };
-                    let mut ctx = crate::action::ActionContext {
-                        selection: &mut region_selection,
-                        config: &cfg.actions,
-                        ocr_jobs: ocr_jobs.clone(),
-                    };
-                    action_registry.dispatch(slot, &state, &mut ctx)
-                };
-
-                match outcome {
-                    Some(crate::action::ActionOutcome::Cancelled) => {
-                        crate::input::hooks::discard_keyboard_actions();
-                    }
-                    Some(crate::action::ActionOutcome::Failed(msg)) => {
-                        eprintln!("chibipop: action failed: {msg}");
-                    }
-                    Some(crate::action::ActionOutcome::TextCaptured { text }) => {
-                        if let Err(e) = crate::clipboard::set_text(&text) {
-                            eprintln!("chibipop: copying OCR text failed: {e:#}");
-                        }
-                        if cfg.actions.ocr_clipboard.as_ref().is_some_and(|action| action.open_sentence_search)
-                            && !text.trim().is_empty() {
-                            drive!(Event::DismissRequested);
-                            open_search_window_mode(&mut search_window, &db_path, &rules_path, &cfg,
-                                chibipop::search::SearchMode::Sentence, Some(&text));
-                        }
-                    }
-                    _ => {}
-                }
-
-                // Restore the windows after capture.
-                if had_popup && controller.popup().is_some() {
-                    set_parent_visibility(&parent_popups, true);
-                    let _ = popup.show_without_activating();
-                    if let Some(b) = &anki_button {
-                        b.show_without_activating();
-                    }
-                }
-                sync_anki_button(anki_button.as_ref(), controller.popup(), &theme);
-            }
 
             if let Some(ed) = &css_editor {
                 if let Some(crate::ui::editor::EditorOutcome::Applied) = ed.take_outcome() {
-                    theme = theme_from_config(&live.popup);
-                    if let Some(window) = &mut search_window { window.update_config(&cfg); }
-                    if let Some(v) = controller.popup() {
-                        let selection = controller.selection();
-                        let scroll = v.scroll;
+                    if let Some(view) = controller.popup() {
+                        let live = derive_session(view.session);
+                        let theme = theme_from_config(&live.popup);
+                        let selection = if live.anki_enabled { controller.selection() } else { None };
+                        let scroll = view.scroll;
                         let painted = renderer.paint(
                             SceneInputs {
-                                presentation: v.presentation,
+                                presentation: view.presentation,
                                 theme: &theme,
-                                show_back: v.show_back,
+                                show_back: view.show_back,
                                 side_panel: live.side_panel,
                                 render: live.popup.render_settings(),
                                 selection,
@@ -2401,7 +2730,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                 }
             }
 
-            if let Some(w) = &settings {
+            if let Some(w) = settings.as_mut() {
                 if edit.is_some() {
                     match edit_close_action(
                         w.take_outcome(),
@@ -2426,47 +2755,52 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                                 let report = *report;
                                 let partial_failure = !report.failed.is_empty();
                                 let status = edit_status(&report);
-                                let (mut updated, reset_screenshot_targets) = edit_cfg
+                                let mut edited = edit_cfg
                                     .take()
-                                    .unwrap_or_else(|| (cfg.clone(), false));
-                                // Apply removals first because Dictionary names can collide.
-                                for name in &report.removed {
-                                    settings::dictionary_removed(&mut updated, name);
-                                }
-                                for (name, roles) in &report.added {
-                                    settings::dictionary_added(&mut updated, name, *roles);
-                                }
-                                // A Dictionary Apply can outlive a target capture. Preserve that
-                                // target unless this Apply explicitly reset both target fields.
-                                preserve_live_capture_targets(&mut updated, &cfg, reset_screenshot_targets);
-                                // Replace the stale Dictionary identity cache.
+                                    .unwrap_or_else(|| settings_form.clone());
+                                let prepared = (|| {
+                                    let latest = crate::config::load_or_create(config_path)?;
+                                    let applied = settings::apply_to(&edited, &latest);
+                                    applied.config.resolve(&applied.profile_id)?;
+                                    applied.config.validate_hotkeys(crate::config::Platform::Windows)?;
+                                    Ok::<_, anyhow::Error>(applied)
+                                })();
+                                let applied = match prepared {
+                                    Ok(applied) => applied,
+                                    Err(error) => {
+                                        dicts = report.dicts;
+                                        settings_form = edited;
+                                        drive!(Event::SharedResourcesReloaded {
+                                            cfg: Box::new(controller_config(&live)),
+                                            session: default_session.clone(),
+                                        });
+                                        refuse_apply(w, &error);
+                                        continue;
+                                    }
+                                };
+                                edited.staged_adds.retain(|add| {
+                                    !report.added.iter().any(|(name, _)| name == &add.name)
+                                        && !report.freq_added.contains(&add.name)
+                                });
+                                edited.staged_removes.retain(|name| {
+                                    !report.removed.contains(name)
+                                        && !report.freq_removed.contains(name)
+                                });
+                                let previous = cfg.clone();
+                                let previous_dicts = dicts.clone();
                                 dicts = report.dicts;
-                                w.clear_staged();
-                                w.clear_screenshot_reset_targets();
-                                w.reseed_per_language(&updated.dictionaries.per_language);
-                                queue_ocr_reload(&cfg, &updated, &ocr_reload_tx);
-                                cfg = updated.clone();
-                                live = derive(&cfg);
-                                live.present_cfg = cfg.present_config(&dicts);
-                                sync_ocr_clipboard_action(
-                                    &mut action_registry,
-                                    live.actions_ocr_clipboard_hotkey.as_deref(),
-                                );
-                                apply_live(
-                                    &live,
-                                    &popup,
-                                    overlay.as_ref(),
-                                    anki_button.as_ref(),
-                                    static_overlay.as_ref(),
-                                    &mut theme,
-                                    &capture_guard_active,
-                                );
-                                // Reload the Controller to discard stale results.
-                                drive!(Event::ConfigReloaded(Box::new(controller_config(&live),)));
-                                pending_apply_save = Some(PendingApplySave { generation: apply_generation, partial_failure });
+                                let updated = applied.config.clone();
+                                settings_form = edited;
+                                w.replace_form(&settings_form)?;
+                                install_runtime_catalog!(updated, previous, previous_dicts);
+                                pending_apply_save = Some(PendingApplySave {
+                                    generation: apply_generation,
+                                    partial_failure,
+                                    applied: Some(applied),
+                                });
                                 save_in_background(
                                     &mut save_job,
-                                    updated,
+                                    cfg.clone(),
                                     config_path.to_path_buf(),
                                     save_tx.clone(),
                                     main_tid,
@@ -2494,10 +2828,23 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                         Some(SettingsOutcome::Quit) => drive!(Event::Quit),
                         Some(SettingsOutcome::Apply) => {
                             let t0 = std::time::Instant::now();
-                            let edited = w.read(&form_with_library(&cfg, &dicts, &library));
-                            let updated = settings::apply_to(&edited, &cfg);
-                            if let Err(error) = w.validate_hotkeys(&updated) {
-                                refuse_apply(w, &error);
+                            let edited = w.read(&settings_form);
+                            let latest = match crate::config::load_or_create(config_path) {
+                                Ok(latest) => latest,
+                                Err(error) => {
+                                    refuse_apply(w, &error);
+                                    continue;
+                                }
+                            };
+                            let applied = settings::apply_to(&edited, &latest);
+                            let resolved = match applied.config.resolved(Some(&applied.profile_id)) {
+                                Ok(resolved) => resolved,
+                                Err(error) => {
+                                    refuse_apply(w, &error);
+                                    continue;
+                                }
+                            };
+                            if w.validate_hotkeys(&applied.config).is_err() {
                                 continue;
                             }
                             apply_generation = apply_generation.wrapping_add(1);
@@ -2507,7 +2854,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                                     Err(e) => refuse_apply(w, &e),
                                     Ok(lock) => {
                                         begin_apply(w);
-                                        edit_cfg = Some((updated, edited.screenshot_reset_targets));
+                                        edit_cfg = Some(edited.clone());
                                         let (etx, erx) = mpsc::channel::<EditMsg>();
                                         edit = Some(EditFlight {
                                             rx: erx,
@@ -2531,34 +2878,21 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                                     }
                                 }
                             } else {
-                                // Read Dictionary work before `cfg` becomes the new value.
-                                // The old and new frequency inputs determine the work.
-                                let work = settings::dictionary_work(&cfg, &updated);
-                                live = derive(&updated);
-                                live.present_cfg = updated.present_config(&dicts);
-                                sync_ocr_clipboard_action(
-                                    &mut action_registry,
-                                    live.actions_ocr_clipboard_hotkey.as_deref(),
-                                );
-                                apply_live(
-                                    &live,
-                                    &popup,
-                                    overlay.as_ref(),
-                                    anki_button.as_ref(),
-                                    static_overlay.as_ref(),
-                                    &mut theme,
-                                    &capture_guard_active,
-                                );
-                                queue_ocr_reload(&cfg, &updated, &ocr_reload_tx);
-                                drive!(Event::ConfigReloaded(Box::new(controller_config(&live),)));
-                                let clamped = settings::clamp_notice(&edited, &updated);
-                                w.reseed_per_language(&updated.dictionaries.per_language);
-                                w.clear_screenshot_reset_targets();
-                                cfg = updated.clone();
-                                pending_apply_save = Some(PendingApplySave { generation: apply_generation, partial_failure: false });
+                                let updated = applied.config.clone();
+                                let work = settings::dictionary_work(&latest, &updated);
+                                let clamped = settings::clamp_notice(&edited, &resolved);
+                                let previous = cfg.clone();
+                                let previous_dicts = dicts.clone();
+                                settings_form = edited;
+                                install_runtime_catalog!(updated, previous, previous_dicts);
+                                pending_apply_save = Some(PendingApplySave {
+                                    generation: apply_generation,
+                                    partial_failure: false,
+                                    applied: Some(applied),
+                                });
                                 save_in_background(
                                     &mut save_job,
-                                    updated,
+                                    cfg.clone(),
                                     config_path.to_path_buf(),
                                     save_tx.clone(),
                                     main_tid,
@@ -2567,27 +2901,20 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                                 );
                                 let mut status_parts = Vec::new();
                                 if let Some(notice) = &clamped {
-                                    w.set_capture_fields(&cfg.ocr);
                                     status_parts.push(notice.clone());
                                 }
-                                // A strategy, order, or checkbox change updates `term.freq` in place.
-                                // It never reads an archive. The database already stores the claims.
-                                // An archive edit owns the archive pass, and a rebuild owns neither.
+                                // A strategy, order, or checkbox change updates stored frequency ranks.
                                 if work == settings::DictionaryWork::Reindex {
                                     w.set_busy(true);
-                                    let done = reindex_ranks(&db_path, &cfg, &dicts, w);
+                                    let done = reindex_ranks(&db_path, &cfg, w);
                                     status_parts.push(match done {
-                                        Ok(rows) => {
-                                            format!("Reranked {rows} term rows.")
-                                        }
-                                        Err(e) => {
+                                        Ok(rows) => format!("Reranked {rows} term rows."),
+                                        Err(error) => {
                                             if let Some(pending) = &mut pending_apply_save {
                                                 pending.partial_failure = true;
                                             }
-                                            eprintln!(
-                                                "chibipop: reranking failed: {e:#}"
-                                            );
-                                            format!("Frequency rankings not updated: {e}")
+                                            eprintln!("chibipop: reranking failed: {error:#}");
+                                            format!("Frequency rankings not updated: {error}")
                                         }
                                     });
                                 }
@@ -2615,43 +2942,16 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                 drive!(Event::Quit);
             }
 
-            // A trigger-key release retracts the popup.
-            let held = Hooks::trigger_held();
-            if held != trigger_was_held && !search_focused {
-                trigger_was_held = held;
-                if held {
-                    drive!(Event::TriggerDown);
-                } else {
-                    if !matches!(live.trigger_mode, crate::config::TriggerMode::Live) {
-                        // Do not restore visibility because restore would show the popup again.
-                        capture_guard_prev_visible.set(false);
-                        overlay_prev_visible.set(false);
-                        btn_prev_visible.set(false);
-                    }
-                    drive!(Event::TriggerUp);
-                }
-            }
-            let press = Hooks::take_press().then_some(cursor_pos);
             let cursor = Hooks::take_pending().unwrap_or_else(|| {
-                let pos = cursor_pos;
-                let dominated = Hooks::poll_gate(pos);
-                if dominated {
+                let pos = cursor_now();
+                if Hooks::poll_gate(pos) {
                     pos
                 } else {
-                    PhysPoint {
-                        x: i32::MIN,
-                        y: i32::MIN,
-                    }
+                    PhysPoint { x: i32::MIN, y: i32::MIN }
                 }
             });
-            for event in route_hook_events(
-                press,
-                (cursor.x != i32::MIN).then_some(cursor),
-            )
-            .into_iter()
-            .flatten()
-            {
-                if !search_focused { drive!(event); }
+            if cursor.x != i32::MIN && !search_focused {
+                drive!(Event::CursorMoved { pos: cursor });
             }
 
         } else if msg.message == WM_APP_RESULT {
@@ -2674,33 +2974,40 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
         } else if msg.message == WM_APP_ANKI {
             while let Ok(result) = anki_rx.try_recv() {
                 drive!(Event::DupesChecked {
-                    generation: result.gen,
+                    generation: result.generation,
+                    session: result.session,
                     dupes: result.dupes
                 });
             }
         } else if msg.message == WM_APP_ADD_NOTE {
             while let Ok(result) = add_rx.try_recv() {
+                let notify = result.session.config().anki.notify_on_add;
                 let status = match &result.result {
                     Ok(anki::WriteResult::Added(id)) => {
                         eprintln!("chibipop: Anki note added as {id}");
-                        if live.notify_on_add {
+                        if notify {
                             tray.notify("chibipop", &format!("{} added", result.expr));
                         }
                         NoteWriteStatus::Added
                     }
                     Ok(anki::WriteResult::Updated(id)) => {
                         eprintln!("chibipop: Anki note updated as {id}");
-                        if live.notify_on_add {
+                        if notify {
                             tray.notify("chibipop", &format!("{} updated", result.expr));
                         }
                         NoteWriteStatus::Updated
                     }
-                    Err(e) => {
-                        eprintln!("chibipop: Anki write failed: {e}");
+                    Err(error) => {
+                        eprintln!("chibipop: Anki write failed: {error}");
                         NoteWriteStatus::Failed
                     }
                 };
-                drive!(Event::NoteWritten { expr: result.expr, status });
+                drive!(Event::NoteWritten {
+                    id: result.id,
+                    expr: result.expr,
+                    session: result.session,
+                    status,
+                });
             }
         } else if msg.message == WM_APP_SETTINGS {
             while let Ok(status) = settings_rx.try_recv() {
@@ -2718,35 +3025,44 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
             }
         } else if msg.message == WM_APP_SAVED {
             while let Ok(result) = save_rx.try_recv() {
-                finish_save(settings.as_ref(), &mut pending_apply_save, result, config_path, save_sequence);
+                finish_save(
+                    settings.as_mut(),
+                    &mut settings_form,
+                    &dicts,
+                    &mut pending_apply_save,
+                    result,
+                    config_path,
+                    save_sequence,
+                );
             }
         } else if msg.message == WM_APP_SCREENSHOT_DONE {
             while let Ok(result) = screenshot_done_rx.try_recv() {
-                match &result.filed {
+                match &result.result.filed {
                     Ok(Some(anki::WriteResult::Added(id))) => {
                         eprintln!("chibipop: Anki note added as {id}");
-                        if live.notify_on_add {
-                            tray.notify("chibipop", &format!("{} added", result.expr));
+                        if result.session.config().anki.notify_on_add {
+                            tray.notify("chibipop", &format!("{} added", result.result.expr));
                         }
                     }
                     Ok(Some(anki::WriteResult::Updated(id))) => {
                         eprintln!("chibipop: Anki note updated as {id}");
-                        if live.notify_on_add {
-                            tray.notify("chibipop", &format!("{} updated", result.expr));
+                        if result.session.config().anki.notify_on_add {
+                            tray.notify("chibipop", &format!("{} updated", result.result.expr));
                         }
                     }
-                    // Report the saved PNG instead of an "added" notification.
-                    // The PNG on disk is the complete result.
                     Ok(None) => eprintln!(
                         "chibipop: screenshot saved to {} - no card to file it on",
-                        result.dir.display()
+                        result.result.dir.display()
                     ),
-                    Err(e) => eprintln!("chibipop: screenshot failed: {e}"),
+                    Err(error) => eprintln!("chibipop: screenshot failed: {error}"),
                 }
-                // Report the failure. `start_add` marked the popup for the add before
-                // it sent this result here.
-                if let Some(status) = result.write_status() {
-                    drive!(Event::NoteWritten { expr: result.expr, status });
+                if let Some(status) = result.result.write_status() {
+                    drive!(Event::NoteWritten {
+                        id: result.id,
+                        expr: result.result.expr,
+                        session: result.session,
+                        status,
+                    });
                 }
             }
         } else if msg.message == WM_APP_CAPTURE_GUARD {
@@ -2764,7 +3080,45 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                     overlay_prev_visible.set(false);
                     btn_prev_visible.set(false);
                     drive!(Event::DismissRequested);
-                    open_search_window(&mut search_window, &db_path, &rules_path, &cfg);
+                    open_search_window_mode(
+                        &mut search_windows,
+                        &db_path,
+                        &rules_path,
+                        catalog.session(None)?,
+                        config_path,
+                        chibipop::search::SearchMode::Dictionary,
+                        None,
+                    );
+                }
+                TrayCommand::SetDefaultProfile(id) => {
+                    join_save(&mut save_job);
+                    while let Ok(result) = save_rx.try_recv() {
+                        finish_save(
+                            settings.as_mut(),
+                            &mut settings_form,
+                            &dicts,
+                            &mut pending_apply_save,
+                            result,
+                            config_path,
+                            save_sequence,
+                        );
+                    }
+                    let previous = cfg.clone();
+                    let previous_dicts = dicts.clone();
+                    match persist_default_profile(config_path, &id) {
+                        Ok(Some(latest)) => {
+                            install_runtime_catalog!(latest, previous, previous_dicts);
+                        }
+                        Ok(None) => {
+                            eprintln!("chibipop: default profile no longer exists");
+                        }
+                        Err(error) => {
+                            if let Some(window) = &settings {
+                                window.set_status(&format!("Could not set default profile: {error}"));
+                            }
+                            eprintln!("chibipop: setting default profile failed: {error:#}");
+                        }
+                    }
                 }
                 TrayCommand::OpenSettings => drive!(Event::TrayAction(TrayAction::OpenSettings)),
                 TrayCommand::Quit => {
@@ -2784,6 +3138,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                         Err(e) => eprintln!("chibipop: opening settings failed: {e:#}"),
                         Ok(w) => {
                             notice_drift(&w, &library, &db_path);
+                            settings_form = form;
                             settings = Some(w);
                         }
                     }
@@ -2797,67 +3152,87 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
         }
 
         // Handle the OS half of screenshot-on-add outside every Command batch.
-        if let Some(pending) = pending_shot.take() {
+        while let Some(pending) = pending_shots.pop_front() {
             drive!(Event::PopupHover { local: PhysPoint { x: 0, y: 0 }, query: None });
             set_parent_visibility(&parent_popups, false);
             let _ = popup.hide();
-            if let Some(b) = &anki_button {
-                b.hide();
+            if let Some(button) = &anki_button {
+                button.hide();
             }
             disarm_for_selection(&popup, &mut pointer_buttons);
+            let screenshot = pending.session.config().actions.screenshot.clone();
             let selected = match crate::action::screenshot::select_target(
                 &mut region_selection,
-                &cfg.actions.screenshot,
+                &screenshot,
             ) {
                 Ok(Some(target)) => {
-                    match crate::text::capture::capture_upscaled_by(target.rect(), 1) {
-                        Ok(cap) => {
-                            if let Err(e) = persist_screenshot_target(
-                                &mut cfg,
-                                &target,
-                                config_path,
-                                &mut save_job,
-                            ) {
-                                eprintln!("chibipop: saving screenshot target failed: {e:#}");
+                    join_save(&mut save_job);
+                    while let Ok(result) = save_rx.try_recv() {
+                        finish_save(
+                            settings.as_mut(),
+                            &mut settings_form,
+                            &dicts,
+                            &mut pending_apply_save,
+                            result,
+                            config_path,
+                            save_sequence,
+                        );
+                    }
+                    let previous = cfg.clone();
+                    let previous_dicts = dicts.clone();
+                    match persist_screenshot_target(&pending.session, &target, config_path) {
+                        Ok(Some(updated)) => {
+                            install_runtime_catalog!(updated, previous, previous_dicts);
+                            if settings_form.profile_id == pending.session.id() {
+                                let selected = cfg.resolved(Some(&settings_form.profile_id))?;
+                                if let Some(window) = &settings {
+                                    window.refresh_screenshot_targets(&selected.actions.screenshot);
+                                }
                             }
-                            if let Some(w) = &settings {
-                                w.refresh_screenshot_targets(&cfg.actions.screenshot);
-                            }
-                            Some((target, cap))
                         }
-                        Err(e) => {
-                            eprintln!("chibipop: grabbing the screenshot failed: {e:#}");
+                        Ok(None) => {}
+                        Err(error) => {
+                            eprintln!("chibipop: saving screenshot target failed: {error:#}");
+                        }
+                    }
+                    match crate::text::capture::capture_upscaled_by(target.rect(), 1) {
+                        Ok(cap) => Some((target, cap)),
+                        Err(error) => {
+                            eprintln!("chibipop: grabbing the screenshot failed: {error:#}");
                             None
                         }
                     }
                 }
                 Ok(None) => None,
-                Err(e) => {
-                    eprintln!("chibipop: resolving the screenshot target failed: {e:#}");
+                Err(error) => {
+                    eprintln!("chibipop: resolving the screenshot target failed: {error:#}");
                     None
                 }
             };
+            for event in selection_release_events(Hooks::take_configured_binds()) {
+                drive!(event);
+            }
             let view = screenshot_restore_view(&controller);
             if view.is_some() {
                 set_parent_visibility(&parent_popups, true);
                 let _ = popup.show_without_activating();
             }
-            sync_anki_button(anki_button.as_ref(), view, &theme);
+            sync_anki_button(anki_button.as_ref(), view);
             match selected {
                 Some((_target, cap)) => {
-                    let _ = screenshot_tx.send(parked_add_command(
+                    let anki = anki_snapshot(&pending.session);
+                    let job = parked_add_command(
                         pending,
-                        anki_snapshot(&cfg, &live),
+                        anki,
                         cap.buf,
                         cap.w,
                         cap.h,
-                    ));
+                    );
+                    let _ = screenshot_tx.send(job);
                 }
-                // If the user cancels or the grab fails, send the add without a screenshot.
-                // The popup already marks the add, so this path must clear that state.
                 None => {
-                    let PendingShot { plan } = pending;
-                    spawn_add_note(plan.expr, plan.fields, &live, &add_tx, main_tid);
+                    let PendingShot { id, session, plan } = pending;
+                    spawn_add_note(id, plan.expr, plan.fields, session, &add_tx, main_tid);
                 }
             }
         }
@@ -2874,7 +3249,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
     // Wait for the save before `exit(0)`. Otherwise, the process can stop mid-write.
     join_save(&mut save_job);
     while let Ok(result) = save_rx.try_recv() {
-        finish_save(None, &mut pending_apply_save, result, config_path, save_sequence);
+        finish_save(None, &mut settings_form, &dicts, &mut pending_apply_save, result, config_path, save_sequence);
     }
     crate::diagnostics::shutdown_capture();
     if let Some(w) = &settings {
@@ -3005,42 +3380,38 @@ fn show_presentation(
     Ok((rect, content_h, view_h))
 }
 
-/// Returns the `[anki]` section that the pump uses.
-/// It starts with the config values and applies `derive`'s empty-field-map fallback.
-/// A screenshot add therefore uses the same fields as a plain add.
-fn anki_snapshot(cfg: &Config, live: &LiveSettings) -> crate::config::AnkiConfig {
-    crate::config::AnkiConfig {
-        field_map: live.anki_field_map.clone(),
-        ..cfg.anki.clone()
+/// Returns the effective Anki settings with the field-map fallback.
+fn anki_snapshot(session: &ProfileSession) -> crate::config::AnkiConfig {
+    let mut anki = session.config().anki.clone();
+    if anki.field_map.is_empty() {
+        anki.field_map = crate::config::AnkiConfig::default().field_map;
     }
+    anki
 }
 
 /// Adds one note on a background thread.
 fn spawn_add_note(
+    id: RequestId,
     expr: String,
     fields: HashMap<String, String>,
-    live: &LiveSettings,
+    session: ProfileSession,
     add_tx: &mpsc::Sender<AddNoteResult>,
     main_tid: u32,
 ) {
-    let url = live.anki_url.clone();
-    let deck = live.anki_deck.clone();
-    let model = live.anki_model.clone();
-    let field_map = live.anki_field_map.clone();
-    let overwrite_duplicates = live.overwrite_duplicates;
+    let anki = anki_snapshot(&session);
     let tx = add_tx.clone();
     thread::spawn(move || {
         let result = anki::write_note(
-            &url,
-            &deck,
-            &model,
+            &anki.url,
+            &anki.deck,
+            &anki.model,
             &fields,
-            &field_map,
+            &anki.field_map,
             None,
-            overwrite_duplicates,
+            anki.overwrite_duplicates,
         )
         .map_err(|e| format!("{e:#}"));
-        let _ = tx.send(AddNoteResult { expr, result });
+        let _ = tx.send(AddNoteResult { id, session, expr, result });
         // SAFETY: This call wakes the main loop.
         unsafe {
             let _ = PostThreadMessageW(main_tid, WM_APP_ADD_NOTE, WPARAM(0), LPARAM(0));
@@ -3111,11 +3482,20 @@ fn set_parent_visibility(parents: &std::cell::RefCell<Vec<(Popup, Renderer)>>, v
     }
 }
 
+fn selection_release_events(
+    edges: Vec<crate::input::hooks::BindEvent>,
+) -> impl Iterator<Item = Event> {
+    edges.into_iter()
+        .filter(|edge| edge.action == crate::config::BindAction::Lookup && !edge.down)
+        .map(|edge| Event::LookupBindUp { bind_id: edge.id.to_string() })
+}
+
 /// Disarms hooks for a pump.
 fn disarm_for_selection(popup: &Popup, pointer_buttons: &mut u8) {
     Hooks::set_scroll_armed(false);
     Hooks::set_click_armed(false);
     Hooks::discard_pointer_state();
+    crate::input::hooks::discard_keyboard_actions();
     *pointer_buttons = 0;
     popup.release_pointer();
 }
@@ -3202,13 +3582,20 @@ fn screenshot_restore_view(controller: &Controller) -> Option<PopupView<'_>> {
 /// Places, paints, or hides the Anki button.
 ///
 /// The button sits below the popup and has the same left and right edges.
-fn sync_anki_button(btn: Option<&AnkiButton>, view: Option<PopupView<'_>>, theme: &Theme) {
+fn sync_anki_button(btn: Option<&AnkiButton>, view: Option<PopupView<'_>>) {
     let Some(btn) = btn else { return };
     let Some(v) = view else {
         btn.hide();
         return;
     };
-    let Some((text, color)) = anki_button_label(v.presentation, theme, v.anki) else {
+    let live = derive_session(v.session);
+    let theme = theme_from_config(&live.popup);
+    btn.set_capture_exclusion(live.exclude_from_capture);
+    if !live.anki_enabled {
+        btn.hide();
+        return;
+    }
+    let Some((text, color)) = anki_button_label(v.presentation, &theme, v.anki) else {
         btn.hide();
         return;
     };
@@ -3222,7 +3609,20 @@ fn sync_anki_button(btn: Option<&AnkiButton>, view: Option<PopupView<'_>>, theme
         eprintln!("chibipop: positioning the Anki button failed: {e:#}");
         return;
     }
-    btn.render(&text, color, theme);
+    btn.render(&text, color, &theme);
+}
+
+fn sync_static_region_overlay(overlay: Option<&StaticRegionOverlay>, live: &LiveSettings) {
+    let Some(overlay) = overlay else { return };
+    overlay.set_capture_exclusion(live.exclude_from_capture);
+    match live.static_overlay_region() {
+        Some(region) => {
+            if let Err(error) = overlay.show(region) {
+                eprintln!("chibipop: showing static region overlay failed: {error:#}");
+            }
+        }
+        None => overlay.hide(),
+    }
 }
 
 /// Builds the Controller configuration from live settings.
@@ -3256,22 +3656,25 @@ fn controller_config(live: &LiveSettings) -> ControllerConfig {
 /// The region selector owns a nested message pump, so this code cannot enter
 /// it inside a Command batch.
 struct PendingShot {
+    id: RequestId,
+    session: ProfileSession,
     plan: crate::shot::ShotPlan,
 }
 
-/// Builds the Worker command for a parked, authorized add.
-///
-/// A parked plan exists only for an authorized `AddNote`, so the Worker files the
-/// card. The duplicate probe decides the popup's button, not the note.
+/// Builds the command for one authorized screenshot add.
 fn parked_add_command(
     pending: PendingShot,
     anki: crate::config::AnkiConfig,
     bgra_buf: Vec<u8>,
     width: i32,
     height: i32,
-) -> crate::action::ScreenshotCommand {
-    let PendingShot { plan } = pending;
-    crate::action::ScreenshotCommand { bgra_buf, width, height, plan, anki, anki_connected: true }
+) -> (RequestId, ProfileSession, crate::action::ScreenshotCommand) {
+    let PendingShot { id, session, plan } = pending;
+    (
+        id,
+        session,
+        crate::action::ScreenshotCommand { bgra_buf, width, height, plan, anki, anki_connected: true },
+    )
 }
 
 /// Provides the values that Command handling needs.
@@ -3283,28 +3686,21 @@ struct Exec<'a> {
     capture_restore: [&'a std::cell::Cell<bool>; 3],
     db_path: &'a Path,
     renderer: &'a mut Renderer,
-    theme: &'a Theme,
-    /// `AddNote` passes the full config to `chibipop::shot`.
-    /// Core owns the screenshot-on-add rule.
-    cfg: &'a Config,
     live: &'a LiveSettings,
     exe_dir: &'a Path,
     overlay: Option<&'a Overlay>,
+    static_overlay: Option<&'a StaticRegionOverlay>,
     anki_button: Option<&'a AnkiButton>,
     trigger_tx: &'a mpsc::Sender<Trigger>,
     selected_text: &'a mut crate::action::selected_text::Reader,
-    pending_selected_sentence: &'a mut Option<String>,
+    pending_selected_sentence: &'a mut Option<(ProfileSession, String)>,
     dicts: &'a [DictInfo],
     anki_tx: &'a mpsc::Sender<AnkiDupeResult>,
     add_tx: &'a mpsc::Sender<AddNoteResult>,
     main_tid: u32,
-    /// The loop handles `OpenSettings`.
     want_settings: &'a mut bool,
-    /// An add that needs a screenshot. The loop does the OS half.
-    pending_shot: &'a mut Option<PendingShot>,
-    /// The Japanese analysis service has the same process lifetime as the Worker.
+    pending_shots: &'a mut std::collections::VecDeque<PendingShot>,
     analysis: &'a chibipop::analysis::Service,
-    /// Button bits and the last local point let repaint feedback continue the drag.
     pointer_buttons: &'a mut u8,
     last_pointer: &'a mut Option<PhysPoint>,
     last_pointer_text: &'a mut Option<TextAddr>,
@@ -3315,6 +3711,18 @@ struct Exec<'a> {
 /// The function handles `ShowPopup` immediately, so `PopupPlaced` or
 /// `PopupPlaceFailed` enters the queue at once.
 fn drive(controller: &mut Controller, event: Event, x: &mut Exec<'_>) {
+    if let Event::LookupBindUp { bind_id } = &event {
+        if controller.active_bind_id() == Some(bind_id.as_str())
+            && matches!(
+                controller.trigger_mode(),
+                crate::config::TriggerMode::HoldKey
+                    | crate::config::TriggerMode::HoldShift
+                    | crate::config::TriggerMode::Toggle
+            )
+        {
+            for visible in x.capture_restore { visible.set(false); }
+        }
+    }
     let mut queue = std::collections::VecDeque::new();
     if x.cancel_hidden_hover.replace(false) {
         queue.push_back(Event::PopupHover { local: PhysPoint { x: 0, y: 0 }, query: None });
@@ -3340,15 +3748,17 @@ fn execute(controller: &Controller, cmd: Command, x: &mut Exec<'_>) -> Option<Ev
         Command::PushPopup => {
             let depth = controller.popup_depth().saturating_sub(1);
             let view = controller.parent_popup(depth)?;
+            let live = derive_session(view.session);
+            let theme = theme_from_config(&live.popup);
             let saved = (|| -> Result<(Popup, Renderer)> {
-                let popup = Popup::create(x.live.exclude_from_capture)?;
-                popup.set_alpha((x.theme.opacity * 255.0).round().clamp(0.0, 255.0) as u8);
+                let popup = Popup::create(live.exclude_from_capture)?;
+                popup.set_alpha((theme.opacity * 255.0).round().clamp(0.0, 255.0) as u8);
                 let mut renderer = Renderer::new(popup.hwnd(), x.db_path)?;
                 popup.show_at(view.popup)?;
                 renderer.paint(SceneInputs {
-                    presentation: view.presentation, theme: x.theme, show_back: view.show_back,
-                    side_panel: x.live.side_panel, render: x.live.popup.render_settings(),
-                    selection: x.cfg.anki.enabled.then_some(view.selection),
+                    presentation: view.presentation, theme: &theme, show_back: view.show_back,
+                    side_panel: live.side_panel, render: live.popup.render_settings(),
+                    selection: live.anki_enabled.then_some(view.selection),
                 }, view.scroll)?;
                 Ok((popup, renderer))
             })();
@@ -3368,12 +3778,15 @@ fn execute(controller: &Controller, cmd: Command, x: &mut Exec<'_>) -> Option<Ev
         }
         Command::RestorePopup { depth } => {
             x.parent_popups.borrow_mut().truncate(depth);
-            sync_popup_capture_guard(x);
             if let Some(view) = controller.popup() {
+                let live = derive_session(view.session);
+                x.popup.set_capture_exclusion(live.exclude_from_capture);
+                sync_static_region_overlay(x.static_overlay, &live);
                 if let Err(error) = x.popup.show_at(view.popup) {
                     eprintln!("chibipop: restoring parent popup failed: {error:#}");
                 }
             }
+            sync_popup_capture_guard(x);
             None
         }
         Command::ClearPopupParents => {
@@ -3384,28 +3797,19 @@ fn execute(controller: &Controller, cmd: Command, x: &mut Exec<'_>) -> Option<Ev
         // It uses WDA_EXCLUDEFROMCAPTURE or the hide-and-reshow Capture guard.
         // It therefore sends no mask rectangles, and `popup` is unread here.
         // (ARCHITECTURE.md#capture-and-masking).
-        Command::RequestLookup {
-            id,
-            point,
-            popup: _,
-        } => {
+        Command::RequestLookup { id, point, popup: _, session } => {
             let _ = x.trigger_tx.send(Trigger {
                 kind: TriggerKind::Hover(Hover {
                     at: point,
                     mask: CaptureMask::NONE,
+                    session,
                 }),
                 id,
             });
             None
         }
         // Windows excludes its popup at the OS level. The hide flag has no effect.
-        // WDA_EXCLUDEFROMCAPTURE or the capture guard handles it.
-        Command::RequestSentence {
-            id,
-            anchor,
-            orientation,
-            hide_popup: _,
-        } => {
+        Command::RequestSentence { id, anchor, orientation, hide_popup: _, session } => {
             sentence_send_feedback(
                 id,
                 x.trigger_tx.send(Trigger {
@@ -3413,16 +3817,23 @@ fn execute(controller: &Controller, cmd: Command, x: &mut Exec<'_>) -> Option<Ev
                         anchor,
                         orientation,
                         mask: CaptureMask::NONE,
+                        session,
                     }),
                     id,
                 }),
             )
         }
-        Command::ReadSelectedText { id } => { x.selected_text.request(id); None }
-        Command::OpenSentenceSearch { text } => { *x.pending_selected_sentence = Some(text); None }
-        Command::RequestDrillDown { id, text } => {
+        Command::ReadSelectedText { id, session } => {
+            x.selected_text.request(id, session);
+            None
+        }
+        Command::OpenSentenceSearch { text, session } => {
+            *x.pending_selected_sentence = Some((session, text));
+            None
+        }
+        Command::RequestDrillDown { id, text, session } => {
             let _ = x.trigger_tx.send(Trigger {
-                kind: TriggerKind::DrillDown(text),
+                kind: TriggerKind::DrillDown { text, session },
                 id,
             });
             None
@@ -3438,33 +3849,32 @@ fn execute(controller: &Controller, cmd: Command, x: &mut Exec<'_>) -> Option<Ev
             x.analysis.request(generation, texts);
             None
         }
-        Command::ShowPopup {
-            presentation,
-            anchor,
-            scroll,
-            show_back,
-        } => {
-            match show_presentation(
+        Command::ShowPopup { presentation, anchor, scroll, show_back } => {
+            let live = derive_session(controller.current_session()?);
+            sync_static_region_overlay(x.static_overlay, &live);
+            let theme = theme_from_config(&live.popup);
+            x.popup.set_capture_exclusion(live.exclude_from_capture);
+            x.popup.set_alpha((theme.opacity * 255.0).round().clamp(0.0, 255.0) as u8);
+            let selection = if live.anki_enabled { controller.selection() } else { None };
+            let shown = show_presentation(
                 x.popup,
                 x.renderer,
-                (x.live.max_height_percent, x.live.max_width_percent, controller.selected_text_popup(),
+                (live.max_height_percent, live.max_width_percent, controller.selected_text_popup(),
                     x.anki_button.map_or(0, AnkiButton::height_phys)),
                 SceneInputs {
                     presentation: &presentation,
-                    theme: x.theme,
+                    theme: &theme,
                     show_back,
-                    side_panel: x.live.side_panel,
-                    render: x.live.popup.render_settings(),
-                    selection: controller.selection(),
+                    side_panel: live.side_panel,
+                    render: live.popup.render_settings(),
+                    selection,
                 },
                 anchor,
                 scroll,
-            ) {
-                Ok((rect, content_h, view_h)) => Some(Event::PopupPlaced {
-                    rect,
-                    content_h,
-                    view_h,
-                }),
+            );
+            sync_popup_capture_guard(x);
+            match shown {
+                Ok((rect, content_h, view_h)) => Some(Event::PopupPlaced { rect, content_h, view_h }),
                 Err(e) => {
                     eprintln!("chibipop: showing the popup failed: {e:#}");
                     Some(Event::PopupPlaceFailed)
@@ -3474,14 +3884,16 @@ fn execute(controller: &Controller, cmd: Command, x: &mut Exec<'_>) -> Option<Ev
         Command::RepaintPopup { scroll, show_back } => {
             let mut feedback = None;
             if let Some(view) = controller.popup() {
-                let selection = controller.selection();
+                let live = derive_session(view.session);
+                let theme = theme_from_config(&live.popup);
+                let selection = if live.anki_enabled { controller.selection() } else { None };
                 match x.renderer.paint(
                     SceneInputs {
                         presentation: view.presentation,
-                        theme: x.theme,
+                        theme: &theme,
                         show_back,
-                        side_panel: x.live.side_panel,
-                        render: x.live.popup.render_settings(),
+                        side_panel: live.side_panel,
+                        render: live.popup.render_settings(),
                         selection,
                     },
                     scroll,
@@ -3515,18 +3927,23 @@ fn execute(controller: &Controller, cmd: Command, x: &mut Exec<'_>) -> Option<Ev
             if let Some(ov) = x.overlay {
                 ov.hide();
             }
+            sync_static_region_overlay(x.static_overlay, x.live);
             None
         }
         Command::ShowScanOverlay { rects } => {
-            if let Some(ov) = x.overlay {
-                if let Err(e) = ov.show_rects(&rects, x.theme) {
+            if let (Some(ov), Some(session)) = (x.overlay, controller.session_at(controller.popup_depth())) {
+                let live = derive_session(session);
+                let theme = theme_from_config(&live.popup);
+                ov.set_capture_exclusion(live.exclude_from_capture);
+                if let Err(e) = ov.show_rects(&rects, &theme) {
                     eprintln!("chibipop: showing the scan overlay failed: {e:#}");
                 }
             }
             None
         }
         Command::SyncAnkiButton => {
-            sync_anki_button(x.anki_button, controller.popup(), x.theme);
+            sync_anki_button(x.anki_button, controller.popup());
+            sync_popup_capture_guard(x);
             None
         }
         Command::SetScrollArmed(armed) => {
@@ -3569,11 +3986,13 @@ fn execute(controller: &Controller, cmd: Command, x: &mut Exec<'_>) -> Option<Ev
             }
             None
         }
-        Command::CheckDupes { generation, exprs } => {
+        Command::CheckDupes { generation, exprs, session } => {
             let refs = unique_exprs(exprs);
+            let anki = anki_snapshot(&session);
             if refs.is_empty() {
                 let _ = x.anki_tx.send(AnkiDupeResult {
-                    gen: generation,
+                    generation,
+                    session,
                     dupes: Some(HashSet::new()),
                 });
                 // SAFETY: This call wakes the main loop.
@@ -3582,25 +4001,18 @@ fn execute(controller: &Controller, cmd: Command, x: &mut Exec<'_>) -> Option<Ev
                 }
                 return None;
             }
-            let url = x.live.anki_url.clone();
-            let deck = x.live.anki_deck.clone();
-            let model = x.live.anki_model.clone();
-            let field_map = x.live.anki_field_map.clone();
             let tx = x.anki_tx.clone();
             let main_tid = x.main_tid;
             thread::spawn(move || {
                 let refs: Vec<&str> = refs.iter().map(String::as_str).collect();
-                let dupes = match anki::find_duplicates(&url, &deck, &model, &refs, &field_map) {
+                let dupes = match anki::find_duplicates(&anki.url, &anki.deck, &anki.model, &refs, &anki.field_map) {
                     Ok(found) => Some(found),
                     Err(e) => {
                         eprintln!("chibipop: dupe check failed: {e:#}");
                         None
                     }
                 };
-                let _ = tx.send(AnkiDupeResult {
-                    gen: generation,
-                    dupes,
-                });
+                let _ = tx.send(AnkiDupeResult { generation, session, dupes });
                 // SAFETY: This call wakes the main loop.
                 unsafe {
                     let _ = PostThreadMessageW(main_tid, WM_APP_ANKI, WPARAM(0), LPARAM(0));
@@ -3608,29 +4020,22 @@ fn execute(controller: &Controller, cmd: Command, x: &mut Exec<'_>) -> Option<Ev
             });
             None
         }
-        Command::AddNote { expr, fields } => {
-            // The screenshot-on-add seam receives the already-authorized
-            // command payload. The popup may have moved to another Card by
-            // the time the platform performs the screenshot.
-            //
-            // Do not do the OS half here. The selector owns a nested
-            // `GetMessageW` pump, and a pump inside a Command batch would
-            // re-enter `drive` halfway through the batch. Park the plan, and
-            // let the loop drain it after the batch ends.
-            let root = crate::action::screenshot::save_root(&x.cfg.actions.screenshot, x.exe_dir);
+        Command::AddNote { id, expr, fields, session } => {
+            let resolved = session.config();
+            let root = crate::action::screenshot::save_root(&resolved.actions.screenshot, x.exe_dir);
             let pending = crate::shot::plan_add(
                 &expr,
                 &fields,
-                x.cfg,
+                resolved,
                 &root,
                 crate::shot::epoch_secs(),
             )
-            .map(|plan| PendingShot { plan });
-            if pending.is_some() {
-                *x.pending_shot = pending;
+            .map(|plan| PendingShot { id, session: session.clone(), plan });
+            if let Some(pending) = pending {
+                x.pending_shots.push_back(pending);
                 return None;
             }
-            spawn_add_note(expr, fields, x.live, x.add_tx, x.main_tid);
+            spawn_add_note(id, expr, fields, session, x.add_tx, x.main_tid);
             None
         }
         Command::LogLookup {
@@ -3673,14 +4078,14 @@ fn command_diagnostic(cmd: &Command) -> String {
         Command::PushPopup => "action=push_popup".to_string(),
         Command::RestorePopup { depth } => format!("action=restore_popup depth={depth}"),
         Command::ClearPopupParents => "action=clear_popup_parents".to_string(),
-        Command::RequestLookup { id, point, popup } => format!(
+        Command::RequestLookup { id, point, popup, .. } => format!(
             "action=request_lookup id={} point=({}, {}) popup={}",
             id.0,
             point.x,
             point.y,
             popup.is_some()
         ),
-        Command::RequestSentence { id, anchor, orientation, hide_popup } => format!(
+        Command::RequestSentence { id, anchor, orientation, hide_popup, .. } => format!(
             "action=request_sentence id={} anchor=({}, {}, {}x{}) orientation={orientation:?} hide_popup={hide_popup}",
             id.0,
             anchor.x,
@@ -3688,9 +4093,9 @@ fn command_diagnostic(cmd: &Command) -> String {
             anchor.w,
             anchor.h
         ),
-        Command::ReadSelectedText { id } => format!("action=read_selected_text id={}", id.0),
-        Command::OpenSentenceSearch { text } => format!("action=open_sentence_search text_len={}", text.len()),
-        Command::RequestDrillDown { id, text } => format!(
+        Command::ReadSelectedText { id, .. } => format!("action=read_selected_text id={}", id.0),
+        Command::OpenSentenceSearch { text, .. } => format!("action=open_sentence_search text_len={}", text.len()),
+        Command::RequestDrillDown { id, text, .. } => format!(
             "action=request_drill_down id={} text_len={}",
             id.0,
             text.chars().count()
@@ -3728,11 +4133,11 @@ fn command_diagnostic(cmd: &Command) -> String {
             local.x,
             local.y
         ),
-        Command::CheckDupes { generation, exprs } => format!(
+        Command::CheckDupes { generation, exprs, .. } => format!(
             "action=check_dupes generation={generation} expressions={}",
             exprs.len()
         ),
-        Command::AddNote { expr, fields } => format!(
+        Command::AddNote { expr, fields, .. } => format!(
             "action=add_note expr_len={} fields={}",
             expr.chars().count(),
             fields.len()
@@ -3816,23 +4221,11 @@ struct LiveSettings {
     summary_chars: usize,
     anki_enabled: bool,
     overwrite_duplicates: bool,
-    anki_url: String,
-    anki_deck: String,
-    anki_model: String,
-    anki_field_map: Vec<crate::config::FieldMapping>,
     sentence_mode: crate::config::SentenceMode,
     static_region: Option<PhysRect>,
-    static_region_key: String,
     show_static_overlay: bool,
     trigger_mode: crate::config::TriggerMode,
-    trigger_key: String,
-    anki_add_key: String,
-    notify_on_add: bool,
     per_character_lookup: bool,
-    actions_ocr_clipboard_hotkey: Option<String>,
-    actions_search_hotkey: Option<String>,
-    actions_sentence_search_hotkey: Option<String>,
-    actions_selected_text_hotkey: Option<String>,
     selected_text_sentence_search: bool,
     include_dictionary_name: bool,
     first_dict_only: bool,
@@ -3857,41 +4250,11 @@ impl LiveSettings {
     }
 }
 
-/// Builds live settings from the config after each change.
-fn derive(cfg: &Config) -> LiveSettings {
-    let mut resolved = cfg.clone();
-    for (first, second) in cfg.hotkey_conflicts(crate::config::Platform::Windows) {
-        eprintln!("chibipop: {} conflicts with {}; disabled until corrected in Settings", second.name(), first.name());
-        match second {
-            crate::config::HotkeyAction::Trigger => resolved.trigger.trigger_key.clear(),
-            crate::config::HotkeyAction::AnkiAdd => resolved.anki.add_key.clear(),
-            crate::config::HotkeyAction::StaticRegion => resolved.anki.static_region_key.clear(),
-            crate::config::HotkeyAction::OcrClipboard => {
-                if let Some(clipboard) = &mut resolved.actions.ocr_clipboard { clipboard.hotkey = None; }
-            }
-            crate::config::HotkeyAction::Search => resolved.actions.search.hotkey = None,
-            crate::config::HotkeyAction::SentenceSearch => resolved.actions.search.sentence_hotkey = None,
-            crate::config::HotkeyAction::SelectedText => resolved.actions.search.selected_hotkey = None,
-            crate::config::HotkeyAction::Back => {}
-        }
-    }
-    if !resolved.actions.enabled {
-        resolved.anki.static_region_key.clear();
-        resolved.actions.ocr_clipboard = None;
-        resolved.actions.search.hotkey = None;
-        resolved.actions.search.sentence_hotkey = None;
-        resolved.actions.search.selected_hotkey = None;
-    }
-    if resolved.anki.sentence_mode != crate::config::SentenceMode::Static {
-        resolved.anki.static_region_key.clear();
-    }
-    let cfg = &resolved;
+/// Builds live settings from one resolved profile config.
+fn derive(cfg: &ResolvedConfig) -> LiveSettings {
     LiveSettings {
         popup: cfg.popup.clone(),
-        // The config has no Dictionary identities yet.
-        // Resolve enabled lists from the names in the config only. Do not append
-        // installed Dictionaries. Callers with identities resolve `present_cfg` again.
-        present_cfg: cfg.present_config(&[]),
+        present_cfg: cfg.present_config(),
         scan_display: ScanDisplay {
             captures: cfg.debug.show_scan_region,
             highlight: cfg.popup.highlight_match,
@@ -3914,14 +4277,6 @@ fn derive(cfg: &Config) -> LiveSettings {
         summary_chars: cfg.popup.summary_chars,
         anki_enabled: cfg.anki.enabled,
         overwrite_duplicates: cfg.anki.overwrite_duplicates,
-        anki_url: cfg.anki.url.clone(),
-        anki_deck: cfg.anki.deck.clone(),
-        anki_model: cfg.anki.model.clone(),
-        anki_field_map: if cfg.anki.field_map.is_empty() {
-            crate::config::AnkiConfig::default().field_map
-        } else {
-            cfg.anki.field_map.clone()
-        },
         sentence_mode: cfg.anki.sentence_mode,
         static_region: cfg.anki.static_region.map(|a| PhysRect {
             x: a[0],
@@ -3929,22 +4284,10 @@ fn derive(cfg: &Config) -> LiveSettings {
             w: a[2],
             h: a[3],
         }),
-        static_region_key: cfg.anki.static_region_key.clone(),
         show_static_overlay: cfg.anki.show_static_overlay,
         trigger_mode: cfg.trigger.mode,
-        trigger_key: cfg.trigger.trigger_key.clone(),
-        anki_add_key: cfg.anki.add_key.clone(),
-        notify_on_add: cfg.anki.notify_on_add,
         per_character_lookup: cfg.trigger.per_character_lookup,
-        actions_search_hotkey: cfg.actions.search.hotkey.clone(),
-        actions_sentence_search_hotkey: cfg.actions.search.sentence_hotkey.clone(),
-        actions_selected_text_hotkey: cfg.actions.search.selected_hotkey.clone(),
         selected_text_sentence_search: cfg.actions.search.selected_opens_sentence_search,
-        actions_ocr_clipboard_hotkey: cfg
-            .actions
-            .ocr_clipboard
-            .as_ref()
-            .and_then(|action| action.hotkey.clone()),
         include_dictionary_name: cfg.anki.include_dictionary_name,
         first_dict_only: cfg.anki.first_dict_only,
         selection_buttons: cfg.anki.selection_buttons,
@@ -3953,24 +4296,12 @@ fn derive(cfg: &Config) -> LiveSettings {
     }
 }
 
-fn anki_add_hotkey(live: &LiveSettings) -> u16 {
-    live.anki_enabled
-        .then(|| crate::config::parse_trigger_key(&live.anki_add_key))
-        .flatten()
-        .unwrap_or(0)
+fn derive_session(session: &ProfileSession) -> LiveSettings {
+    let mut live = derive(session.config());
+    live.present_cfg.clone_from(session.present_config());
+    live
 }
 
-fn static_region_hotkey(live: &LiveSettings) -> u16 {
-    (live.sentence_mode == crate::config::SentenceMode::Static)
-        .then(|| crate::config::parse_trigger_key(&live.static_region_key))
-        .flatten()
-        .unwrap_or(0)
-}
-
-fn sync_static_region_hotkey(live: &LiveSettings) {
-    Hooks::set_action_hotkey(1, static_region_hotkey(live), 0);
-    let _ = Hooks::take_action_hotkey(1);
-}
 
 /// Builds the settings that the Worker reloads.
 fn worker_settings(live: &LiveSettings, dicts: &[DictInfo]) -> WorkerSettings {
@@ -3991,58 +4322,6 @@ fn worker_settings(live: &LiveSettings, dicts: &[DictInfo]) -> WorkerSettings {
     }
 }
 
-fn ocr_selection_changed(current: &Config, updated: &Config) -> bool {
-    current.ocr.engine != updated.ocr.engine
-        || current.plugins.enabled != updated.plugins.enabled
-}
-
-fn queue_ocr_reload(
-    current: &Config,
-    updated: &Config,
-    reloads: &mpsc::Sender<OcrReload>,
-) {
-    if !ocr_selection_changed(current, updated) {
-        return;
-    }
-    let request = OcrReload {
-        engine: updated.ocr.engine.clone(),
-        enabled_plugins: updated.plugins.enabled.clone(),
-        language: updated.ocr.language.clone(),
-    };
-    if reloads.send(request).is_err() {
-        eprintln!("chibipop: the Worker stopped before OCR reload");
-    }
-}
-
-/// Updates the enabled terms list after the Dictionary identities are known.
-///
-/// `Config::present_config` appends every installed Dictionary that the config
-/// does not name. The first `Worker::spawn` call has no identities, so it
-/// resolves only the names in the config. Update `present_cfg` now so a new
-/// session searches the right Dictionaries on its first lookup. Do not wait
-/// for the first reload. If the list did not change, do nothing.
-fn rescope_lookups(
-    live: &mut LiveSettings,
-    cfg: &Config,
-    dicts: &[DictInfo],
-    trigger_tx: &mpsc::Sender<Trigger>,
-) {
-    let resolved = cfg.present_config(dicts);
-    if resolved == live.present_cfg {
-        return;
-    }
-    println!(
-        "chibipop: {} searches {} of {} dictionary/ies",
-        cfg.ocr.language,
-        resolved.terms.len(),
-        dicts.len(),
-    );
-    live.present_cfg = resolved;
-    let _ = trigger_tx.send(Trigger {
-        kind: TriggerKind::Reload(Box::new(worker_settings(live, dicts))),
-        id: RequestId(0),
-    });
-}
 
 fn sync_popup_capture_guard(x: &Exec<'_>) {
     let needed = capture_guard_needed(
@@ -4066,113 +4345,80 @@ fn capture_guard_needed(
         || button.is_some_and(CaptureExclusion::needs_capture_guard)
 }
 
-/// Applies live settings to all active Windows surfaces.
-#[allow(clippy::too_many_arguments)]
-fn apply_live(
-    live: &LiveSettings,
-    popup: &Popup,
-    overlay: Option<&Overlay>,
-    button: Option<&AnkiButton>,
-    sr_overlay: Option<&StaticRegionOverlay>,
-    theme: &mut Theme,
-    capture_guard_active: &AtomicBool,
-) {
-    capture_guard_active.store(true, Ordering::SeqCst);
-    popup.set_capture_exclusion(live.exclude_from_capture);
-    if let Some(o) = overlay {
-        o.set_capture_exclusion(live.exclude_from_capture);
-    }
-    if let Some(b) = button {
-        b.set_capture_exclusion(live.exclude_from_capture);
-        if !live.anki_enabled {
-            b.hide();
+
+fn reconcile_search_windows(windows: &mut Vec<crate::ui::search_window::SearchWindow>) {
+    let mut index = 0;
+    while index < windows.len() {
+        if !windows[index].is_visible() {
+            windows[index].close();
+            windows.remove(index);
+            continue;
+        }
+        let identity = windows[index].identity();
+        if let Some(existing) = windows[..index]
+            .iter()
+            .position(|window| window.identity() == identity)
+        {
+            let query = windows[index].query_text();
+            windows[existing].activate(Some(&query));
+            windows[index].close();
+            windows.remove(index);
+        } else {
+            index += 1;
         }
     }
-    if let Some(sr) = sr_overlay {
-        sr.set_capture_exclusion(live.exclude_from_capture);
-        match live.static_overlay_region() {
-            Some(region) => {
-                if let Err(e) = sr.show(region) {
-                    eprintln!("chibipop: static overlay: {e:#}");
-                }
+}
+
+fn poll_search_windows(windows: &mut Vec<crate::ui::search_window::SearchWindow>) {
+    for index in 0..windows.len() {
+        let previous_mode = windows[index].identity().0;
+        windows[index].poll();
+        let identity = windows[index].identity();
+        if identity.0 != previous_mode {
+            if let Some(existing) = windows.iter().enumerate().position(|(other, window)| {
+                other != index && window.is_visible() && window.identity() == identity
+            }) {
+                let query = windows[index].query_text();
+                windows[index].close();
+                windows[existing].activate(Some(&query));
             }
-            None => sr.hide(),
         }
     }
-    capture_guard_active.store(
-        capture_guard_needed(
-            popup.capture_exclusion(),
-            overlay.map(Overlay::capture_exclusion),
-            button.map(AnkiButton::capture_exclusion),
-        ),
-        Ordering::SeqCst,
-    );
-    *theme = theme_from_config(&live.popup);
-    let alpha = (theme.opacity * 255.0).round().clamp(0.0, 255.0) as u8;
-    popup.set_alpha(alpha);
-    if live.show_lookup_log {
-        crate::ui::console::show();
-    } else {
-        crate::ui::console::hide();
-    }
-    Hooks::set_mode(live.trigger_mode);
-    Hooks::set_trigger_key(crate::config::parse_trigger_key(&live.trigger_key).unwrap_or(0));
-    Hooks::set_add_hotkey(anki_add_hotkey(live));
-    sync_static_region_hotkey(live);
-    match live
-        .actions_ocr_clipboard_hotkey
-        .as_deref()
-        .and_then(crate::config::parse_trigger_key)
-    {
-        Some(vk) => Hooks::set_action_hotkey(2, vk, 0),
-        None => Hooks::set_action_hotkey(2, 0, 0),
-    }
-    sync_search_hotkey(3, live.actions_search_hotkey.as_deref());
-    sync_search_hotkey(4, live.actions_sentence_search_hotkey.as_deref());
-    sync_search_hotkey(crate::input::hooks::SELECTED_TEXT_SLOT, live.actions_selected_text_hotkey.as_deref());
+    reconcile_search_windows(windows);
 }
 
-/// Registers the action when a valid key exists.
-fn sync_ocr_clipboard_action(registry: &mut crate::action::ActionRegistry, hotkey: Option<&str>) {
-    if hotkey.and_then(crate::config::parse_trigger_key).is_some() {
-        registry.register_at(
-            2,
-            Box::new(crate::action::ocr_clipboard::OcrClipboardAction),
-        );
-    }
+fn search_windows_handle_message(
+    windows: &mut Vec<crate::ui::search_window::SearchWindow>,
+    message: &MSG,
+) -> bool {
+    let handled = windows.iter_mut().any(|window| window.handle_message(message));
+    reconcile_search_windows(windows);
+    handled
 }
 
-fn sync_search_hotkey(slot: usize, hotkey: Option<&str>) {
-    let (vk, modifiers) = hotkey.and_then(crate::config::parse_hotkey).unwrap_or((0, 0));
-    Hooks::set_action_hotkey(slot, vk, modifiers);
-    let _ = Hooks::take_action_hotkey(slot);
-}
-
-fn open_search_window(
-    window: &mut Option<crate::ui::search_window::SearchWindow>,
-    database: &Path,
-    rules: &Path,
-    config: &Config,
-) {
-    open_search_window_mode(window, database, rules, config, chibipop::search::SearchMode::Dictionary, None);
-}
 
 fn open_search_window_mode(
-    window: &mut Option<crate::ui::search_window::SearchWindow>,
+    windows: &mut Vec<crate::ui::search_window::SearchWindow>,
     database: &Path,
     rules: &Path,
-    config: &Config,
+    session: ProfileSession,
+    config_path: &Path,
     mode: chibipop::search::SearchMode,
     text: Option<&str>,
 ) {
-    if let Some(window) = window {
-        window.update_config(config);
-        window.switch_mode(mode, text);
-    } else {
-        match crate::ui::search_window::SearchWindow::open_mode(database, rules, config, mode, text) {
-            Ok(opened) => *window = Some(opened),
-            Err(error) => eprintln!("chibipop: opening search failed: {error:#}"),
+    reconcile_search_windows(windows);
+    let identity = (mode, session.id());
+    if let Some(window) = windows.iter_mut().find(|window| window.identity() == identity) {
+        window.activate(text);
+        return;
+    }
+    match crate::ui::search_window::SearchWindow::open_mode(database, rules, session, mode, text) {
+        Ok(mut opened) => {
+            opened.set_resource_config_path(config_path);
+            windows.push(opened);
+            reconcile_search_windows(windows);
         }
+        Err(error) => eprintln!("chibipop: opening search failed: {error:#}"),
     }
 }
 
@@ -4198,50 +4444,116 @@ fn save_in_background(
     }));
 }
 
-/// Save a newly selected fixed target without changing another screenshot target.
-///
-/// Load the latest file first so a settings window cannot erase fields that
-/// changed after it opened. Save the file before updating the live config.
+/// Saves one runtime target to the latest saved profile.
+fn update_profile_settings(
+    config_path: &Path,
+    profile_id: &str,
+    update: impl FnOnce(&mut crate::config::ProfileSettings) -> bool,
+) -> Result<Option<Config>> {
+    let mut latest = crate::config::load_or_create(config_path)?;
+    if !latest.profiles.iter().any(|profile| profile.id == profile_id) {
+        return Ok(None);
+    }
+    let mut settings = latest.resolve(profile_id)?;
+    if !update(&mut settings) {
+        return Ok(None);
+    }
+    latest.update_profile(profile_id, &settings)?;
+    latest.save(config_path)?;
+    Ok(Some(latest))
+}
+
+fn persist_static_region(
+    config_path: &Path,
+    profile_id: &str,
+    rect: PhysRect,
+    on_error: impl FnOnce(&anyhow::Error),
+) -> Option<Config> {
+    match update_profile_settings(config_path, profile_id, |profile| {
+        profile.anki.static_region = Some([rect.x, rect.y, rect.w, rect.h]);
+        true
+    }) {
+        Ok(updated) => updated,
+        Err(error) => {
+            on_error(&error);
+            None
+        }
+    }
+}
+
+fn shared_resources_changed(
+    before: &Config,
+    after: &Config,
+    before_dicts: &[DictInfo],
+    after_dicts: &[DictInfo],
+) -> bool {
+    before.dictionaries != after.dictionaries
+        || before.plugins.enabled != after.plugins.enabled
+        || before_dicts != after_dicts
+}
+
+/// Saves a selected screenshot target to the profile that authorized the add.
 fn persist_screenshot_target(
-    cfg: &mut Config,
+    session: &ProfileSession,
     target: &crate::action::selection::SelectionTarget,
     config_path: &Path,
-    save_job: &mut Option<thread::JoinHandle<()>>,
-) -> Result<()> {
-    let mode = cfg.actions.screenshot.capture_mode;
+) -> Result<Option<Config>> {
+    let snapshot = &session.config().actions.screenshot;
+    let mode = snapshot.capture_mode;
     match (mode, target) {
         (
             crate::config::ScreenshotMode::FixedRegion,
             crate::action::selection::SelectionTarget::Region(rect),
         ) => {
-            join_save(save_job);
-            let mut latest = crate::config::load_or_create(config_path)?;
-            if latest.actions.screenshot.capture_mode == mode
-                && latest.actions.screenshot.fixed_region.is_none()
-            {
-                latest.actions.screenshot.fixed_region = Some([rect.x, rect.y, rect.w, rect.h]);
-                latest.save(config_path)?;
-                cfg.actions.screenshot.fixed_region = latest.actions.screenshot.fixed_region;
-            }
+            let expected_region = snapshot.fixed_region;
+            update_profile_settings(config_path, session.id(), |settings| {
+                let screenshot = &mut settings.actions.screenshot;
+                if screenshot.capture_mode != mode || screenshot.fixed_region != expected_region {
+                    return false;
+                }
+                screenshot.fixed_region = Some([rect.x, rect.y, rect.w, rect.h]);
+                true
+            })
         }
         (
             crate::config::ScreenshotMode::FixedWindow,
             crate::action::selection::SelectionTarget::Window { target, .. },
         ) => {
-            join_save(save_job);
-            let mut latest = crate::config::load_or_create(config_path)?;
-            if latest.actions.screenshot.capture_mode == mode
-                && latest.actions.screenshot.fixed_window.is_none()
-            {
-                latest.actions.screenshot.fixed_window = Some(target.clone());
-                latest.save(config_path)?;
-                cfg.actions.screenshot.fixed_window = latest.actions.screenshot.fixed_window.clone();
-            }
+            let expected_window = &snapshot.fixed_window;
+            update_profile_settings(config_path, session.id(), |settings| {
+                let screenshot = &mut settings.actions.screenshot;
+                if screenshot.capture_mode != mode
+                    || screenshot.fixed_window.as_ref() != expected_window.as_ref()
+                {
+                    return false;
+                }
+                screenshot.fixed_window = Some(target.clone());
+                true
+            })
         }
-        _ => {}
+        _ => Ok(None),
     }
-    Ok(())
 }
+/// Joins a completed save without blocking the message pump.
+fn join_save_if_finished(job: &mut Option<thread::JoinHandle<()>>) {
+    if job.as_ref().is_some_and(|handle| handle.is_finished()) {
+        join_save(job);
+    }
+}
+
+/// Loads, validates, and saves the selected default profile.
+fn persist_default_profile(config_path: &Path, id: &str) -> Result<Option<Config>> {
+    let mut latest = crate::config::load_or_create(config_path)?;
+    if !latest.profiles.iter().any(|profile| profile.id == id) {
+        return Ok(None);
+    }
+    latest.default_profile = id.to_string();
+    latest.validate()?;
+    latest.validate_hotkeys(crate::config::Platform::Windows)?;
+    latest.save(config_path)?;
+    Ok(Some(latest))
+}
+
 
 /// Joins the previous save before a new save starts.
 fn join_save(job: &mut Option<thread::JoinHandle<()>>) {
@@ -4269,131 +4581,191 @@ mod tests {
     use crate::config::PopupConfig;
 
     #[test]
-    fn selected_text_shortcut_obeys_enablement_and_conflicts_without_changing_config() {
-        let mut cfg = Config::default();
-        cfg.actions.search.selected_hotkey = Some("Ctrl+F7".into());
-        assert_eq!(derive(&cfg).actions_selected_text_hotkey.as_deref(), Some("Ctrl+F7"));
-        cfg.actions.enabled = false;
-        assert!(derive(&cfg).actions_selected_text_hotkey.is_none());
-        assert_eq!(cfg.actions.search.selected_hotkey.as_deref(), Some("Ctrl+F7"));
-        cfg.actions.enabled = true;
-        cfg.actions.search.selected_hotkey = Some(cfg.trigger.trigger_key.clone());
-        let saved = cfg.clone();
-        assert!(derive(&cfg).actions_selected_text_hotkey.is_none());
-        assert_eq!(cfg, saved);
-    }
-
-    #[test]
-    fn search_shortcut_tracks_live_enablement_without_rewriting_saved_keys() {
-        let mut cfg = Config::default();
-        cfg.actions.enabled = true;
-        cfg.actions.search.hotkey = Some("Ctrl+Shift+F".into());
-        assert_eq!(derive(&cfg).actions_search_hotkey.as_deref(), Some("Ctrl+Shift+F"));
-        cfg.actions.enabled = false;
-        assert!(derive(&cfg).actions_search_hotkey.is_none());
-        assert_eq!(cfg.actions.search.hotkey.as_deref(), Some("Ctrl+Shift+F"));
-    }
-
-    #[test]
-    fn loaded_search_shortcut_conflicts_disable_search_in_memory() {
-        let mut cfg = Config::default();
-        cfg.actions.enabled = true;
-        cfg.actions.search.hotkey = Some(cfg.trigger.trigger_key.clone());
-        let saved = cfg.clone();
-        assert!(derive(&cfg).actions_search_hotkey.is_none());
-        assert_eq!(cfg, saved);
-    }
-
-    #[test]
-    fn conflicting_loaded_shortcuts_disable_only_the_lower_priority_action() {
-        let mut cfg = Config::default();
-        cfg.trigger.trigger_key = "f2".into();
-        cfg.actions.search.hotkey = Some("F2".into());
-        let live = derive(&cfg);
-        assert_eq!(live.trigger_key, "f2");
-        assert!(live.actions_search_hotkey.is_none());
-        assert_eq!(cfg.actions.search.hotkey.as_deref(), Some("F2"));
-    }
-
-    #[test]
-    fn disabled_actions_have_no_live_bindings() {
-        let mut cfg = Config::default();
-        cfg.actions.enabled = false;
-        cfg.anki.static_region_key = "f3".into();
-        cfg.actions.ocr_clipboard = Some(crate::config::OcrClipboardConfig { open_sentence_search: false,
-            hotkey: Some("f4".into()), hotkey_linux: None,
+    fn worker_serve_preserves_idle_backend_and_applies_explicit_reload() -> Result<()> {
+        let mut config = Config::default();
+        let mut alternate = config.resolve(&config.default_profile)?;
+        alternate.ocr.engine = "meikiocr".into();
+        config.plugins.enabled.clear();
+        config.profiles.push(crate::config::Profile {
+            id: "alternate-ocr".into(),
+            name: "Alternate OCR".into(),
+            data: crate::config::ProfileData::Full { settings: Box::new(alternate) },
         });
-        let live = derive(&cfg);
-        assert!(live.static_region_key.is_empty());
-        assert!(live.actions_ocr_clipboard_hotkey.is_none());
-    }
-
-    #[test]
-    fn static_region_runtime_key_requires_static_sentence_mode() {
-        let mut cfg = Config::default();
-        cfg.anki.static_region_key = "f3".into();
-        let saved = cfg.clone();
-
-        let live = derive(&cfg);
-        assert!(live.static_region_key.is_empty());
-        assert_eq!(0, static_region_hotkey(&live));
-        assert_eq!(saved, cfg);
-
-        cfg.anki.sentence_mode = crate::config::SentenceMode::Static;
-        let live = derive(&cfg);
-        assert_eq!("f3", live.static_region_key);
-        assert_eq!(0x72, static_region_hotkey(&live));
-        assert_eq!(saved.anki.static_region_key, cfg.anki.static_region_key);
-    }
-
-    #[test]
-    fn an_ocr_reload_carries_saved_enablement_to_the_worker() {
-        let mut current = Config::default();
-        current.ocr.engine = "meikiocr".into();
-        current.plugins.enabled = vec!["meikiocr".into()];
-        let mut updated = current.clone();
-        updated.plugins.enabled.clear();
-        let (tx, rx) = mpsc::channel();
-        queue_ocr_reload(&current, &updated, &tx);
-        let request = rx.try_recv().expect("engine change should queue");
-        assert_eq!(request.engine, "meikiocr");
-        assert!(request.enabled_plugins.is_empty());
-    }
-
-    #[test]
-    fn an_unchanged_ocr_selection_does_not_queue_a_reload() {
-        let current = Config::default();
-        let (tx, rx) = mpsc::channel();
-        queue_ocr_reload(&current, &current, &tx);
-        assert!(rx.try_recv().is_err());
-    }
-
-    #[test]
-    fn static_region_registration_drains_pending_edges_for_each_mode() {
-        let mut cfg = Config::default();
-        cfg.anki.static_region_key = "f3".into();
-        for mode in [
-            crate::config::SentenceMode::Sentence,
-            crate::config::SentenceMode::Line,
-            crate::config::SentenceMode::All,
-            crate::config::SentenceMode::Static,
-        ] {
-            Hooks::set_action_hotkey(1, 0x72, 0);
-            let _ = Hooks::take_action_hotkey(1);
-            assert!(Hooks::record_action_hotkey_for_test(0x72, 0));
-            cfg.anki.sentence_mode = mode;
-            let live = derive(&cfg);
-            sync_static_region_hotkey(&live);
-            assert!(!Hooks::take_action_hotkey(1), "stale edge for {mode:?}");
+        let catalog = ProfileCatalog::new(&config, &[])?;
+        let default = catalog.session(None)?;
+        let alternate = catalog.session(Some("alternate-ocr"))?;
+        let pending_reload = Arc::new(Mutex::new(Some(default.clone())));
+        let (request_tx, requests) = mpsc::channel();
+        let mut serve = worker_serve(
+            WorkerUi {
+                requests,
+                monitor: OcrMonitor::default(),
+                pending_reload: pending_reload.clone(),
+            },
+            OcrSelection::from_session(&default),
+        );
+        let source = chibipop::text::TextSource::new(
+            Box::new(WinCapture::new(None)?),
+            Box::new(UnavailableOcr { name: "builtin".into(), reason: "initial backend".into() }),
+            worker_settings(&derive_session(&default), &[]).snapshot(),
+        );
+        serve(&source, None);
+        serve(&source, Some(&alternate));
+        source.replace_ocr(Box::new(UnavailableOcr {
+            name: "meikiocr".into(),
+            reason: "retained alternate backend".into(),
+        }));
+        for session in [None, Some(&alternate), None, Some(&alternate), None] {
+            serve(&source, session);
+            assert_eq!(
+                "OCR engine unavailable: retained alternate backend",
+                source.recognise(&[255; 4], 1, 1).unwrap_err().to_string(),
+            );
         }
+
+        let (result_tx, result_rx) = mpsc::channel();
+        request_tx.send(crate::action::OcrRequest {
+            bgra_buf: vec![255; 4],
+            width: 1,
+            height: 1,
+            session: alternate.clone(),
+            result_tx,
+        })?;
+        serve(&source, None);
+        assert_eq!(
+            "OCR engine unavailable: retained alternate backend",
+            result_rx.try_recv()?.unwrap_err(),
+        );
+
+        *pending_reload.lock().map_err(|_| anyhow!("the OCR reload lock is poisoned"))? = Some(default.clone());
+        serve(&source, None);
+        assert_ne!(
+            Some("OCR engine unavailable: retained alternate backend".to_string()),
+            source.recognise(&[255; 4], 1, 1).err().map(|error| error.to_string()),
+        );
+        *pending_reload.lock().map_err(|_| anyhow!("the OCR reload lock is poisoned"))? = Some(default);
+        let (result_tx, result_rx) = mpsc::channel();
+        request_tx.send(crate::action::OcrRequest {
+            bgra_buf: vec![255; 4],
+            width: 1,
+            height: 1,
+            session: alternate.clone(),
+            result_tx,
+        })?;
+        serve(&source, None);
+        let _ = result_rx.try_recv()?;
+        source.replace_ocr(Box::new(UnavailableOcr {
+            name: "meikiocr".into(),
+            reason: "backend after Apply".into(),
+        }));
+        serve(&source, Some(&alternate));
+        serve(&source, None);
+        assert_eq!(
+            "OCR engine unavailable: backend after Apply",
+            source.recognise(&[255; 4], 1, 1).unwrap_err().to_string(),
+        );
+        Ok(())
     }
+
+    #[test]
+    fn closed_search_identity_reopens_with_the_new_profile_session() {
+        let _guard = crate::input::hooks::search_keyboard_test_guard();
+        let mut saved = Config::default();
+        let profile_id = saved.default_profile.clone();
+        let mut original_settings = saved.resolve(&profile_id).unwrap();
+        let original_sub_popups = original_settings.popup.sub_popups;
+        original_settings.popup.sub_popups = !original_sub_popups;
+        saved.update_profile(&profile_id, &original_settings).unwrap();
+        let original_session = ProfileCatalog::new(&saved, &[])
+            .unwrap()
+            .session(None)
+            .unwrap();
+
+        let mut updated = saved.clone();
+        let mut updated_settings = updated.resolve(&profile_id).unwrap();
+        updated_settings.popup.sub_popups = original_sub_popups;
+        updated.update_profile(&profile_id, &updated_settings).unwrap();
+        let updated_session = ProfileCatalog::new(&updated, &[])
+            .unwrap()
+            .session(None)
+            .unwrap();
+
+        let database = Path::new("missing-search-session.sqlite");
+        let rules = Path::new("missing-search-session-rules.json");
+        let config_path = Path::new("missing-search-session-config.toml");
+        let mode = chibipop::search::SearchMode::Dictionary;
+        let mut windows = Vec::new();
+        open_search_window_mode(
+            &mut windows,
+            database,
+            rules,
+            original_session.clone(),
+            config_path,
+            mode,
+            None,
+        );
+        open_search_window_mode(
+            &mut windows,
+            database,
+            rules,
+            updated_session.clone(),
+            config_path,
+            mode,
+            None,
+        );
+        assert_eq!(1, windows.len());
+        assert_eq!(
+            !original_sub_popups,
+            windows[0].session().config().popup.sub_popups,
+            "an open Search window keeps its original settings"
+        );
+
+        windows[0].close();
+        open_search_window_mode(
+            &mut windows,
+            database,
+            rules,
+            updated_session,
+            config_path,
+            mode,
+            None,
+        );
+        assert_eq!(1, windows.len());
+        assert_eq!(
+            original_sub_popups,
+            windows[0].session().config().popup.sub_popups,
+            "a closed Search identity uses the new catalog"
+        );
+
+        open_search_window_mode(
+            &mut windows,
+            database,
+            rules,
+            original_session,
+            config_path,
+            chibipop::search::SearchMode::Sentence,
+            None,
+        );
+        windows[0].activate(Some("猫"));
+        windows[0].request_mode_switch();
+        poll_search_windows(&mut windows);
+        assert_eq!(1, windows.len());
+        assert_eq!("猫", windows[0].query_text());
+        assert_eq!(
+            !original_sub_popups,
+            windows[0].session().config().popup.sub_popups,
+            "a mode switch keeps the already-open target session"
+        );
+    }
+
 
     #[test]
     #[ignore = "Captures a visible fixture and paints a real dictionary popup"]
     fn live_fixture_reaches_popup_paint() -> Result<()> {
         let install = PathBuf::from(std::env::var("CHIBIPOP_BENCH_INSTALL")?);
         let cfg: Config = toml::from_str(&std::fs::read_to_string(install.join("chibipop.toml"))?)?;
-        let mut live = derive(&cfg);
+        let resolved = cfg.resolved(None)?;
+        let mut live = derive(&resolved);
         live.show_lookup_log = false;
         let at: Vec<i32> = std::env::var("CHIBIPOP_BENCH_POINT")?.split(',')
             .map(str::parse).collect::<std::result::Result<_, _>>()?;
@@ -4417,7 +4789,10 @@ mod tests {
                 reopen_dict: None, serve: None,
             })
         }, || {})?;
-        live.present_cfg = cfg.present_config(&dicts);
+        let catalog = ProfileCatalog::new(&cfg, &dicts)?;
+        let session = catalog.session(None)?;
+        live = derive_session(&session);
+        live.show_lookup_log = false;
         worker.trigger().send(Trigger {
             kind: TriggerKind::Reload(Box::new(worker_settings(&live, &dicts))), id: RequestId(0),
         })?;
@@ -4428,7 +4803,7 @@ mod tests {
             popup.hide()?;
             let started = std::time::Instant::now();
             worker.trigger().send(Trigger {
-                kind: TriggerKind::Hover(Hover { at: PhysPoint { x: at[0], y: at[1] }, mask: CaptureMask::NONE }),
+                kind: TriggerKind::Hover(Hover { at: PhysPoint { x: at[0], y: at[1] }, mask: CaptureMask::NONE, session: session.clone() }),
                 id: RequestId(sample + 1),
             })?;
             let result = worker.results().recv_timeout(std::time::Duration::from_secs(10))?;
@@ -4517,7 +4892,7 @@ mod tests {
         PopupConfig {
             theme: theme.to_string(),
             font: font.to_string(),
-            ..Config::default().popup
+            ..ResolvedConfig::default().popup
         }
     }
 
@@ -4540,166 +4915,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn derive_carries_every_popup_field() {
-        let mut cfg = Config::default();
-        cfg.popup.max_width_percent = 33;
-        cfg.popup.max_height_percent = 44;
-        cfg.popup.summary_chars = 55;
-        cfg.popup.side_panel = true;
-        cfg.anki.enabled = true;
-        cfg.anki.deck = "テスト".to_string();
-        let live = derive(&cfg);
-        assert_eq!(33, live.max_width_percent);
-        assert_eq!(44, live.max_height_percent);
-        assert_eq!(55, live.summary_chars);
-        assert!(live.side_panel);
-        assert!(live.anki_enabled);
-        assert_eq!("テスト", live.anki_deck);
-    }
-
-    #[test]
-    fn derive_carries_the_capture_settings() {
-        let mut cfg = Config::default();
-        cfg.ocr.capture_width = 320;
-        cfg.ocr.capture_height = 240;
-        cfg.ocr.scan_alphanumeric = false;
-        let live = derive(&cfg);
-        assert_eq!(CaptureSize { w: 320, h: 240 }, live.capture);
-        assert!(!live.scan_alphanumeric);
-    }
-
-    /// Covers the main capture settings.
-    #[test]
-    fn worker_settings_carries_the_capture_settings() {
-        let mut cfg = Config::default();
-        cfg.ocr.capture_width = 640;
-        cfg.ocr.capture_height = 480;
-        cfg.ocr.scan_alphanumeric = false;
-        cfg.ocr.max_ocr_passes = 3;
-        cfg.debug.show_lookup_log = true;
-        let out = worker_settings(&derive(&cfg), &[]);
-        assert_eq!(CaptureSize { w: 640, h: 480 }, out.capture);
-        assert!(!out.scan_alphanumeric);
-        assert_eq!(3, out.max_passes);
-        assert!(out.show_lookup_log);
-    }
-
-    #[test]
-    fn worker_settings_carries_the_language() {
-        let mut cfg = Config::default();
-        cfg.ocr.language = "zh-Hant".to_string();
-        let live = derive(&cfg);
-        assert_eq!("zh-Hant", live.language);
-        assert_eq!("zh-Hant", worker_settings(&live, &[]).language);
-    }
-
-    /// The search includes an installed Dictionary when no configured list names it.
-    /// The first Worker read supplies its name.
-    /// `Worker::spawn` cannot resolve the enabled list before that read, so the code
-    /// resolves the list again.
-    /// Without this step, a new session searches only configured Dictionaries until
-    /// a reload.
-    /// A unit test cannot drive the pump, so this test checks the decision-and-push
-    /// function directly.
-    #[test]
-    fn a_fresh_worker_is_told_the_split_once_the_names_are_known() {
-        let mut cfg = Config::default();
-        cfg.dictionaries.terms = vec!["大辞林　第四版".to_string()];
-        cfg.dictionaries.terms_disabled = vec!["Jitendex.org [2026-07-09]".to_string()];
-        let mut live = derive(&cfg);
-        assert_eq!(
-            vec!["大辞林　第四版".to_string()],
-            live.present_cfg.terms,
-            "an empty library resolves to the listed names alone"
-        );
-        let dicts = vec![
-            DictInfo { dict_id: 1, name: "大辞林　第四版".to_string() },
-            DictInfo { dict_id: 2, name: "Jitendex.org [2026-07-09]".to_string() },
-            DictInfo { dict_id: 3, name: "新明解国語辞典".to_string() },
-        ];
-        let (tx, rx) = mpsc::channel::<Trigger>();
-
-        rescope_lookups(&mut live, &cfg, &dicts, &tx);
-
-        assert_eq!(
-            vec!["大辞林　第四版".to_string(), "新明解国語辞典".to_string()],
-            live.present_cfg.terms,
-            "the enabled name, then the installed dictionary neither list mentions"
-        );
-        let sent = rx
-            .try_recv()
-            .expect("the reload must have reached the worker");
-        match sent.kind {
-            TriggerKind::Reload(settings) => {
-                assert_eq!(live.present_cfg, settings.present_cfg);
-                assert_eq!(3, settings.dicts.len(), "the reload carries the identities");
-            }
-            _ => panic!("a rescope is a reload"),
-        }
-    }
-
-    /// Do nothing when no list changes. A config that names the installed
-    /// Dictionary in every list resolves to itself, so no reload or log line occurs.
-    #[test]
-    fn a_worker_whose_scope_did_not_change_is_left_alone() {
-        let mut cfg = Config::default();
-        cfg.dictionaries.terms = vec!["Jitendex.org".to_string()];
-        cfg.dictionaries.pitch = vec!["Jitendex.org".to_string()];
-        let mut live = derive(&cfg);
-        let before = live.present_cfg.clone();
-        let dicts = vec![DictInfo {
-            dict_id: 1,
-            name: "Jitendex.org".to_string(),
-        }];
-        let (tx, rx) = mpsc::channel::<Trigger>();
-
-        rescope_lookups(&mut live, &cfg, &dicts, &tx);
-
-        assert_eq!(before, live.present_cfg);
-        assert!(rx.try_recv().is_err(), "an unchanged scope must not reload");
-    }
-
-    /// Step 3b: carries the three input settings.
-    #[test]
-    fn derive_carries_the_three_input_settings() {
-        let mut cfg = Config::default();
-        cfg.trigger.mode = crate::config::TriggerMode::HoldKey;
-        cfg.trigger.trigger_key = "f8".to_string();
-        cfg.anki.add_key = "f9".to_string();
-        let live = derive(&cfg);
-        assert_eq!(crate::config::TriggerMode::HoldKey, live.trigger_mode);
-        assert_eq!("f8", live.trigger_key);
-        assert_eq!("f9", live.anki_add_key);
-    }
-
-    #[test]
-    fn anki_add_hotkey_registration_requires_anki() {
-        let mut cfg = Config::default();
-        cfg.anki.add_key = "f9".into();
-        assert_eq!(0, anki_add_hotkey(&derive(&cfg)));
-
-        cfg.anki.enabled = true;
-        assert_eq!(0x78, anki_add_hotkey(&derive(&cfg)));
-
-        cfg.anki.add_key = "not-a-key".into();
-        assert_eq!(0, anki_add_hotkey(&derive(&cfg)));
-        assert_eq!("not-a-key", cfg.anki.add_key);
-    }
-
-    #[test]
-    fn derive_carries_the_ocr_clipboard_key() {
-        let mut cfg = Config::default();
-        cfg.actions.ocr_clipboard = Some(crate::config::OcrClipboardConfig { open_sentence_search: false,
-            hotkey: Some("f9".to_string()),
-            hotkey_linux: None,
-        });
-
-        assert_eq!(
-            Some("f9".to_string()),
-            derive(&cfg).actions_ocr_clipboard_hotkey
-        );
-    }
 
     #[test]
     fn three_excluded_windows_leave_the_guard_disarmed() {
@@ -4757,13 +4972,224 @@ mod tests {
 
     #[test]
     fn derive_carries_per_character_lookup() {
-        let mut cfg = Config::default();
-        cfg.trigger.per_character_lookup = true;
-        assert!(derive(&cfg).per_character_lookup);
+        let mut resolved = Config::default().resolved(None).unwrap();
+        resolved.trigger.per_character_lookup = true;
+        assert!(derive(&resolved).per_character_lookup);
         assert!(
-            !derive(&Config::default()).per_character_lookup,
+            !derive(&Config::default().resolved(None).unwrap()).per_character_lookup,
             "must default off"
         );
+    }
+
+    #[test]
+    fn screenshot_target_updates_only_origin_profile_and_never_recreates_it() -> Result<()> {
+        let (dir, _guard) = edit_scratch("screenshot_target_profile");
+        let config_path = dir.join("config.toml");
+        let mut config = Config::default();
+        let default_id = config.default_profile.clone();
+        let mut default_settings = config.resolve(&default_id)?;
+        default_settings.actions.screenshot.capture_mode =
+            crate::config::ScreenshotMode::FixedRegion;
+        default_settings.actions.screenshot.fixed_region = Some([1, 2, 3, 4]);
+        config.update_profile(&default_id, &default_settings)?;
+
+        let selected_id = "capture-profile".to_string();
+        let mut selected_settings = default_settings.clone();
+        selected_settings.actions.screenshot.fixed_region = Some([5, 6, 7, 8]);
+        config.profiles.push(crate::config::Profile {
+            id: selected_id.clone(),
+            name: "Capture profile".to_string(),
+            data: crate::config::ProfileData::Full {
+                settings: Box::new(selected_settings),
+            },
+        });
+        config.save(&config_path)?;
+        let session = ProfileCatalog::new(&config, &[])?.session(Some(&selected_id))?;
+        let target = crate::action::selection::SelectionTarget::Region(PhysRect {
+            x: 10,
+            y: 20,
+            w: 30,
+            h: 40,
+        });
+
+        let updated = persist_screenshot_target(&session, &target, &config_path)?
+            .expect("the selected profile still exists");
+        assert_eq!(
+            Some([1, 2, 3, 4]),
+            updated.resolve(&default_id)?.actions.screenshot.fixed_region
+        );
+        assert_eq!(
+            Some([10, 20, 30, 40]),
+            updated.resolve(&selected_id)?.actions.screenshot.fixed_region
+        );
+
+        let mut deleted = updated;
+        deleted.profiles.retain(|profile| profile.id != selected_id);
+        deleted.save(&config_path)?;
+        assert!(persist_screenshot_target(&session, &target, &config_path)?.is_none());
+        let latest = crate::config::load_or_create(&config_path)?;
+        assert!(
+            latest.profiles.iter().all(|profile| profile.id != selected_id),
+            "a deleted profile must not be recreated"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn retained_region_session_does_not_restore_a_replaced_or_reset_target() -> Result<()> {
+        let (dir, _guard) = edit_scratch("stale_region_target");
+        let config_path = dir.join("config.toml");
+        let mut config = Config::default();
+        let profile_id = config.default_profile.clone();
+        let mut profile = config.resolve(&profile_id)?;
+        profile.actions.screenshot.capture_mode = crate::config::ScreenshotMode::FixedRegion;
+        profile.actions.screenshot.fixed_region = Some([1, 2, 3, 4]);
+        config.update_profile(&profile_id, &profile)?;
+        config.save(&config_path)?;
+        let session = ProfileCatalog::new(&config, &[])?.session(Some(&profile_id))?;
+        let retained_target = crate::action::selection::SelectionTarget::Region(PhysRect {
+            x: 1, y: 2, w: 3, h: 4,
+        });
+
+        update_profile_settings(&config_path, &profile_id, |settings| {
+            settings.actions.screenshot.fixed_region = Some([9, 8, 7, 6]);
+            true
+        })?;
+        assert!(persist_screenshot_target(&session, &retained_target, &config_path)?.is_none());
+        assert_eq!(
+            Some([9, 8, 7, 6]),
+            crate::config::load_or_create(&config_path)?
+                .resolve(&profile_id)?
+                .actions.screenshot.fixed_region
+        );
+
+        update_profile_settings(&config_path, &profile_id, |settings| {
+            settings.actions.screenshot.fixed_region = None;
+            true
+        })?;
+        assert!(persist_screenshot_target(&session, &retained_target, &config_path)?.is_none());
+        assert_eq!(
+            None,
+            crate::config::load_or_create(&config_path)?
+                .resolve(&profile_id)?
+                .actions.screenshot.fixed_region
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn retained_window_session_does_not_restore_a_replaced_or_reset_target() -> Result<()> {
+        let (dir, _guard) = edit_scratch("stale_window_target");
+        let config_path = dir.join("config.toml");
+        let mut config = Config::default();
+        let profile_id = config.default_profile.clone();
+        let mut profile = config.resolve(&profile_id)?;
+        profile.actions.screenshot.capture_mode = crate::config::ScreenshotMode::FixedWindow;
+        let retained = crate::config::ScreenshotWindow {
+            app_id: "app-a".into(),
+            title: "Window A".into(),
+        };
+        profile.actions.screenshot.fixed_window = Some(retained.clone());
+        config.update_profile(&profile_id, &profile)?;
+        config.save(&config_path)?;
+        let session = ProfileCatalog::new(&config, &[])?.session(Some(&profile_id))?;
+        let retained_target = crate::action::selection::SelectionTarget::Window {
+            rect: PhysRect { x: 1, y: 2, w: 3, h: 4 },
+            target: retained,
+        };
+        let replacement = crate::config::ScreenshotWindow {
+            app_id: "app-b".into(),
+            title: "Window B".into(),
+        };
+
+        update_profile_settings(&config_path, &profile_id, |settings| {
+            settings.actions.screenshot.fixed_window = Some(replacement.clone());
+            true
+        })?;
+        assert!(persist_screenshot_target(&session, &retained_target, &config_path)?.is_none());
+        assert_eq!(
+            Some(replacement),
+            crate::config::load_or_create(&config_path)?
+                .resolve(&profile_id)?
+                .actions.screenshot.fixed_window
+        );
+
+        update_profile_settings(&config_path, &profile_id, |settings| {
+            settings.actions.screenshot.fixed_window = None;
+            true
+        })?;
+        assert!(persist_screenshot_target(&session, &retained_target, &config_path)?.is_none());
+        assert_eq!(
+            None,
+            crate::config::load_or_create(&config_path)?
+                .resolve(&profile_id)?
+                .actions.screenshot.fixed_window
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn newly_picked_fixed_window_persists_when_its_snapshot_is_unchanged() -> Result<()> {
+        let (dir, _guard) = edit_scratch("new_window_target");
+        let config_path = dir.join("config.toml");
+        let mut config = Config::default();
+        let profile_id = config.default_profile.clone();
+        let mut profile = config.resolve(&profile_id)?;
+        profile.actions.screenshot.capture_mode = crate::config::ScreenshotMode::FixedWindow;
+        profile.actions.screenshot.fixed_window = None;
+        config.update_profile(&profile_id, &profile)?;
+        config.save(&config_path)?;
+        let session = ProfileCatalog::new(&config, &[])?.session(Some(&profile_id))?;
+        let selected = crate::config::ScreenshotWindow {
+            app_id: "app-new".into(),
+            title: "New window".into(),
+        };
+        let target = crate::action::selection::SelectionTarget::Window {
+            rect: PhysRect { x: 10, y: 20, w: 30, h: 40 },
+            target: selected.clone(),
+        };
+
+        let updated = persist_screenshot_target(&session, &target, &config_path)?
+            .expect("the unchanged profile snapshot must accept the selected target");
+        assert_eq!(
+            Some(selected),
+            updated.resolve(&profile_id)?.actions.screenshot.fixed_window
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn static_region_save_failure_is_reported_without_escaping_local_handler() -> Result<()> {
+        let (dir, _guard) = edit_scratch("static_region_save_failure");
+        let config_path = dir.join("config.toml");
+        let mut config = Config::default();
+        let profile_id = config.default_profile.clone();
+        let mut profile = config.resolve(&profile_id)?;
+        profile.anki.static_region = Some([1, 2, 3, 4]);
+        config.update_profile(&profile_id, &profile)?;
+        config.save(&config_path)?;
+        std::fs::create_dir(config_path.with_extension("toml.tmp"))?;
+
+        let mut reported = None;
+        let saved = persist_static_region(
+            &config_path,
+            &profile_id,
+            PhysRect { x: 10, y: 20, w: 30, h: 40 },
+            |error| reported = Some(format!("{error:#}")),
+        );
+
+        assert!(saved.is_none());
+        assert!(
+            reported.as_deref().is_some_and(|text| text.contains("Write configuration to")),
+            "{reported:?}"
+        );
+        assert_eq!(
+            Some([1, 2, 3, 4]),
+            crate::config::load_or_create(&config_path)?
+                .resolve(&profile_id)?
+                .anki.static_region
+        );
+        Ok(())
     }
 
     #[test]
@@ -5072,7 +5498,7 @@ mod tests {
 
     #[test]
     fn only_the_matching_successful_save_marks_the_apply_complete() {
-        let mut pending = Some(PendingApplySave { generation: 2, partial_failure: false });
+        let mut pending = Some(PendingApplySave { generation: 2, partial_failure: false, applied: None });
         for generation in [None, Some(1)] {
             assert_eq!(None, saved_apply_state(&mut pending, &SaveResult { sequence: 0, generation, result: Ok(()) }));
             assert!(pending.is_some());
@@ -5086,7 +5512,7 @@ mod tests {
     #[test]
     fn failed_save_or_partial_dictionary_apply_is_never_successful() {
         for partial_failure in [false, true] {
-            let mut pending = Some(PendingApplySave { generation: 9, partial_failure });
+            let mut pending = Some(PendingApplySave { generation: 9, partial_failure, applied: None });
             let result = if partial_failure { Ok(()) } else { Err(anyhow!("disk full")) };
             assert_eq!(Some(ApplyState::Failed), saved_apply_state(&mut pending,
                 &SaveResult { sequence: 0, generation: Some(9), result }));
@@ -5094,14 +5520,55 @@ mod tests {
     }
 
     #[test]
+    fn pending_save_poll_does_not_wait_for_disk_write() {
+        let (release_tx, release_rx) = mpsc::channel();
+        let mut save = Some(thread::spawn(move || {
+            release_rx.recv().unwrap();
+        }));
+
+        join_save_if_finished(&mut save);
+
+        assert!(save.is_some());
+        release_tx.send(()).unwrap();
+        join_save(&mut save);
+        assert!(save.is_none());
+    }
+
+    #[test]
+    fn failed_default_profile_save_keeps_the_saved_default() {
+        let (dir, _scratch) = edit_scratch("default_profile_save_failure");
+        let path = dir.join("config.toml");
+        let mut original = Config::default();
+        let parent = original.profiles[0].id.clone();
+        let target_id = original.next_profile_id();
+        original.profiles.push(crate::config::Profile {
+            id: target_id.clone(),
+            name: "Other".to_string(),
+            data: crate::config::ProfileData::Derived {
+                parent,
+                overrides: std::collections::BTreeMap::new(),
+            },
+        });
+        original.save(&path).unwrap();
+        let saved_default = original.default_profile.clone();
+        std::fs::create_dir(path.with_extension("toml.tmp")).unwrap();
+
+        assert!(persist_default_profile(&path, &target_id).is_err());
+        assert_eq!(
+            saved_default,
+            crate::config::load_or_create(&path).unwrap().default_profile
+        );
+    }
+
+    #[test]
     fn stale_save_failure_cannot_replace_the_latest_success_message() {
-        let form = settings::from_config(&Config::default(), &[]);
-        let window = SettingsWindow::open(&form, &[], ApplyMode::Live).unwrap();
+        let mut form = settings::from_config(&Config::default(), &[]);
+        let mut window = SettingsWindow::open(&form, &[], ApplyMode::Live).unwrap();
         window.set_status("Latest settings saved.");
-        let mut pending = Some(PendingApplySave { generation: 2, partial_failure: false });
-        finish_save(Some(&window), &mut pending,
+        let mut pending = Some(PendingApplySave { generation: 2, partial_failure: false, applied: None });
+        finish_save(Some(&mut window), &mut form, &[], &mut pending,
             SaveResult { sequence: 2, generation: Some(2), result: Ok(()) }, Path::new("unused.toml"), 2);
-        finish_save(Some(&window), &mut pending,
+        finish_save(Some(&mut window), &mut form, &[], &mut pending,
             SaveResult { sequence: 1, generation: Some(1), result: Err(anyhow!("old failure")) }, Path::new("unused.toml"), 2);
         let audit = crate::ui::audit::dump(window.hwnd());
         let controls = audit["controls"].as_array().unwrap();
@@ -5167,52 +5634,37 @@ mod tests {
 
     #[test]
     fn only_current_background_save_results_change_the_detail_without_approving_edits() {
-        let form = settings::from_config(&Config::default(), &[]);
-        let window = SettingsWindow::open(&form, &[], ApplyMode::Live).unwrap();
+        let mut form = settings::from_config(&Config::default(), &[]);
+        let mut window = SettingsWindow::open(&form, &[], ApplyMode::Live).unwrap();
         window.set_apply_state(ApplyState::Pending);
         window.set_status("Current detail");
         let mut pending = None;
-        finish_save(Some(&window), &mut pending,
+        finish_save(Some(&mut window), &mut form, &[], &mut pending,
             SaveResult { sequence: 1, generation: None, result: Err(anyhow!("old")) }, Path::new("unused.toml"), 2);
         let audit = crate::ui::audit::dump(window.hwnd());
         let detail = audit["controls"].as_array().unwrap().iter().find(|control| control["id"] == 122).unwrap();
         assert_eq!("Current detail", detail["text"]);
-        finish_save(Some(&window), &mut pending,
+        finish_save(Some(&mut window), &mut form, &[], &mut pending,
             SaveResult { sequence: 2, generation: None, result: Err(anyhow!("current")) }, Path::new("unused.toml"), 2);
         let audit = crate::ui::audit::dump(window.hwnd());
         let detail = audit["controls"].as_array().unwrap().iter().find(|control| control["id"] == 122).unwrap();
         assert!(detail["text"].as_str().unwrap().contains("Could not save the sentence area"));
-        finish_save(Some(&window), &mut pending,
+        finish_save(Some(&mut window), &mut form, &[], &mut pending,
             SaveResult { sequence: 3, generation: None, result: Ok(()) }, Path::new("unused.toml"), 3);
         let audit = crate::ui::audit::dump(window.hwnd());
         let state = audit["controls"].as_array().unwrap().iter().find(|control| control["id"] == 193).unwrap();
         assert_eq!("Apply: Pending", state["text"]);
     }
 
-    #[test]
-    fn dictionary_apply_preserves_later_captures_without_erasing_form_changes() {
-        let mut live = Config::default();
-        live.anki.static_region = Some([10, 20, 30, 40]);
-        live.actions.screenshot.fixed_region = Some([50, 60, 70, 80]);
-        let mut edited = Config::default();
-        edited.anki.deck = "New deck".into();
-        preserve_live_capture_targets(&mut edited, &live, false);
-        assert_eq!(live.anki.static_region, edited.anki.static_region);
-        assert_eq!(live.actions.screenshot.fixed_region, edited.actions.screenshot.fixed_region);
-        assert_eq!("New deck", edited.anki.deck);
-        edited.actions.screenshot.fixed_region = None;
-        preserve_live_capture_targets(&mut edited, &live, true);
-        assert_eq!(None, edited.actions.screenshot.fixed_region);
-        assert_eq!(live.anki.static_region, edited.anki.static_region);
-    }
 
     #[test]
     fn a_newer_snapshot_completes_an_apply_instead_of_its_superseded_save() {
-        let mut pending = Some(PendingApplySave { generation: 7, partial_failure: false });
-        finish_save(None, &mut pending,
+        let mut form = settings::from_config(&Config::default(), &[]);
+        let mut pending = Some(PendingApplySave { generation: 7, partial_failure: false, applied: None });
+        finish_save(None, &mut form, &[], &mut pending,
             SaveResult { sequence: 1, generation: Some(7), result: Err(anyhow!("superseded")) }, Path::new("unused.toml"), 2);
         assert!(pending.is_some());
-        finish_save(None, &mut pending,
+        finish_save(None, &mut form, &[], &mut pending,
             SaveResult { sequence: 2, generation: Some(7), result: Ok(()) }, Path::new("unused.toml"), 2);
         assert!(pending.is_none());
     }
@@ -5482,23 +5934,6 @@ mod tests {
         assert!(matches!(&routed[2].outcome, LookupOutcome::Sentence(None)));
     }
 
-    #[test]
-    fn hook_events_route_press_and_accepted_cursor_move() {
-        let press = PhysPoint { x: 10, y: 20 };
-        let moved = PhysPoint { x: 30, y: 40 };
-        let events: Vec<Event> = route_hook_events(Some(press), Some(moved))
-            .into_iter()
-            .flatten()
-            .collect();
-
-        assert_eq!(
-            vec![
-                Event::TriggerPressed { pos: press },
-                Event::CursorMoved { pos: moved },
-            ],
-            events
-        );
-    }
 
     #[test]
     fn escape_routes_only_to_scoped_events() {
@@ -5537,17 +5972,31 @@ mod tests {
             timeout_reported: false,
         });
         assert!(matches!(
-            poll_cache_bust(&mut pending, started + CACHE_BUST_TIMEOUT),
+            poll_cache_bust(&mut pending, started + CACHE_BUST_TIMEOUT, || {}),
             Some(CacheBustPoll::TimedOut)
         ));
         assert!(pending.is_some(), "a late completion remains observable");
-        assert!(poll_cache_bust(&mut pending, started + CACHE_BUST_TIMEOUT).is_none());
+        assert!(poll_cache_bust(&mut pending, started + CACHE_BUST_TIMEOUT, || {}).is_none());
         tx.send(Ok(Vec::new())).unwrap();
         assert!(matches!(
-            poll_cache_bust(&mut pending, started + CACHE_BUST_TIMEOUT),
+            poll_cache_bust(&mut pending, started + CACHE_BUST_TIMEOUT, || {}),
             Some(CacheBustPoll::Complete(Ok(dicts))) if dicts.is_empty()
         ));
         assert!(pending.is_none());
+
+        let (tx, rx) = mpsc::channel();
+        tx.send(Err("cache clear failed".to_string())).unwrap();
+        let mut pending = Some(PendingCacheBust {
+            rx,
+            started,
+            timeout_reported: false,
+        });
+        let mut dismissed = false;
+        assert!(matches!(
+            poll_cache_bust(&mut pending, started, || dismissed = true),
+            Some(CacheBustPoll::Complete(Err(reason))) if reason == "cache clear failed"
+        ));
+        assert!(!dismissed, "an unchanged cache must keep its popup");
 
         let (tx, rx) = mpsc::channel::<std::result::Result<Vec<DictInfo>, String>>();
         drop(tx);
@@ -5557,14 +6006,116 @@ mod tests {
             timeout_reported: false,
         });
         assert!(matches!(
-            poll_cache_bust(&mut pending, started),
+            poll_cache_bust(&mut pending, started, || {}),
             Some(CacheBustPoll::Disconnected)
         ));
         assert!(pending.is_none());
     }
 
     #[test]
+    fn cache_clear_completion_hides_popup_and_invalidates_pending_popup_work() {
+        let cfg = Config::default();
+        let session = ProfileCatalog::new(&cfg, &[]).unwrap().session(None).unwrap();
+        let mut controller =
+            Controller::new(controller_config(&derive_session(&session)), session.clone());
+        let point = PhysPoint { x: 110, y: 110 };
+        let initial_id = controller
+            .handle(Event::LookupBindDown {
+                bind_id: "cache-clear-initial".into(),
+                mode: crate::config::TriggerMode::Press,
+                session: session.clone(),
+                pos: point,
+            })
+            .into_iter()
+            .find_map(|command| match command {
+                Command::RequestLookup { id, .. } => Some(id),
+                _ => None,
+            })
+            .expect("the first lookup must be requested");
+        let outcome = LookupOutcome::Ready {
+            presentation: Box::new(crate::present::Presentation {
+                top: Some(crate::present::Card {
+                    written: Some("猫".to_string()),
+                    reading: None,
+                    pos: Vec::new(),
+                    inflections: Vec::new(),
+                    freq: None,
+                    blocks: Vec::new(),
+                    match_len: 1,
+                    pitch: Vec::new(),
+                }),
+                collapsed: Vec::new(),
+                all_cards: Vec::new(),
+                sentence: None,
+                surface: None,
+            }),
+            anchor: PhysRect { x: 100, y: 100, w: 20, h: 20 },
+            orientation: crate::text::layout::Orientation::Horizontal,
+            matched: None,
+            scan: Vec::new(),
+        };
+        assert!(controller
+            .handle(Event::LookupResult { id: initial_id, outcome: outcome.clone() })
+            .iter()
+            .any(|command| matches!(command, Command::ShowPopup { .. })));
+        controller.handle(Event::PopupPlaced {
+            rect: PhysRect { x: 100, y: 160, w: 300, h: 200 },
+            content_h: 200,
+            view_h: 200,
+        });
+        assert!(controller.popup().is_some());
+
+        let pending_id = controller
+            .handle(Event::LookupBindDown {
+                bind_id: "cache-clear-pending".into(),
+                mode: crate::config::TriggerMode::Press,
+                session,
+                pos: PhysPoint { x: 900, y: 900 },
+            })
+            .into_iter()
+            .find_map(|command| match command {
+                Command::RequestLookup { id, .. } => Some(id),
+                _ => None,
+            })
+            .expect("a lookup must remain in flight when the cache clear completes");
+        assert!(controller.popup().is_some(), "the cache clear must race with a visible popup");
+
+        let (tx, rx) = mpsc::channel();
+        let started = std::time::Instant::now();
+        let mut cache_bust = Some(PendingCacheBust {
+            rx,
+            started,
+            timeout_reported: false,
+        });
+        tx.send(Ok(Vec::new())).unwrap();
+        let mut dismissal_commands = Vec::new();
+        assert!(matches!(
+            poll_cache_bust(&mut cache_bust, started, || {
+                dismissal_commands = controller.handle(Event::DismissRequested);
+            }),
+            Some(CacheBustPoll::Complete(Ok(dicts))) if dicts.is_empty()
+        ));
+        assert!(cache_bust.is_none());
+        assert!(dismissal_commands.contains(&Command::HidePopup));
+        assert!(controller.popup().is_none());
+        assert!(controller
+            .handle(Event::LookupResult { id: pending_id, outcome: outcome.clone() })
+            .is_empty());
+        assert!(controller.handle(Event::LookupResult { id: initial_id, outcome }).is_empty());
+        assert!(controller
+            .handle(Event::PopupPlaced {
+                rect: PhysRect { x: 100, y: 160, w: 300, h: 200 },
+                content_h: 200,
+                view_h: 200,
+            })
+            .is_empty());
+        assert!(controller.popup().is_none());
+    }
+
+    #[test]
     fn a_failed_sentence_send_returns_empty_sentence_feedback() {
+        let cfg = Config::default();
+        let session = ProfileCatalog::new(&cfg, &[]).unwrap().session(None).unwrap();
         let (tx, rx) = mpsc::channel::<Trigger>();
         drop(rx);
         let sent = tx.send(Trigger {
@@ -5577,6 +6128,7 @@ mod tests {
                 },
                 orientation: crate::text::layout::Orientation::Horizontal,
                 mask: CaptureMask::NONE,
+                session,
             }),
             id: RequestId(7),
         });
@@ -5590,20 +6142,28 @@ mod tests {
         );
     }
 
-    #[test]
-    fn screenshot_restore_uses_the_current_popup_state() {
-        let mut controller = Controller::new(controller_config(&derive(&Config::default())));
+    fn selection_popup(mode: crate::config::TriggerMode) -> Controller {
+        let cfg = Config::default();
+        let catalog = ProfileCatalog::new(&cfg, &[]).unwrap();
+        let session = catalog.session(None).unwrap();
+        let mut controller =
+            Controller::new(controller_config(&derive_session(&session)), session.clone());
         assert!(screenshot_restore_view(&controller).is_none());
 
         let point = PhysPoint { x: 110, y: 110 };
         let id = controller
-            .handle(Event::CursorMoved { pos: point })
+            .handle(Event::LookupBindDown {
+                bind_id: "selection-test".into(),
+                mode,
+                session,
+                pos: point,
+            })
             .into_iter()
             .find_map(|cmd| match cmd {
                 Command::RequestLookup { id, .. } => Some(id),
                 _ => None,
             })
-            .expect("the first cursor move must request a lookup");
+            .expect("the lookup bind must request a lookup");
         controller.handle(Event::LookupResult {
             id,
             outcome: LookupOutcome::Ready {
@@ -5645,14 +6205,50 @@ mod tests {
             view_h: 200,
         });
         assert!(screenshot_restore_view(&controller).is_some());
+        controller
+    }
 
-        controller.handle(Event::LookupResult {
-            id,
-            outcome: LookupOutcome::Hide,
-        });
+    #[test]
+    fn selection_release_reconciles_only_the_active_hold_before_popup_restore() {
+        use crate::input::hooks::BindEvent;
+        use crate::config::{BindAction, TriggerMode};
+
+        let mut controller = selection_popup(TriggerMode::HoldKey);
+        let unrelated = vec![
+            BindEvent { id: Arc::from("selection-test"), action: BindAction::Lookup, down: true },
+            BindEvent { id: Arc::from("search"), action: BindAction::Search, down: true },
+            BindEvent { id: Arc::from("displaced"), action: BindAction::Lookup, down: false },
+        ];
+        let events: Vec<_> = selection_release_events(unrelated).collect();
+        assert_eq!(vec![Event::LookupBindUp { bind_id: "displaced".into() }], events);
+        for event in events {
+            assert!(controller.handle(event).is_empty());
+        }
+        assert_eq!(Some("selection-test"), controller.active_bind_id());
+        assert!(screenshot_restore_view(&controller).is_some());
+
+        let release = BindEvent {
+            id: Arc::from("selection-test"),
+            action: BindAction::Lookup,
+            down: false,
+        };
+        let mut commands = Vec::new();
+        for event in selection_release_events(vec![release]) {
+            commands.extend(controller.handle(event));
+        }
+        assert!(commands.contains(&Command::HidePopup));
+        assert_eq!(None, controller.active_bind_id());
+        assert!(screenshot_restore_view(&controller).is_none());
+    }
+
+    #[test]
+    fn screenshot_restore_uses_the_current_popup_state() {
+        let mut controller = selection_popup(crate::config::TriggerMode::Press);
+
+        controller.handle(Event::DismissRequested);
         assert!(
             screenshot_restore_view(&controller).is_none(),
-            "a later Hide must prevent stale native-window restoration"
+            "a dismissed popup must not return after capture"
         );
     }
 
@@ -5713,9 +6309,6 @@ mod tests {
             let recorded_attempts = accepted_attempts.clone();
             let done = stop.clone();
             let worker = std::thread::spawn(move || {
-                // An abandoned connection arrives with no body on a loaded
-                // runner. Ignoring one keeps the log about the request under
-                // test instead of about whatever opened a socket and left.
                 let mut attempts = 0;
                 while !done.load(Ordering::Relaxed) && attempts < ACCEPT_ATTEMPTS {
                     let Ok((mut stream, _)) = listener.accept() else {
@@ -5724,6 +6317,7 @@ mod tests {
                     };
                     attempts += 1;
                     recorded_attempts.store(attempts, Ordering::Relaxed);
+                    stream.set_nonblocking(false).expect("a blocking request stream");
                     let _ = stream.set_read_timeout(Some(SOCKET_LIMIT));
                     let _ = stream.set_write_timeout(Some(SOCKET_LIMIT));
                     let body = read_request_body(&mut stream);
@@ -5822,15 +6416,23 @@ mod tests {
         let anki = FakeAnki::start(1729);
         let (dir, _guard) = edit_scratch("add_shot_files");
         let picture_path = dir.join("cat_1.png");
-        let pending = PendingShot { plan: cat_add_plan(picture_path.clone()) };
+        let config = Config::default();
+        let session = ProfileCatalog::new(&config, &[]).unwrap().session(None).unwrap();
+        let pending = PendingShot {
+            id: RequestId(1),
+            session,
+            plan: cat_add_plan(picture_path.clone()),
+        };
 
-        let result = handle_screenshot_save(parked_add_command(
+        let command = parked_add_command(
             pending,
             anki_that_files(&anki.url),
             vec![0u8; 16],
             2,
             2,
-        ));
+        )
+        .2;
+        let result = handle_screenshot_save(command);
 
         let seen = anki.seen();
         assert_eq!(

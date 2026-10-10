@@ -1,7 +1,7 @@
 //! The Linux settings process owns this iced window and its tab strip.
-//! The six tabs are General, Shortcuts, Popup, Dictionaries, Text recognition, and Anki.
-//! Shortcuts holds every chord because each Linux bind is a compositor line or portal key.
-//! This keeps binds together instead of separate blocks in each feature group.
+//! The seven tabs are General, Shortcuts, Profiles, Popup, Dictionaries, Text recognition, and Anki.
+//! Shortcuts holds each configured bind, and Profiles edits the shared profile catalog.
+//! Each Linux bind uses a compositor line or a portal key.
 //!
 //! The window renders values from the core `SettingsForm` and `LinuxFields`.
 //! It sends changes to the settings process and hides `ocr.language`.
@@ -21,19 +21,19 @@ use super::snippets::{self, Compositor};
 use crate::clipboard;
 use crate::lock::{self, LockError};
 use crate::popup;
-use crate::shortcuts::{self, ShortcutId};
+use crate::shortcuts;
 use anyhow::Context;
 use chibipop::config::{
-    FieldMapping, LayoutMode, PopupLayer, ScreenshotMode, SelectionButtons, SelectionSeparator,
-    SentenceMode, TriggerMode, TripleClick, FIELD_SOURCES, MAX_HEIGHT_RANGE, MAX_WIDTH_RANGE,
-    PASSES_RANGE, SUMMARY_RANGE,
+    Bind, BindAction, FieldMapping, FieldOverride, LayoutMode, PopupLayer, ProfileData,
+    ScreenshotMode, SelectionButtons, SelectionSeparator, SentenceMode, TriggerMode, TripleClick,
+    FIELD_SOURCES, MAX_HEIGHT_RANGE, MAX_WIDTH_RANGE, PASSES_RANGE, PROFILE_FIELDS, SUMMARY_RANGE,
 };
 use chibipop::dict::frequency::RankingStrategy;
 use chibipop::library::Role;
 use chibipop::present::DictInfo;
 use chibipop::settings::{DictRow, SettingsForm};
 use iced::widget::{
-    button, checkbox, column, container, mouse_area, pick_list, radio, row, rule, scrollable,
+    button, checkbox, column, container, mouse_area, pick_list, row, rule, scrollable,
     slider, space, stack, text, text_input,
 };
 use iced::{Element, Font, Length, Point, Task, Theme};
@@ -111,14 +111,6 @@ pub fn run(init: Init) -> anyhow::Result<()> {
 /// keyboard focus. Ctrl+Tab selects the next page, and Ctrl+Shift+Tab selects
 /// the previous page.
 fn subscription(app: &App) -> iced::Subscription<Message> {
-    if app.capture_search_key.is_some() {
-        return iced::event::listen_with(|event, _, _| match event {
-            iced::Event::Keyboard(iced::keyboard::Event::KeyPressed { key, modifiers, .. }) =>
-                Some(Message::CapturedSearchKey(key, modifiers)),
-            iced::Event::Window(iced::window::Event::Unfocused) => Some(Message::CancelSearchCapture),
-            _ => None,
-        });
-    }
     let events = iced::event::listen_with(|event, _status, _window| match event {
         iced::Event::Mouse(iced::mouse::Event::ButtonReleased(iced::mouse::Button::Left))
         | iced::Event::Window(iced::window::Event::Unfocused) => Some(Message::DictReleased),
@@ -215,29 +207,26 @@ enum Drag {
 enum Tab {
     General,
     Shortcuts,
+    Profiles,
     Popup,
     Dictionaries,
     Ocr,
     Anki,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ShortcutKind {
-    Dictionary,
-    Sentence,
-    SelectedText,
-}
-
 impl Tab {
     /// One order serves the strip and both cycle directions instead of separate lists.
     /// The first entry is the page that opens.
-    const EVERY: [Tab; 6] = [Tab::General, Tab::Shortcuts, Tab::Popup, Tab::Dictionaries, Tab::Ocr, Tab::Anki];
+    const EVERY: [Tab; 7] = [
+        Tab::General, Tab::Shortcuts, Tab::Profiles, Tab::Popup, Tab::Dictionaries, Tab::Ocr, Tab::Anki,
+    ];
 
     /// Keep captions with the page state instead of a second table in the strip.
     fn label(self) -> &'static str {
         match self {
             Tab::General => "General",
             Tab::Shortcuts => "Shortcuts",
+            Tab::Profiles => "Profiles",
             Tab::Popup => "Popup",
             Tab::Dictionaries => "Dictionaries",
             Tab::Ocr => "Text recognition",
@@ -261,7 +250,8 @@ impl Tab {
 struct App {
     /// The page that the strip shows. Ctrl+Tab cycles it.
     tab: Tab,
-    capture_search_key: Option<ShortcutKind>,
+    profile_name: String,
+    profile_parent: Option<String>,
     form: SettingsForm,
     linux: LinuxFields,
     config_path: PathBuf,
@@ -318,7 +308,10 @@ impl App {
         let fonts = font_items(&init.form.cfg.popup.font);
         App {
             tab: Tab::General,
-            capture_search_key: None,
+            profile_name: init.form.catalog.profiles.iter()
+                .find(|profile| profile.id == init.form.profile_id)
+                .map(|profile| profile.name.clone()).unwrap_or_default(),
+            profile_parent: None,
             capture_w: init.form.cfg.ocr.capture_width.to_string(),
             capture_h: init.form.cfg.ocr.capture_height.to_string(),
             form: init.form,
@@ -351,92 +344,101 @@ impl App {
         }
     }
 
-    fn shortcut_chord(&self, id: ShortcutId) -> &str {
-        match id {
-            ShortcutId::Trigger => &self.linux.trigger_key_linux,
-            ShortcutId::AnkiAdd => &self.linux.add_key_linux,
-            ShortcutId::StaticRegion => &self.linux.static_region_key_linux,
-            ShortcutId::OcrClipboard => self.linux.ocr_clipboard_key_linux.as_deref().unwrap_or_default(),
-            ShortcutId::Search => self.linux.search_key_linux.as_deref().unwrap_or_default(),
-            ShortcutId::SentenceSearch => self.linux.sentence_key_linux.as_deref().unwrap_or_default(),
-            ShortcutId::SelectedText => self.linux.selected_key_linux.as_deref().unwrap_or_default(),
+    fn bind_control(&self, bind: &Bind) -> HotkeyControl {
+        if !bind.enabled {
+            return HotkeyControl::Unsupported { reason: "This bind is disabled.".into() };
         }
-    }
-
-    fn shortcut_control(&self, id: ShortcutId) -> HotkeyControl {
-        if (id == ShortcutId::AnkiAdd && !self.form.cfg.anki.enabled)
-            || (id == ShortcutId::OcrClipboard && self.clipboard_rung.is_none())
+        if (bind.action == BindAction::OcrClipboard && self.clipboard_rung.is_none())
+            || (bind.action == BindAction::AnkiAdd && !self.form.cfg.anki.enabled)
+            || (bind.action == BindAction::StaticRegion
+                && self.form.cfg.anki.sentence_mode != SentenceMode::Static)
         {
-            return HotkeyControl::NoChord;
-        }
-        let bind = if id == ShortcutId::Trigger {
-            snippets::trigger_bind(self.form.cfg.trigger.mode)
-        } else {
-            let shortcuts::Action::Verb(verb) = shortcuts::action(id, true, self.form.cfg.trigger.mode) else {
-                unreachable!("an activated action has a control verb");
+            return HotkeyControl::Unsupported {
+                reason: "This action is unavailable in the displayed profile or session.".into(),
             };
-            snippets::Bind::Press(verb)
-        };
+        }
+        let mode = if bind.action == BindAction::Lookup { bind.mode } else { TriggerMode::Press };
+        let command = snippets::Bind { id: &bind.id, mode };
         let channel = if self.compositor == Compositor::Hyprland {
             super::channel::HotkeyChannel::Native
         } else {
-            super::hotkey_channel(self.shortcuts.as_ref(), id)
+            super::hotkey_channel(self.shortcuts.as_ref(), &bind.id)
         };
-        channel.control(
-            self.snippet_compositor, self.shortcut_chord(id), &self.exe, bind,
-        )
+        channel.control(self.snippet_compositor, &bind.linux, &self.exe, command)
     }
 
-    fn shortcut_snippet(&self, id: ShortcutId) -> Option<String> {
-        match self.shortcut_control(id) {
+    fn bind_snippet(&self, id: &str) -> Option<String> {
+        let bind = self.form.catalog.binds.iter().find(|bind| bind.id == id)?;
+        match self.bind_control(bind) {
             HotkeyControl::Snippet { text } => Some(text),
             HotkeyControl::Rebind { .. } | HotkeyControl::NoChord | HotkeyControl::Unsupported { .. } => None,
         }
     }
 
-    fn apply(&mut self) {
+    fn sync_profile_controls(&mut self) {
+        self.capture_w = self.form.cfg.ocr.capture_width.to_string();
+        self.capture_h = self.form.cfg.ocr.capture_height.to_string();
+        self.fonts = font_items(&self.form.cfg.popup.font);
+        self.profile_name = self.form.catalog.profiles.iter()
+            .find(|profile| profile.id == self.form.profile_id)
+            .map(|profile| profile.name.clone()).unwrap_or_default();
+        self.profile_parent = None;
+        self.selected = None;
+        self.hover = None;
+        self.drag = Drag::Idle;
+    }
+
+    fn read_capture_size(&mut self) -> bool {
         let (Ok(w), Ok(h)) = (self.capture_w.trim().parse(), self.capture_h.trim().parse())
         else {
             self.status = "Capture width and height must be numbers.".to_string();
-            return;
+            return false;
         };
         self.form.cfg.ocr.capture_width = w;
         self.form.cfg.ocr.capture_height = h;
-        // Apply removes a field-map row without an Anki field.
-        // Anki has no field named "", so core would search for that name on
-        // every add and store nothing.
-        // Add creates this row because only the user's note type knows its fields.
-        // The empty row remains while the user types.
-        // Apply removes it before it reaches the file, not in core or after each
-        // keystroke. A half-typed name is normal text-box state and needs no early
-        // cleanup.
+        true
+    }
+
+    fn select_tab(&mut self, tab: Tab) {
+        if tab == Tab::Profiles {
+            if !self.read_capture_size() { return; }
+            if let Err(error) = self.form.save_current() {
+                self.status = format!("Cannot update profile overrides: {error:#}");
+                return;
+            }
+            self.status.clear();
+        }
+        self.tab = tab;
+    }
+
+    fn apply(&mut self) {
+        if !self.read_capture_size() { return; }
         if let Some(rows) = self.form.field_map.as_mut() {
             rows.retain(|mapping| !mapping.anki_field.trim().is_empty());
         }
+        let save_dir = self.form.cfg.actions.screenshot.save_dir.trim();
+        self.form.cfg.actions.screenshot.save_dir = if save_dir.is_empty() {
+            chibipop::config::ResolvedConfig::default().actions.screenshot.save_dir
+        } else {
+            save_dir.to_string()
+        };
         match apply::apply(
             &self.form,
             &self.linux,
             &self.config_path,
             &self.socket_path,
             &self.db_path,
-            &self.dicts,
         ) {
             Ok(applied) => {
-                // The file now holds clamped values. The window shows them.
-                if let Ok(cfg) = chibipop::config::load_or_create(&self.config_path) {
-                    self.form.cfg.ocr.capture_width = cfg.ocr.capture_width;
-                    self.form.cfg.ocr.capture_height = cfg.ocr.capture_height;
-                    self.capture_w = cfg.ocr.capture_width.to_string();
-                    self.capture_h = cfg.ocr.capture_height.to_string();
-                    self.form.cfg.actions.screenshot.fixed_region =
-                        cfg.actions.screenshot.fixed_region;
-                    self.form.cfg.actions.screenshot.fixed_window =
-                        cfg.actions.screenshot.fixed_window.clone();
-                }
-                self.form.screenshot_reset_targets = false;
                 self.status = apply::describe(&applied);
+                self.linux = LinuxFields::from_config(&applied.settings.config);
+                if let Err(error) = self.form.accept_applied(applied.settings, &self.dicts) {
+                    self.status = format!("Apply saved, but the selected profile failed to reload: {error:#}");
+                    return;
+                }
+                self.sync_profile_controls();
             }
-            Err(e) => self.status = format!("Apply failed: {e:#}"),
+            Err(error) => self.status = format!("Apply failed: {error:#}"),
         }
     }
 
@@ -667,8 +669,7 @@ enum Message {
     TabNext,
     /// Ctrl+Shift+Tab selects the previous page.
     TabPrev,
-    Mode(TriggerMode),
-    TriggerChord(String),
+    LiveLookup(bool),
     PerChar(bool),
     ThemePicked(String),
     FontPicked(Cow<'static, str>),
@@ -740,7 +741,6 @@ enum Message {
     AnkiUrl(String),
     AnkiDeck(String),
     AnkiModel(String),
-    AnkiAddKey(String),
     OverwriteDuplicates(bool),
     IncludeDictionaryName(bool),
     FirstDictOnly(bool),
@@ -761,13 +761,6 @@ enum Message {
     /// Clear both saved fixed screenshot targets.
     ResetScreenshotTargets,
     ScreenshotSaveDir(String),
-    /// The OCR-to-clipboard chord. Empty text becomes `None` in the config field,
-    /// and this arm stores that value.
-    OcrClipboardKey(String),
-    CaptureSearchKey(ShortcutKind),
-    CapturedSearchKey(iced::keyboard::Key, iced::keyboard::Modifiers),
-    CancelSearchCapture,
-    ClearSearchKey(ShortcutKind),
     LaunchSearch(SearchMode),
     SearchClosed(Result<(), String>),
     OpenSentenceSearch(bool),
@@ -777,7 +770,6 @@ enum Message {
     /// call site does not compare strings or indexes.
     SentenceModePicked(String),
     ShowStaticOverlay(bool),
-    StaticRegionKey(String),
     /// An Anki field name from a field-map row. The field is free text because
     /// only the user's note type knows its fields. This window does not query
     /// Anki for them (see [`field_map_rows`]).
@@ -790,9 +782,25 @@ enum Message {
     /// Before this message, Linux users could use only the shipped `field_map`.
     /// That map has no row for `screenshot`.
     FieldMapAdd,
-    /// Remove the field-map row at this index.
     FieldMapRemove(usize),
-    CopyBind(ShortcutId),
+    BindAdd,
+    BindDelete(String),
+    BindActionPicked(String, BindAction),
+    BindEnabled(String, bool),
+    BindLinux(String, String),
+    BindModePicked(String, TriggerMode),
+    BindProfileOverride(String, bool),
+    BindProfilePicked(String, Option<String>),
+    ProfileSelected(String),
+    ProfileName(String),
+    ProfileParentPicked(String),
+    ProfileCreate,
+    ProfileDuplicate,
+    ProfileRename,
+    ProfileDelete,
+    ProfileDefault,
+    ProfileReset(String),
+    CopyBind(String),
     RefreshShortcuts,
     CompositorPicked(Compositor),
     CopyRule,
@@ -803,14 +811,20 @@ enum Message {
 }
 
 fn update(app: &mut App, message: Message) -> Task<Message> {
+    if matches!(&message,
+        Message::ProfileSelected(_) | Message::ProfileCreate | Message::ProfileDuplicate
+        | Message::ProfileRename | Message::ProfileDelete | Message::ProfileDefault
+        | Message::ProfileReset(_)
+    ) && !app.read_capture_size() {
+        return Task::none();
+    }
     match message {
         Message::RefreshShortcuts => app.shortcuts = shortcuts::state::read(&app.state_dir),
         Message::CompositorPicked(compositor) => app.snippet_compositor = compositor,
-        Message::TabPicked(tab) => { app.capture_search_key = None; app.tab = tab; }
-        Message::TabNext => { app.capture_search_key = None; app.tab = app.tab.next(); }
-        Message::TabPrev => { app.capture_search_key = None; app.tab = app.tab.prev(); }
-        Message::Mode(mode) => app.form.cfg.trigger.mode = mode,
-        Message::TriggerChord(chord) => app.linux.trigger_key_linux = chord,
+        Message::TabPicked(tab) => app.select_tab(tab),
+        Message::TabNext => app.select_tab(app.tab.next()),
+        Message::TabPrev => app.select_tab(app.tab.prev()),
+        Message::LiveLookup(on) => app.form.catalog.live_lookup = on,
         Message::PerChar(on) => app.form.cfg.trigger.per_character_lookup = on,
         Message::ThemePicked(theme) => app.form.cfg.popup.theme = theme,
         Message::FontPicked(font) => app.form.cfg.popup.font = font.into_owned(),
@@ -822,7 +836,7 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
         Message::EdgeAutoscroll(on) => app.form.cfg.popup.edge_autoscroll = on,
         Message::SidePanel(on) => app.form.cfg.popup.side_panel = on,
         Message::LayerPicked(layer) => {
-            app.linux.layer = if layer == "top" { PopupLayer::Top } else { PopupLayer::Overlay };
+            app.form.cfg.popup.layer = if layer == "top" { PopupLayer::Top } else { PopupLayer::Overlay };
         }
         Message::LayoutModePicked(label) => {
             app.form.cfg.popup.layout_mode = value_of(&LAYOUT_MODES, &label, LayoutMode::Roomy);
@@ -873,8 +887,6 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
         Message::AnkiDeck(_) => {}
         Message::AnkiModel(v) if app.form.cfg.anki.enabled => app.form.cfg.anki.model = v,
         Message::AnkiModel(_) => {}
-        Message::AnkiAddKey(v) if app.form.cfg.anki.enabled => app.linux.add_key_linux = v,
-        Message::AnkiAddKey(_) => {}
         Message::OverwriteDuplicates(on) if app.form.cfg.anki.enabled => {
             app.form.cfg.anki.overwrite_duplicates = on;
         }
@@ -913,30 +925,8 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
             app.form.cfg.actions.screenshot.fixed_window = None;
             app.form.screenshot_reset_targets = true;
         }
-        // This is the only place where empty text becomes `None`. The config field
-        // uses `Option`, so absence has a distinct value. An empty chord would be
-        // a sentinel that the daemon would need to interpret.
-        Message::ScreenshotSaveDir(v) => app.linux.screenshot_save_dir = v,
-        // The OCR-to-clipboard key uses the same empty-text rule. The Windows
-        // counterpart also rejects this sentinel.
-        Message::OcrClipboardKey(v) => {
-            app.linux.ocr_clipboard_key_linux = (!v.trim().is_empty()).then_some(v);
-        }
-        Message::CaptureSearchKey(mode) => app.capture_search_key = Some(mode),
-        Message::CancelSearchCapture => app.capture_search_key = None,
-        Message::ClearSearchKey(mode) => {
-            set_search_key(app, mode, None);
-            app.capture_search_key = None;
-        }
-        Message::CapturedSearchKey(key, modifiers) => {
-            if let Some(mode) = app.capture_search_key {
-                if key == iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape) {
-                    app.capture_search_key = None;
-                } else if let Some(chord) = captured_search_chord(&key, modifiers) {
-                    set_search_key(app, mode, Some(chord));
-                    app.capture_search_key = None;
-                }
-            }
+        Message::ScreenshotSaveDir(v) => {
+            app.form.cfg.actions.screenshot.save_dir = v;
         }
         Message::LaunchSearch(mode) => return launch_search(app, mode),
         Message::SearchClosed(Err(error)) => app.status = error,
@@ -956,10 +946,6 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
             app.form.cfg.anki.show_static_overlay = on;
         }
         Message::ShowStaticOverlay(_) => {}
-        Message::StaticRegionKey(v) if app.form.cfg.anki.sentence_mode == SentenceMode::Static => {
-            app.linux.static_region_key_linux = v;
-        }
-        Message::StaticRegionKey(_) => {}
         Message::FieldMapAnki(i, v) if app.form.cfg.anki.enabled => {
             if let Some(m) = app.form.field_map.as_mut().and_then(|rows| rows.get_mut(i)) {
                 m.anki_field = v;
@@ -999,11 +985,126 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
             }
         }
         Message::FieldMapRemove(_) => {}
-        Message::CopyBind(ShortcutId::AnkiAdd) if !app.form.cfg.anki.enabled => {}
-        Message::CopyBind(ShortcutId::StaticRegion)
-            if app.form.cfg.anki.sentence_mode != SentenceMode::Static => {}
+        Message::BindAdd => {
+            let id = app.form.catalog.next_bind_id();
+            app.form.catalog.binds.push(Bind::new(id, BindAction::Lookup));
+        }
+        Message::BindDelete(id) => app.form.catalog.binds.retain(|bind| bind.id != id),
+        Message::BindActionPicked(id, action) => {
+            if let Some(bind) = app.form.catalog.binds.iter_mut().find(|bind| bind.id == id) {
+                bind.action = action;
+                if !action.allows_profile() {
+                    bind.profile = None;
+                }
+                if action != BindAction::Lookup {
+                    bind.mode = TriggerMode::Press;
+                }
+            }
+        }
+        Message::BindEnabled(id, enabled) => {
+            if let Some(bind) = app.form.catalog.binds.iter_mut().find(|bind| bind.id == id) {
+                bind.enabled = enabled;
+            }
+        }
+        Message::BindLinux(id, chord) => {
+            if let Some(bind) = app.form.catalog.binds.iter_mut().find(|bind| bind.id == id) {
+                bind.linux = chord;
+            }
+        }
+        Message::BindModePicked(id, mode) => {
+            if matches!(mode, TriggerMode::Press | TriggerMode::HoldKey | TriggerMode::Toggle) {
+                if let Some(bind) = app.form.catalog.binds.iter_mut()
+                    .find(|bind| bind.id == id && bind.action == BindAction::Lookup)
+                {
+                    bind.mode = mode;
+                }
+            }
+        }
+        Message::BindProfileOverride(id, enabled) => {
+            if let Some(bind) = app.form.catalog.binds.iter_mut()
+                .find(|bind| bind.id == id && bind.action.allows_profile())
+            {
+                bind.profile = enabled.then(|| app.form.profile_id.clone());
+            }
+        }
+        Message::BindProfilePicked(id, profile) => {
+            let valid = profile.as_ref().is_none_or(|profile_id| {
+                app.form.catalog.profiles.iter().any(|profile| profile.id == *profile_id)
+            });
+            if valid {
+                if let Some(bind) = app.form.catalog.binds.iter_mut()
+                    .find(|bind| bind.id == id && bind.action.allows_profile())
+                {
+                    bind.profile = profile;
+                }
+            }
+        }
+        Message::ProfileSelected(label) => {
+            let id = profile_id_from_label(&app.form.catalog, &label).map(str::to_owned);
+            if let Some(id) = id {
+                match app.form.select_profile(&id, &app.dicts) {
+                    Ok(()) => {
+                        app.sync_profile_controls();
+                        app.status.clear();
+                    }
+                    Err(error) => app.status = format!("Cannot select profile: {error:#}"),
+                }
+            }
+        }
+        Message::ProfileName(name) => app.profile_name = name,
+        Message::ProfileParentPicked(label) => {
+            app.profile_parent = if label == "Full profile" {
+                None
+            } else {
+                profile_id_from_full_label(&app.form.catalog, &label).map(str::to_owned)
+            };
+        }
+        Message::ProfileCreate => {
+            match app.form.create_profile(app.profile_name.clone(), app.profile_parent.as_deref(), &app.dicts) {
+                Ok(_) => {
+                    app.sync_profile_controls();
+                    app.status = "Profile created.".into();
+                }
+                Err(error) => app.status = format!("Cannot create profile: {error:#}"),
+            }
+        }
+        Message::ProfileDuplicate => match app.form.duplicate_profile(app.profile_name.clone(), &app.dicts) {
+            Ok(_) => {
+                app.sync_profile_controls();
+                app.status = "Profile duplicated.".into();
+            }
+            Err(error) => app.status = format!("Cannot duplicate profile: {error:#}"),
+        },
+        Message::ProfileRename => match app.form.rename_profile(app.profile_name.clone()) {
+            Ok(()) => app.status = "Profile renamed.".into(),
+            Err(error) => app.status = format!("Cannot rename profile: {error:#}"),
+        },
+        Message::ProfileDelete => {
+            let id = app.form.profile_id.clone();
+            match app.form.delete_profile(&id, &app.dicts) {
+                Ok(()) => {
+                    app.sync_profile_controls();
+                    app.status = "Profile deleted.".into();
+                }
+                Err(error) => app.status = format!("Cannot delete profile: {error:#}"),
+            }
+        }
+        Message::ProfileDefault => {
+            let id = app.form.profile_id.clone();
+            match app.form.set_default_profile(&id) {
+                Ok(()) => app.status = "Default profile changed.".into(),
+                Err(error) => app.status = format!("Cannot set default profile: {error:#}"),
+            }
+        }
+        Message::ProfileReset(path) => match app.form.reset_profile_override(&path, &app.dicts) {
+            Ok(()) => {
+                app.sync_profile_controls();
+                app.status = format!("Reset {path} to the parent value.");
+            }
+            Err(error) => app.status = format!("Cannot reset {path}: {error:#}"),
+        },
         Message::CopyBind(id) => {
-            if let Some(snippet) = app.shortcut_snippet(id) {
+            if let Some(snippet) = app.bind_snippet(&id) {
                 return iced::clipboard::write(snippet);
             }
         }
@@ -1272,6 +1373,7 @@ fn tab_strip(app: &App) -> Element<'_, Message> {
 fn page(app: &App, tab: Tab) -> Element<'_, Message> {
     match tab {
         Tab::General => general_page(app),
+        Tab::Profiles => profile_page(app),
         Tab::Shortcuts => shortcuts_page(app),
         Tab::Popup => popup_page(app),
         Tab::Dictionaries => dictionaries_page(app),
@@ -1284,7 +1386,7 @@ fn page(app: &App, tab: Tab) -> Element<'_, Message> {
 ///
 /// The border separates groups, and the title identifies each group.
 /// A bare heading in a long column did not show where one group ended.
-fn card<'a>(title: &'a str, body: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
+fn card<'a>(title: impl text::IntoFragment<'a>, body: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
     container(column![text(title).size(17), body.into()].spacing(12))
         .padding(16)
         .width(Length::Fill)
@@ -1317,191 +1419,282 @@ fn disabled_anki_value<'a>(value: impl text::IntoFragment<'a>, width: impl Into<
         .into()
 }
 
-/// Keep every chord beside its bind instead of separate blocks on feature pages.
-fn set_search_key(app: &mut App, kind: ShortcutKind, chord: Option<String>) {
-    match kind {
-        ShortcutKind::Dictionary => app.linux.search_key_linux = chord,
-        ShortcutKind::Sentence => app.linux.sentence_key_linux = chord,
-        ShortcutKind::SelectedText => app.linux.selected_key_linux = chord,
-    }
-}
-
-fn captured_search_chord(key: &iced::keyboard::Key, modifiers: iced::keyboard::Modifiers) -> Option<String> {
-    use iced::keyboard::{key::Named, Key};
-    let key = match key {
-        Key::Character(value) if value.len() == 1 && value.chars().all(|ch| ch.is_ascii_alphanumeric()) =>
-            value.to_ascii_uppercase(),
-        Key::Named(Named::Space) => "space".into(),
-        Key::Named(Named::Enter) => "Return".into(),
-        Key::Named(Named::Backspace) => "BackSpace".into(),
-        Key::Named(Named::Delete) => "Delete".into(),
-        Key::Named(Named::Tab) => "Tab".into(),
-        Key::Named(Named::ArrowUp) => "Up".into(),
-        Key::Named(Named::ArrowDown) => "Down".into(),
-        Key::Named(Named::ArrowLeft) => "Left".into(),
-        Key::Named(Named::ArrowRight) => "Right".into(),
-        Key::Named(named) => {
-            let name = format!("{named:?}");
-            if name.strip_prefix('F').and_then(|number| number.parse::<u8>().ok()).is_some_and(|number| (1..=24).contains(&number)) {
-                name
-            } else { return None; }
-        }
-        _ => return None,
-    };
-    let mut parts = Vec::new();
-    if modifiers.control() { parts.push("CTRL"); }
-    if modifiers.alt() { parts.push("ALT"); }
-    if modifiers.shift() { parts.push("SHIFT"); }
-    if modifiers.logo() { parts.push("SUPER"); }
-    parts.push(&key);
-    Some(parts.join("+"))
-}
-
-fn search_shortcut(app: &App, kind: ShortcutKind) -> Element<'_, Message> {
-    let (title, chord, id) = match kind {
-        ShortcutKind::Dictionary => ("Dictionary search", &app.linux.search_key_linux, ShortcutId::Search),
-        ShortcutKind::Sentence => ("Sentence search", &app.linux.sentence_key_linux, ShortcutId::SentenceSearch),
-        ShortcutKind::SelectedText => ("Look up selected text", &app.linux.selected_key_linux, ShortcutId::SelectedText),
-    };
-    let label = if app.capture_search_key == Some(kind) { "Press a shortcut… (Esc cancels)".to_string() }
-        else { chord.as_ref().map(|key| key.to_ascii_uppercase()).unwrap_or_else(|| "Disabled: click to record".into()) };
-    let mut rows = column![row![button(text(label)).on_press(Message::CaptureSearchKey(kind)),
-        button("Clear").on_press(Message::ClearSearchKey(kind))].spacing(10)].spacing(10);
-    if kind == ShortcutKind::SelectedText {
-        rows = rows.push(checkbox(app.form.cfg.actions.search.selected_opens_sentence_search)
-            .label("Open selected text in sentence search").on_toggle(Message::SelectedSentenceSearch));
-    }
-    rows = rows.push(hint("Click to record a key combination."))
-        .push(shortcut_bind(app, id));
-    if kind == ShortcutKind::SelectedText {
-        rows = rows.push(hint("Word bounds are unavailable here. Popup placement uses the cursor."));
-    }
-    card(title, rows)
-}
-
 fn launch_search(app: &mut App, mode: SearchMode) -> iced::Task<Message> {
     let mut paths = crate::paths::resolve(&crate::paths::Env::from_process(), Some(app.config_path.clone()));
-    if let Some(directory) = app.db_path.parent() { paths.data_dir = directory.to_path_buf(); }
-    let command = crate::search::search_command_mode(&paths, mode, None);
+    if let Some(directory) = app.db_path.parent() {
+        paths.data_dir = directory.to_path_buf();
+    }
+    let catalog = match chibipop::config::ProfileCatalog::new(&app.form.catalog, &app.dicts) {
+        Ok(catalog) => catalog,
+        Err(error) => {
+            app.status = format!("Cannot open search: {error:#}");
+            return iced::Task::none();
+        }
+    };
+    let session = match catalog.session(Some(&app.form.profile_id)) {
+        Ok(session) => session,
+        Err(error) => {
+            app.status = format!("Cannot open search: {error:#}");
+            return iced::Task::none();
+        }
+    };
+    let mut search = match crate::search::search_command_mode(&paths, mode, &session) {
+        Ok(search) => search,
+        Err(error) => {
+            app.status = format!("Cannot open search: {error}");
+            return iced::Task::none();
+        }
+    };
+    let catalog_path = search.catalog_path().to_path_buf();
     let (sender, receiver) = iced::futures::channel::oneshot::channel();
-    match command.and_then(|mut command| std::thread::Builder::new().name("settings-search".into()).spawn(move || {
-        let result = command.status().map_err(|error| format!("Cannot open search: {error}"))
+    match std::thread::Builder::new().name("settings-search".into()).spawn(move || {
+        let result = search.command_mut().status().map_err(|error| format!("Cannot open search: {error}"))
             .and_then(|status| if status.success() { Ok(()) } else { Err(format!("Search exited with {status}")) });
+        let cleanup = search.remove_catalog().map_err(|error| format!("Cannot remove search catalog: {error}"));
+        let result = match (result, cleanup) {
+            (Err(error), _) => Err(error),
+            (Ok(()), Err(error)) => Err(error),
+            (Ok(()), Ok(())) => Ok(()),
+        };
         let _ = sender.send(result);
-    })) {
+    }) {
         Ok(_) => iced::Task::perform(receiver, |result| Message::SearchClosed(result.unwrap_or_else(|_|
             Err("Search launch stopped unexpectedly.".into())))),
-        Err(error) => { app.status = format!("Cannot start search: {error}"); iced::Task::none() }
+        Err(error) => {
+            let _ = std::fs::remove_file(catalog_path);
+            app.status = format!("Cannot start search: {error}");
+            iced::Task::none()
+        }
     }
 }
 
 fn shortcuts_page(app: &App) -> Element<'_, Message> {
-    let selected = if app.form.cfg.trigger.mode == TriggerMode::Live {
-        TriggerMode::Live
-    } else if app.form.cfg.trigger.mode == TriggerMode::Toggle {
-        TriggerMode::Toggle
-    } else if app.form.cfg.trigger.mode == TriggerMode::Press {
-        TriggerMode::Press
-    } else {
-        // The legacy `hold-shift` alias means HoldKey, as in the Windows radio controls.
-        TriggerMode::HoldKey
-    };
-    let mode = row![
-        radio("Follow pointer", TriggerMode::Live, Some(selected), Message::Mode),
-        radio("While held", TriggerMode::HoldKey, Some(selected), Message::Mode),
-        radio("Turn on / off", TriggerMode::Toggle, Some(selected), Message::Mode),
-        radio("Once per press", TriggerMode::Press, Some(selected), Message::Mode),
-    ]
-    .spacing(20);
-
-    column![
+    let mut page = column![
         hint(
-            "Apply requests global shortcuts when your desktop can assign keys directly. \
-             Otherwise, copy each bind into your compositor's config. Chords use syntax such as ALT+F."
+            "Enable each bind and enter its Linux chord. Copy the generated command into your compositor config. \
+             Chords use syntax such as ALT+F."
         ),
         labeled("Compositor syntax", pick_list(Compositor::ALL, Some(app.snippet_compositor), Message::CompositorPicked)),
-        search_shortcut(app, ShortcutKind::Dictionary),
-        search_shortcut(app, ShortcutKind::Sentence),
-        search_shortcut(app, ShortcutKind::SelectedText),
-        card("Popup shortcut", column![
-            mode,
+        checkbox(app.form.catalog.live_lookup)
+            .label("Enable live lookup at the pointer")
+            .on_toggle(Message::LiveLookup),
+        card("Selected profile behavior", column![
             checkbox(app.form.cfg.trigger.per_character_lookup)
-                .label("Update for every character (Follow pointer only)")
+                .label("Update screen lookup for every character")
                 .on_toggle(Message::PerChar),
-            labeled(
-                "Lookup shortcut",
-                text_input("ALT+F", &app.linux.trigger_key_linux)
-                    .on_input(Message::TriggerChord)
-                    .width(200),
-            ),
-            shortcut_bind(app, ShortcutId::Trigger),
-        ].spacing(10)),
-        card("Add current result to Anki", column![
-            labeled(
-                "Anki shortcut",
-                text_input("ALT+A", &app.linux.add_key_linux)
-                    .on_input_maybe(app.form.cfg.anki.enabled.then_some(Message::AnkiAddKey))
-                    .width(200),
-            ),
-            shortcut_bind(app, ShortcutId::AnkiAdd),
-        ].spacing(10)),
-        card("Set sentence area", column![
-            labeled(
-                "Sentence-area shortcut",
-                text_input("ALT+R", &app.linux.static_region_key_linux)
-                    .on_input_maybe(
-                        (app.form.cfg.anki.sentence_mode == SentenceMode::Static)
-                            .then_some(Message::StaticRegionKey),
-                    )
-                    .width(200),
-            ),
-            shortcut_bind(app, ShortcutId::StaticRegion),
-        ].spacing(10)),
-        card("Copy text from the screen", column![
-            labeled(
-                "Copy-text shortcut",
-                text_input(
-                    "ALT+C",
-                    app.linux.ocr_clipboard_key_linux.as_deref().unwrap_or_default(),
-                )
-                .on_input(Message::OcrClipboardKey)
-                .width(200),
-            ),
-            checkbox(app.form.cfg.actions.ocr_clipboard.as_ref().is_some_and(|action| action.open_sentence_search))
-                .label("After copying, open sentence search")
+            checkbox(app.form.cfg.actions.search.selected_opens_sentence_search)
+                .label("Use Sentence search for selected text")
+                .on_toggle(Message::SelectedSentenceSearch),
+            checkbox(app.form.cfg.actions.ocr_clipboard.as_ref()
+                .is_some_and(|action| action.open_sentence_search))
+                .label("Open Sentence search after OCR to clipboard")
                 .on_toggle(Message::OpenSentenceSearch),
-            ocr_clipboard_bind(app),
         ].spacing(10)),
     ]
-    .spacing(16)
-    .into()
+    .spacing(12);
+
+    for bind in &app.form.catalog.binds {
+        page = page.push(bind_card(app, bind));
+    }
+    page = page.push(button("Add bind").on_press(Message::BindAdd));
+    if app.clipboard_rung.is_none() {
+        page = page.push(hint("OCR-to-clipboard binds are unavailable in this session because it has no data-control protocol."));
+    }
+    page.into()
 }
 
-/// Every row uses its own confirmed binding. Native rows copy the same
-/// daemon verbs that portal activations execute.
-fn shortcut_bind(app: &App, id: ShortcutId) -> Element<'_, Message> {
-    let can_copy = id != ShortcutId::StaticRegion
-        || app.form.cfg.anki.sentence_mode == SentenceMode::Static;
-    match app.shortcut_control(id) {
+fn bind_card<'a>(app: &'a App, bind: &'a Bind) -> Element<'a, Message> {
+    let id = bind.id.clone();
+    let action_id = id.clone();
+    let action = pick_list(BindAction::ALL, Some(bind.action), move |action| {
+        Message::BindActionPicked(action_id.clone(), action)
+    });
+    let enabled_id = id.clone();
+    let chord_id = id.clone();
+    let mut body = column![
+        labeled("Action", action),
+        checkbox(bind.enabled)
+            .label("Enabled")
+            .on_toggle(move |enabled| Message::BindEnabled(enabled_id.clone(), enabled)),
+        labeled(
+            "Linux chord",
+            text_input("ALT+F", &bind.linux)
+                .on_input(move |chord| Message::BindLinux(chord_id.clone(), chord))
+                .width(220),
+        ),
+    ]
+    .spacing(10);
+
+    if bind.action == BindAction::Lookup {
+        let mode_id = id.clone();
+        body = body.push(labeled(
+            "Lookup mode",
+            pick_list(
+                labels(&BIND_MODES),
+                Some(label_of(&BIND_MODES, bind.mode).to_string()),
+                move |label| {
+                    Message::BindModePicked(
+                        mode_id.clone(),
+                        value_of(&BIND_MODES, &label, TriggerMode::Press),
+                    )
+                },
+            ),
+        ));
+    }
+
+    if bind.action.allows_profile() {
+        let override_id = id.clone();
+        body = body.push(
+            checkbox(bind.profile.is_some())
+                .label("Override profile")
+                .on_toggle(move |enabled| Message::BindProfileOverride(override_id.clone(), enabled)),
+        );
+        if let Some(profile_id) = bind.profile.as_deref() {
+            let choices: Vec<String> = app.form.catalog.profiles.iter().map(profile_label).collect();
+            let selected = profile_label_for_id(&app.form.catalog, profile_id);
+            let profile_bind_id = id.clone();
+            body = body.push(labeled(
+                "Profile",
+                pick_list(choices, selected, move |label| {
+                    Message::BindProfilePicked(
+                        profile_bind_id.clone(),
+                        profile_id_from_label(&app.form.catalog, &label).map(str::to_owned),
+                    )
+                }),
+            ));
+        }
+    } else {
+        body = body.push(hint("This action uses the displayed profile."));
+    }
+
+    let mut controls = column![bind_controls(app, bind)].spacing(6);
+    controls = controls.push(button("Delete bind").on_press(Message::BindDelete(id)));
+    body = body.push(controls);
+    card(format!("{} — {}", bind.action.name(), bind.id), body)
+}
+
+fn bind_controls<'a>(app: &'a App, bind: &'a Bind) -> Element<'a, Message> {
+    match app.bind_control(bind) {
         HotkeyControl::Snippet { text: snippet } => column![
             hint(app.snippet_compositor.bind_help()),
             snippet_box(snippet),
             button(if matches!(app.snippet_compositor, Compositor::Kde | Compositor::Gnome | Compositor::Other) {
                 "Copy daemon command"
-            } else { "Copy bind snippet" }).on_press_maybe(can_copy.then_some(Message::CopyBind(id))),
-        ].spacing(6).into(),
+            } else {
+                "Copy bind snippet"
+            })
+            .on_press(Message::CopyBind(bind.id.clone())),
+        ]
+        .spacing(6)
+        .into(),
         HotkeyControl::Rebind { current } => column![
             text("Global shortcut: your desktop registered this action."),
             text(match current {
                 Some(key) => format!("Current key: {key}"),
                 None => "The desktop did not report the current key.".to_string(),
             }),
-            hint("Apply requests the preferred chord above. Your desktop can ask for approval or keep its existing key."),
             hint("Use your desktop's global-shortcut settings to change an existing key."),
-        ].spacing(6).into(),
-        HotkeyControl::NoChord => hint("No chord is set. Set a chord to register this action or copy its bind."),
+        ]
+        .spacing(6)
+        .into(),
+        HotkeyControl::NoChord => hint("Enter a Linux chord to register this bind or copy its command."),
         HotkeyControl::Unsupported { reason } => hint(reason),
     }
+}
+
+fn profile_label(profile: &chibipop::config::Profile) -> String {
+    format!("{} ({})", profile.name, profile.id)
+}
+
+fn profile_label_for_id(catalog: &chibipop::config::Config, id: &str) -> Option<String> {
+    catalog.profiles.iter().find(|profile| profile.id == id).map(profile_label)
+}
+
+fn profile_id_from_label<'a>(
+    catalog: &'a chibipop::config::Config,
+    label: &str,
+) -> Option<&'a str> {
+    catalog.profiles.iter().find(|profile| profile_label(profile) == label).map(|profile| profile.id.as_str())
+}
+
+fn profile_id_from_full_label<'a>(
+    catalog: &'a chibipop::config::Config,
+    label: &str,
+) -> Option<&'a str> {
+    catalog.profiles.iter().find(|profile| {
+        matches!(&profile.data, ProfileData::Full { .. }) && profile_label(profile) == label
+    }).map(|profile| profile.id.as_str())
+}
+
+fn profile_page(app: &App) -> Element<'_, Message> {
+    let catalog = &app.form.catalog;
+    let profile = catalog.profiles.iter().find(|profile| profile.id == app.form.profile_id);
+    let profile_items: Vec<String> = catalog.profiles.iter().map(profile_label).collect();
+    let selected_profile = profile_label_for_id(catalog, &app.form.profile_id);
+    let parent_items = std::iter::once("Full profile".to_string())
+        .chain(catalog.profiles.iter()
+            .filter(|profile| matches!(&profile.data, ProfileData::Full { .. }))
+            .map(profile_label))
+        .collect::<Vec<_>>();
+    let selected_parent = app.profile_parent.as_deref()
+        .and_then(|id| profile_label_for_id(catalog, id))
+        .unwrap_or_else(|| "Full profile".into());
+    let is_default = catalog.default_profile == app.form.profile_id;
+    let default_name = catalog.profiles.iter()
+        .find(|profile| profile.id == catalog.default_profile)
+        .map(|profile| profile.name.as_str())
+        .unwrap_or("unknown");
+
+    let mut fields = column![
+        hint("Each field in a derived profile can override its parent independently.")
+    ]
+    .spacing(6);
+    for path in PROFILE_FIELDS {
+        let (state, can_reset) = match profile.map(|profile| &profile.data) {
+            Some(ProfileData::Derived { overrides, .. }) => match overrides.get(*path) {
+                Some(FieldOverride::Set(value)) => (format!("Override: {value}"), true),
+                Some(FieldOverride::Clear) => ("Override: cleared".into(), true),
+                None => ("Inherited".into(), false),
+            },
+            Some(ProfileData::Full { .. }) => ("Full profile value".into(), false),
+            None => ("Profile not found".into(), false),
+        };
+        fields = fields.push(row![
+            text(*path).width(280),
+            text(state).width(Length::Fill),
+            button("Reset")
+                .on_press_maybe(can_reset.then(|| Message::ProfileReset((*path).to_string()))),
+        ].spacing(8).align_y(iced::Center));
+    }
+
+    column![
+        card("Selected profile", column![
+            labeled(
+                "Profile",
+                pick_list(profile_items, selected_profile, Message::ProfileSelected),
+            ),
+            hint(format!("Default profile: {default_name}")),
+            button(if is_default { "This is the default profile" } else { "Set as default" })
+                .on_press_maybe((!is_default).then_some(Message::ProfileDefault)),
+            labeled(
+                "Profile name",
+                text_input("Profile name", &app.profile_name).on_input(Message::ProfileName),
+            ),
+            labeled(
+                "Parent for new profile",
+                pick_list(parent_items, Some(selected_parent), Message::ProfileParentPicked),
+            ),
+            row![
+                button("Create profile").on_press(Message::ProfileCreate),
+                button("Duplicate current profile").on_press(Message::ProfileDuplicate),
+                button("Rename current profile").on_press(Message::ProfileRename),
+                button("Delete current profile").on_press(Message::ProfileDelete),
+            ].spacing(8),
+        ].spacing(10)),
+        card("Profile fields", fields),
+    ]
+    .spacing(16)
+    .into()
 }
 
 /// Separate appearance, size, behavior, and entry content instead of one long group.
@@ -1509,7 +1702,7 @@ fn shortcut_bind(app: &App, id: ShortcutId) -> Element<'_, Message> {
 fn popup_page(app: &App) -> Element<'_, Message> {
     let themes = vec!["dark".to_string(), "light".to_string()];
     let layers = vec!["overlay".to_string(), "top".to_string()];
-    let layer_now = match app.linux.layer {
+    let layer_now = match app.form.cfg.popup.layer {
         PopupLayer::Overlay => "overlay".to_string(),
         PopupLayer::Top => "top".to_string(),
     };
@@ -1946,22 +2139,6 @@ fn ocr_page(app: &App) -> Element<'_, Message> {
 }
 
 
-/// The OCR-to-clipboard bind, or the reason that no bind exists.
-///
-/// No bind can mean that the user typed no chord or that the compositor has no
-/// clipboard protocol. Check the protocol first. A pasted bind that can only
-/// log a refusal cannot work, so this window does not provide it.
-fn ocr_clipboard_bind(app: &App) -> Element<'_, Message> {
-    if app.clipboard_rung.is_none() {
-        return hint(
-            "This compositor has no clipboard protocol chibipop can use, so there is nothing \
-             to bind: writing the selection without keyboard focus needs \
-             ext_data_control_manager_v1 or zwlr_data_control_manager_v1, and this session \
-             advertises neither. Every other feature is unaffected."
-        );
-    }
-    shortcut_bind(app, ShortcutId::OcrClipboard)
-}
 
 /// The sentence-capture picker items, in display order.
 ///
@@ -1969,6 +2146,12 @@ fn ocr_clipboard_bind(app: &App) -> Element<'_, Message> {
 /// to the picker and the mode comes back. iced returns a label, while the
 /// Windows combo returns an index. Both windows use one table instead of a
 /// string match at the call site. The first item supplies the default.
+const BIND_MODES: [(TriggerMode, &str); 3] = [
+    (TriggerMode::Press, "Press"),
+    (TriggerMode::HoldKey, "Hold"),
+    (TriggerMode::Toggle, "Toggle"),
+];
+
 const SENTENCE_MODES: [(SentenceMode, &str); 4] = [
     (SentenceMode::Sentence, "Detected sentence"),
     (SentenceMode::Line, "Line under the pointer"),
@@ -2075,7 +2258,7 @@ fn screenshot_rows(app: &App) -> Vec<Element<'_, Message>> {
             .into(),
         labeled(
             "Screenshots folder",
-            text_input("screenshots", &app.linux.screenshot_save_dir)
+            text_input("screenshots", &app.form.cfg.actions.screenshot.save_dir)
                 .on_input(Message::ScreenshotSaveDir)
                 .width(260),
         ),
@@ -2310,7 +2493,7 @@ fn general_page(app: &App) -> Element<'_, Message> {
 /// Keep status and Apply visible on every page instead of below the scrollable content.
 fn footer(app: &App) -> Element<'_, Message> {
     let line = if app.status.is_empty() {
-        "Apply saves the config file and reloads the daemon.".to_string()
+        "Apply saves the catalog. New sessions use the saved settings.".to_string()
     } else {
         app.status.clone()
     };
@@ -2441,13 +2624,15 @@ mod tests {
     /// The config that the form will save. Reindex and lookup read the file, not
     /// the form, so this captures a press's actual effect.
     fn saved(app: &App) -> chibipop::config::Config {
-        chibipop::settings::apply_to(&app.form, &chibipop::config::Config::default())
+        chibipop::settings::apply_to(&app.form, &app.form.catalog).config
     }
 
-    /// The work that Apply needs beyond the file write.
-    ///
+    fn saved_resolved(app: &App) -> chibipop::config::ResolvedConfig {
+        saved(app).resolved(Some(&app.form.profile_id)).unwrap()
+    }
+
     /// Core defines this rule in `settings::dictionary_work`. The helper compares
-    /// the config before and after the press, as `apply.rs` does.
+    /// the saved config before and after the press, as `apply.rs` does.
     fn work(opened: &chibipop::config::Config, app: &App) -> DictionaryWork {
         chibipop::settings::dictionary_work(opened, &saved(app))
     }
@@ -2461,13 +2646,19 @@ mod tests {
 
     /// The window state without fontdb or filesystem access.
     fn app(dir: &Path) -> App {
-        let cfg = chibipop::config::Config::default();
+        let config_path = dir.join("chibipop.toml");
+        let cfg = chibipop::config::load_or_create(&config_path).unwrap();
+        let form = chibipop::settings::from_config(&cfg, &[]);
+        let profile_name = cfg.profiles.iter()
+            .find(|profile| profile.id == form.profile_id)
+            .map(|profile| profile.name.clone()).unwrap_or_default();
         App {
             tab: Tab::General,
-            capture_search_key: None,
-            form: chibipop::settings::from_config(&cfg, &[]),
+            profile_name,
+            profile_parent: None,
+            form,
             linux: LinuxFields::from_config(&cfg),
-            config_path: dir.join("chibipop.toml"),
+            config_path,
             socket_path: dir.join("run/absent.sock"),
             log_path: dir.join("chibipop.log"),
             compositor: Compositor::Hyprland,
@@ -2481,8 +2672,6 @@ mod tests {
             autostart: None,
             home: None,
             exe: PathBuf::from("/usr/bin/chibipop"),
-            // This session can copy, so tests exercise the OCR-to-clipboard chord.
-            // The no-protocol case sets this field to `None`.
             clipboard_rung: Some(clipboard::Rung::Wlr),
             autostart_on: false,
             fonts: vec![Cow::Borrowed("Noto Sans")],
@@ -2499,90 +2688,163 @@ mod tests {
         }
     }
 
-    /// Hyprland needs config lines even when its portal returns action names.
-    /// Direct portals must give each row its own confirmed key instead.
     #[test]
-    fn every_shortcut_uses_its_own_portal_key_or_daemon_bind() {
-        let dir = scratch("all-shortcut-rows");
+    fn repeated_apply_keeps_new_ids_and_saves_reverted_fields() {
+        let dir = scratch("repeat-profile-apply");
         let mut app = app(&dir);
-        app.form.cfg.anki.enabled = true;
-        app.form.cfg.anki.sentence_mode = SentenceMode::Static;
-        app.linux.search_key_linux = Some("SUPER+F".into());
-        app.linux.sentence_key_linux = Some("SUPER+G".into());
-        app.linux.selected_key_linux = Some("SUPER+H".into());
-        app.linux.static_region_key_linux = "ALT+R".into();
-        app.linux.ocr_clipboard_key_linux = Some("ALT+C".into());
-        app.form.cfg.trigger.mode = TriggerMode::Press;
-        let actions = [
-            (ShortcutId::Trigger, "lookup"),
-            (ShortcutId::AnkiAdd, "anki-add"),
-            (ShortcutId::Search, "search"),
-            (ShortcutId::SentenceSearch, "sentence-search"),
-            (ShortcutId::SelectedText, "selected-text"),
-            (ShortcutId::StaticRegion, "static-region"),
-            (ShortcutId::OcrClipboard, "ocr-clipboard"),
-        ];
-        app.shortcuts = Some(shortcuts::state::Published::portal(actions.iter().map(|(id, _)| {
-            shortcuts::Binding { id: *id, trigger: Some(app.shortcut_chord(*id).into()) }
-        }).collect()));
-        for (id, verb) in actions {
-            let snippet = app.shortcut_snippet(id).expect("Hyprland needs a native bind");
-            assert!(snippet.ends_with(&format!("/usr/bin/chibipop ctl {verb}")), "{snippet}");
-            assert!(!snippet.contains(", global,"), "{snippet}");
-        }
+        let profile = app.form.create_profile("Second".into(), None, &[]).unwrap();
+        let original_theme = app.form.cfg.popup.theme.clone();
+        app.form.cfg.popup.theme = if original_theme == "dark" { "light" } else { "dark" }.into();
+        let bind_id = app.form.catalog.next_bind_id();
+        let mut bind = Bind::new(bind_id.clone(), BindAction::Search);
+        bind.linux = "ALT+F9".into();
+        app.form.catalog.binds.push(bind);
+        app.apply();
+        let first = chibipop::config::load_or_create(&app.config_path).unwrap();
+        assert_ne!(original_theme, first.resolve(&profile).unwrap().popup.theme, "{}", app.status);
+        assert!(first.binds.iter().any(|bind| bind.id == bind_id));
+
+        app.form.cfg.popup.theme = original_theme.clone();
+        app.apply();
+        let second = chibipop::config::load_or_create(&app.config_path).unwrap();
+
+        assert_eq!(original_theme, second.resolve(&profile).unwrap().popup.theme, "{}", app.status);
+        assert_eq!(
+            first.profiles.iter().map(|profile| &profile.id).collect::<Vec<_>>(),
+            second.profiles.iter().map(|profile| &profile.id).collect::<Vec<_>>(),
+        );
+        assert_eq!(
+            first.binds.iter().map(|bind| &bind.id).collect::<Vec<_>>(),
+            second.binds.iter().map(|bind| &bind.id).collect::<Vec<_>>(),
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn configured_bind_edits_keep_the_windows_chord_and_use_the_bind_id() {
+        let dir = scratch("configured-bind");
+        let mut app = app(&dir);
+        app.form.catalog.binds.clear();
+        let mut bind = Bind::new("bind-42".into(), BindAction::Lookup);
+        bind.windows = "CTRL+ALT+F".into();
+        bind.linux = "ALT+F".into();
+        app.form.catalog.binds.push(bind);
+
+        let _ = update(&mut app, Message::BindLinux("bind-42".into(), "CTRL+Q".into()));
+        let bind = &app.form.catalog.binds[0];
+        assert_eq!("CTRL+ALT+F", bind.windows);
+        assert_eq!("CTRL+Q", bind.linux);
+        let _ = update(&mut app, Message::BindModePicked("bind-42".into(), TriggerMode::HoldKey));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn configured_bind_portal_status_uses_its_dynamic_id() {
+        let dir = scratch("dynamic-portal-bind");
+        let mut app = app(&dir);
+        app.form.catalog.binds.clear();
+        let mut bind = Bind::new("lookup-custom".into(), BindAction::Lookup);
+        bind.linux = "SUPER+J".into();
+        app.form.catalog.binds.push(bind);
         app.compositor = Compositor::Kde;
-        for (id, _) in actions {
-            assert_eq!(
-                HotkeyControl::Rebind { current: Some(app.shortcut_chord(id).into()) },
-                app.shortcut_control(id),
-            );
-            assert_eq!(None, app.shortcut_snippet(id));
-        }
+        app.shortcuts = Some(shortcuts::state::Published::portal(vec![
+            shortcuts::Binding {
+                id: shortcuts::ShortcutId::parse("lookup-custom").unwrap(),
+                trigger: Some("Meta+J".into()),
+            },
+        ]));
+
+        assert_eq!(
+            HotkeyControl::Rebind { current: Some("Meta+J".into()) },
+            app.bind_control(&app.form.catalog.binds[0]),
+        );
+        assert_eq!(None, app.bind_snippet("lookup-custom"));
         let _ = std::fs::remove_dir_all(&dir);
     }
-
-    /// A cleared search chord must not copy the old chord or an invented
-    /// default, even while the daemon still reports the old binding.
     #[test]
-    fn clearing_search_shortcuts_removes_copyable_binds() {
-        let dir = scratch("clear-search-binds");
+    fn profile_switch_saves_the_selected_profile_edits() {
+        let dir = scratch("profile-switch");
         let mut app = app(&dir);
-        for (kind, id) in [
-            (ShortcutKind::Dictionary, ShortcutId::Search),
-            (ShortcutKind::Sentence, ShortcutId::SentenceSearch),
-            (ShortcutKind::SelectedText, ShortcutId::SelectedText),
-        ] {
-            let _ = update(&mut app, Message::CaptureSearchKey(kind));
-            let _ = update(&mut app, Message::CapturedSearchKey(
-                iced::keyboard::Key::Character("k".into()), iced::keyboard::Modifiers::CTRL,
-            ));
-            assert!(app.shortcut_snippet(id).unwrap().contains("bind = CTRL, K, exec,"));
-            app.shortcuts = Some(shortcuts::state::Published::portal(vec![
-                shortcuts::Binding { id, trigger: Some("Ctrl+K".into()) },
-            ]));
-            let _ = update(&mut app, Message::ClearSearchKey(kind));
-            assert_eq!(None, app.shortcut_snippet(id));
-        }
+        let first_id = app.form.profile_id.clone();
+        let first_theme = if app.form.cfg.popup.theme == "dark" { "light" } else { "dark" };
+        app.form.cfg.popup.theme = first_theme.into();
+        let _ = update(&mut app, Message::CaptureW("500".into()));
+        let _ = update(&mut app, Message::CaptureH("250".into()));
+
+        app.profile_name = "Second profile".into();
+        let _ = update(&mut app, Message::ProfileCreate);
+        let second_id = app.form.profile_id.clone();
+        let second_theme = if first_theme == "dark" { "light" } else { "dark" };
+        app.form.cfg.popup.theme = second_theme.into();
+        let _ = update(&mut app, Message::CaptureW("700".into()));
+        let _ = update(&mut app, Message::CaptureH("300".into()));
+        let first_label = profile_label_for_id(&app.form.catalog, &first_id).unwrap();
+        let _ = update(&mut app, Message::ProfileSelected(first_label));
+
+        assert_eq!(first_id, app.form.profile_id);
+        assert_eq!(first_theme, app.form.cfg.popup.theme);
+        assert_eq!(second_theme, app.form.catalog.resolve(&second_id).unwrap().popup.theme);
+        assert_eq!((500, 250), (app.form.cfg.ocr.capture_width, app.form.cfg.ocr.capture_height));
+        let second = app.form.catalog.resolve(&second_id).unwrap();
+        assert_eq!((700, 300), (second.ocr.capture_width, second.ocr.capture_height));
+        every_page(&app);
         let _ = std::fs::remove_dir_all(&dir);
     }
+    #[test]
+    fn live_lookup_is_saved_in_the_shared_catalog() {
+        let dir = scratch("live-lookup");
+        let mut app = app(&dir);
+        let enabled = !app.form.catalog.live_lookup;
+
+        let _ = update(&mut app, Message::LiveLookup(enabled));
+
+        assert_eq!(enabled, app.form.catalog.live_lookup);
+        assert_eq!(enabled, saved(&app).live_lookup);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
 
     #[test]
-    fn toggle_trigger_row_offers_a_single_toggle_bind() {
-        let dir = scratch("togglebind");
+    fn derived_profile_reset_and_referenced_delete_are_visible() {
+        let dir = scratch("derived-profile");
         let mut app = app(&dir);
-        let _ = update(&mut app, Message::Mode(TriggerMode::Toggle));
+        let parent_id = app.form.profile_id.clone();
+        let parent_theme = app.form.cfg.popup.theme.clone();
+        app.profile_name = "Derived profile".into();
+        app.profile_parent = Some(parent_id.clone());
+        let _ = update(&mut app, Message::ProfileCreate);
+        let derived_id = app.form.profile_id.clone();
+        assert!(matches!(
+            &app.form.catalog.profiles.iter().find(|profile| profile.id == derived_id).unwrap().data,
+            ProfileData::Derived { .. }
+        ));
 
-        let snippet = app.shortcut_snippet(ShortcutId::Trigger).expect("the trigger has a native bind");
-        assert!(snippet.contains("ctl toggle"), "{snippet}");
-        assert!(!snippet.contains("trigger-down"), "{snippet}");
-        assert!(!snippet.contains("trigger-up"), "{snippet}");
-        let _ = update(&mut app, Message::Mode(TriggerMode::Press));
-        let snippet = app.shortcut_snippet(ShortcutId::Trigger).expect("the trigger has a native bind");
-        assert!(snippet.contains("ctl lookup"), "{snippet}");
-        assert!(!snippet.contains("trigger-down"), "{snippet}");
-        assert!(!snippet.contains("trigger-up"), "{snippet}");
+        let changed_theme = if parent_theme == "dark" { "light" } else { "dark" };
+        let _ = update(&mut app, Message::ThemePicked(changed_theme.into()));
+        assert_ne!(parent_theme, app.form.cfg.popup.theme);
+        let _ = update(&mut app, Message::ProfileReset("popup.theme".into()));
+        assert_eq!(parent_theme, app.form.cfg.popup.theme);
+
+        let _ = update(&mut app, Message::ProfileDefault);
+        let _ = update(&mut app, Message::ProfileDelete);
+        assert!(app.status.contains("Default profile"), "{}", app.status);
+        assert!(app.form.catalog.profiles.iter().any(|profile| profile.id == derived_id));
+
+        app.profile_name = "Derived renamed".into();
+        let _ = update(&mut app, Message::ProfileRename);
+        assert_eq!("Derived renamed", app.form.catalog.profiles.iter()
+            .find(|profile| profile.id == derived_id).unwrap().name);
+        app.profile_name = "Derived copy".into();
+        let _ = update(&mut app, Message::ProfileDuplicate);
+        assert!(matches!(
+            &app.form.catalog.profiles.iter().find(|profile| profile.id == app.form.profile_id).unwrap().data,
+            ProfileData::Full { .. }
+        ));
+        every_page(&app);
         let _ = std::fs::remove_dir_all(&dir);
     }
+
 
 
     #[test]
@@ -2590,14 +2852,13 @@ mod tests {
         let dir = scratch("dictionaryname");
         let mut app = app(&dir);
         app.form.cfg.anki.enabled = true;
-        let cfg = chibipop::config::Config::default();
         assert!(app.form.cfg.anki.include_dictionary_name, "the default keeps existing card output");
 
         let _ = update(&mut app, Message::IncludeDictionaryName(false));
-        assert!(!chibipop::settings::apply_to(&app.form, &cfg).anki.include_dictionary_name);
+        assert!(!saved_resolved(&app).anki.include_dictionary_name);
 
         let _ = update(&mut app, Message::IncludeDictionaryName(true));
-        assert!(chibipop::settings::apply_to(&app.form, &cfg).anki.include_dictionary_name);
+        assert!(saved_resolved(&app).anki.include_dictionary_name);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2608,14 +2869,13 @@ mod tests {
         let dir = scratch("firstdict");
         let mut app = app(&dir);
         app.form.cfg.anki.enabled = true;
-        let cfg = chibipop::config::Config::default();
         assert!(!app.form.cfg.anki.first_dict_only, "the default is every dictionary");
 
         let _ = update(&mut app, Message::FirstDictOnly(true));
-        assert!(chibipop::settings::apply_to(&app.form, &cfg).anki.first_dict_only);
+        assert!(saved_resolved(&app).anki.first_dict_only);
 
         let _ = update(&mut app, Message::FirstDictOnly(false));
-        assert!(!chibipop::settings::apply_to(&app.form, &cfg).anki.first_dict_only);
+        assert!(!saved_resolved(&app).anki.first_dict_only);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2671,7 +2931,6 @@ mod tests {
         let dir = scratch("selectioncontrols");
         let mut app = app(&dir);
         app.form.cfg.anki.enabled = true;
-        let cfg = chibipop::config::Config::default();
         let _ = update(
             &mut app,
             Message::SelectionButtonsPicked("Replace selection".to_string()),
@@ -2681,7 +2940,7 @@ mod tests {
             Message::SelectionSeparatorPicked("Separate list items".to_string()),
         );
         let _ = update(&mut app, Message::TripleClickPicked("Complete line".to_string()));
-        let out = chibipop::settings::apply_to(&app.form, &cfg);
+        let out = saved_resolved(&app);
         assert_eq!(
             chibipop::config::SelectionButtons::PrimaryReplacing,
             out.anki.selection_buttons
@@ -2701,182 +2960,65 @@ mod tests {
     fn edge_autoscroll_toggle_round_trips_into_the_config() {
         let dir = scratch("edgeautoscroll");
         let mut app = app(&dir);
-        let cfg = chibipop::config::Config::default();
         let _ = update(&mut app, Message::EdgeAutoscroll(false));
-        assert!(!chibipop::settings::apply_to(&app.form, &cfg).popup.edge_autoscroll);
+        assert!(!saved_resolved(&app).popup.edge_autoscroll);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The OCR-to-clipboard row must use its own command, not the trigger key.
     #[test]
-    fn the_ocr_clipboard_chord_offers_a_pasteable_native_bind() {
-        let dir = scratch("ocrclipbind");
+    fn clipboard_and_anki_binds_report_profile_and_session_availability() {
+        let dir = scratch("bind-availability");
         let mut app = app(&dir);
-        app.shortcuts = Some(shortcuts::state::Published::portal(vec![shortcuts::Binding { id: ShortcutId::Trigger, trigger: Some("Meta+F".into()) }]));
-
-        let _ = update(&mut app, Message::OcrClipboardKey("ALT+C".to_string()));
-        let snippet = app.shortcut_snippet(ShortcutId::OcrClipboard)
-            .expect("a typed chord has a bind");
-
-        assert_eq!("bind = ALT, C, exec, /usr/bin/chibipop ctl ocr-clipboard", snippet);
-        assert!(
-            !snippet.contains("Meta+F"),
-            "the trigger's portal key must never reach this row: {snippet}"
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// A cleared box stores an absent `Option`, not a `""` chord. The config field
-    /// keeps absence typed, so the row offers no bind.
-    #[test]
-    fn a_cleared_ocr_clipboard_chord_is_absent_rather_than_an_empty_string() {
-        let dir = scratch("ocrclipclear");
-        let mut app = app(&dir);
-
-        let _ = update(&mut app, Message::OcrClipboardKey("ALT+C".to_string()));
-        assert_eq!(Some("ALT+C".to_string()), app.linux.ocr_clipboard_key_linux);
-
-        let _ = update(&mut app, Message::OcrClipboardKey("   ".to_string()));
-        assert_eq!(None, app.linux.ocr_clipboard_key_linux, "whitespace is not a chord");
-        assert_eq!(
-            None,
-            app.shortcut_snippet(ShortcutId::OcrClipboard)
-        );
-        // The copy action does nothing, so it cannot paste an old bind.
-        let _ = update(&mut app, Message::CopyBind(ShortcutId::OcrClipboard));
-        assert_eq!(
-            None,
-            app.shortcut_snippet(ShortcutId::OcrClipboard)
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// Stock GNOME has no usable clipboard protocol. This window offers no
-    /// OCR-to-clipboard bind because such a chord would only log a refusal
-    /// (ARCHITECTURE.md#settings-and-config).
-    #[test]
-    fn a_session_with_no_clipboard_protocol_offers_no_ocr_clipboard_bind() {
-        let dir = scratch("ocrclipnoproto");
-        let mut app = app(&dir);
-        let _ = update(&mut app, Message::OcrClipboardKey("ALT+C".to_string()));
-        assert!(
-            app.shortcut_snippet(ShortcutId::OcrClipboard)
-                .is_some(),
-            "a session that can copy offers one"
-        );
+        app.form.catalog.binds.clear();
+        let mut bind = Bind::new("copy-text".into(), BindAction::OcrClipboard);
+        bind.linux = "ALT+C".into();
+        app.form.catalog.binds.push(bind);
+        assert!(matches!(
+            app.bind_control(&app.form.catalog.binds[0]),
+            HotkeyControl::Snippet { .. }
+        ));
 
         app.clipboard_rung = None;
+        assert!(matches!(
+            app.bind_control(&app.form.catalog.binds[0]),
+            HotkeyControl::Unsupported { reason } if reason.contains("session")
+        ));
+        assert_eq!("ALT+C", app.form.catalog.binds[0].linux);
 
-        assert_eq!(
-            None,
-            app.shortcut_snippet(ShortcutId::OcrClipboard)
-        );
-        // The chord remains in the form. A user who later moves to a compositor with
-        // data control keeps the value they typed.
-        assert_eq!(Some("ALT+C".to_string()), app.linux.ocr_clipboard_key_linux);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// Native bind text must use the pending chord and the running executable.
-    #[test]
-    fn the_add_card_chord_offers_a_pasteable_bind_for_the_typed_chord() {
-        let dir = scratch("addbind");
-        let mut app = app(&dir);
-        app.form.cfg.anki.enabled = true;
-
-        let _ = update(&mut app, Message::AnkiAddKey("CTRL+SHIFT+A".to_string()));
-        let snippet = app.shortcut_snippet(ShortcutId::AnkiAdd).expect("a chord has a bind");
-
-        assert_eq!("bind = CTRL SHIFT, A, exec, /usr/bin/chibipop ctl anki-add", snippet);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// A cleared chord has no bind. The row must not offer `bind = , A, …`.
-    #[test]
-    fn a_cleared_add_card_chord_offers_no_bind_at_all() {
-        let dir = scratch("addnobind");
-        let mut app = app(&dir);
-        app.form.cfg.anki.enabled = true;
-
-        let _ = update(&mut app, Message::AnkiAddKey(String::new()));
-
-        assert_eq!(HotkeyControl::NoChord, app.shortcut_control(ShortcutId::AnkiAdd));
-        assert_eq!(None, app.shortcut_snippet(ShortcutId::AnkiAdd));
-        // The copy action does nothing, so it cannot paste an old bind.
-        let _ = update(&mut app, Message::CopyBind(ShortcutId::AnkiAdd));
-        assert_eq!(None, app.shortcut_snippet(ShortcutId::AnkiAdd));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn disabled_anki_shortcut_preserves_chord_and_restores_handlers() {
-        let dir = scratch("ankishortcutgated");
-        let mut app = app(&dir);
+        app.form.catalog.binds[0].action = BindAction::AnkiAdd;
         app.form.cfg.anki.enabled = false;
-        app.linux.add_key_linux = "CTRL+SHIFT+A".into();
-
-        let _ = update(&mut app, Message::AnkiAddKey("ALT+B".into()));
-        assert_eq!("CTRL+SHIFT+A", app.linux.add_key_linux);
-        assert_eq!(HotkeyControl::NoChord, app.shortcut_control(ShortcutId::AnkiAdd));
-        assert_eq!(None, app.shortcut_snippet(ShortcutId::AnkiAdd));
-        let _ = update(&mut app, Message::CopyBind(ShortcutId::AnkiAdd));
-
-        let _ = update(&mut app, Message::AnkiEnabled(true));
-        let _ = update(&mut app, Message::AnkiAddKey("ALT+B".into()));
-        assert_eq!("ALT+B", app.linux.add_key_linux);
-        assert!(app.shortcut_snippet(ShortcutId::AnkiAdd).is_some());
-
-        let _ = update(&mut app, Message::AnkiEnabled(false));
-        let _ = update(&mut app, Message::AnkiAddKey("SUPER+C".into()));
-        assert_eq!("ALT+B", app.linux.add_key_linux);
-        assert_eq!(None, app.shortcut_snippet(ShortcutId::AnkiAdd));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-
-    /// The static-region row must use the pending chord and its daemon verb.
-    #[test]
-    fn the_static_region_chord_offers_a_pasteable_bind_for_the_typed_chord() {
-        let dir = scratch("srbind");
-        let mut app = app(&dir);
-        app.form.cfg.anki.sentence_mode = SentenceMode::Static;
-
-        let _ = update(&mut app, Message::StaticRegionKey("ALT+R".to_string()));
-        let snippet = app.shortcut_snippet(ShortcutId::StaticRegion)
-            .expect("a chord has a bind");
-
-        assert_eq!("bind = ALT, R, exec, /usr/bin/chibipop ctl static-region", snippet);
+        assert!(matches!(
+            app.bind_control(&app.form.catalog.binds[0]),
+            HotkeyControl::Unsupported { reason } if reason.contains("profile")
+        ));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
 
 
 
-    /// These rows apply the inclusion flag and folder. An empty folder uses the
-    /// default folder instead of the data directory itself. A relative `save_dir`
-    /// joins that directory, so `""` would scatter PNG files beside the database.
     #[test]
-    fn the_screenshot_rows_apply_the_gate_and_never_save_an_empty_folder() {
+    fn screenshot_folder_uses_the_profile_and_defaults_when_cleared() {
         let dir = scratch("shotrows");
         let mut app = app(&dir);
         app.form.cfg.anki.enabled = true;
-        let cfg = chibipop::config::Config::default();
 
         let _ = update(&mut app, Message::IncludeScreenshot(true));
-        assert!(chibipop::settings::apply_to(&app.form, &cfg).actions.screenshot.include_on_add);
+        assert!(saved_resolved(&app).actions.screenshot.include_on_add);
 
-        let _ = update(&mut app, Message::ScreenshotSaveDir("  /tmp/mining  ".to_string()));
-        let mut out = chibipop::settings::apply_to(&app.form, &cfg);
-        app.linux.apply_over(&mut out);
-        assert_eq!("/tmp/mining", out.actions.screenshot.save_dir, "trimmed, as typed");
+        let _ = update(&mut app, Message::ScreenshotSaveDir("  My Pictures  ".to_string()));
+        assert_eq!("  My Pictures  ", app.form.cfg.actions.screenshot.save_dir);
+        assert_eq!("  My Pictures  ", saved_resolved(&app).actions.screenshot.save_dir);
 
+        app.apply();
+        assert_eq!("My Pictures", saved_resolved(&app).actions.screenshot.save_dir);
+
+        let default_dir = chibipop::config::ResolvedConfig::default().actions.screenshot.save_dir;
         let _ = update(&mut app, Message::ScreenshotSaveDir(String::new()));
-        let mut out = chibipop::settings::apply_to(&app.form, &cfg);
-        app.linux.apply_over(&mut out);
-        assert_eq!(
-            cfg.actions.screenshot.save_dir, out.actions.screenshot.save_dir,
-            "a cleared box falls back to the shipped folder"
-        );
+        app.apply();
+        let stored = chibipop::config::load_or_create(&app.config_path).unwrap();
+        let effective = stored.resolved(Some(&app.form.profile_id)).unwrap();
+        assert_eq!(default_dir, effective.actions.screenshot.save_dir);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2918,36 +3060,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Fixed-area controls follow the pending sentence source.
-    #[test]
-    fn the_static_region_controls_follow_each_pending_sentence_mode() {
-        let dir = scratch("srrows");
-        let mut app = app(&dir);
-        app.form.cfg.anki.enabled = true;
-        app.linux.static_region_key_linux = "CTRL+R".into();
-
-        let _ = update(&mut app, Message::TabPicked(Tab::Shortcuts));
-        for mode in [
-            SentenceMode::Sentence,
-            SentenceMode::Line,
-            SentenceMode::All,
-        ] {
-            app.form.cfg.anki.sentence_mode = mode;
-            let _ = update(&mut app, Message::StaticRegionKey("ALT+R".to_string()));
-            assert_eq!("CTRL+R", app.linux.static_region_key_linux, "{mode:?}");
-            let _ = update(&mut app, Message::CopyBind(ShortcutId::StaticRegion));
-        }
-
-        app.form.cfg.anki.sentence_mode = SentenceMode::Static;
-        let _ = update(&mut app, Message::StaticRegionKey("ALT+R".to_string()));
-        assert_eq!("ALT+R", app.linux.static_region_key_linux);
-        assert_eq!(
-            Some("bind = ALT, R, exec, /usr/bin/chibipop ctl static-region"),
-            app.shortcut_snippet(ShortcutId::StaticRegion).as_deref(),
-        );
-        every_page(&app);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
 
     /// This test covers the absent screenshot map.
     /// Before this window could add a row and pick a source, `shot::plan` had no
@@ -3034,6 +3146,7 @@ mod tests {
 
         let _ = update(&mut app, Message::Apply);
         let saved = chibipop::config::load_or_create(&app.config_path).expect("Apply wrote it");
+        let saved = saved.resolved(Some(&app.form.profile_id)).unwrap();
         assert_eq!(
             shipped + 1,
             saved.anki.field_map.len(),
@@ -3071,6 +3184,7 @@ mod tests {
 
         let _ = update(&mut app, Message::Apply);
         let saved = chibipop::config::load_or_create(&app.config_path).expect("Apply wrote it");
+        let saved = saved.resolved(Some(&app.form.profile_id)).unwrap();
         assert!(saved.anki.field_map.is_empty(), "the user removed every row; the file says so");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -3477,7 +3591,7 @@ mod tests {
         assert_eq!(vec![("FixturePitch".to_string(), true)], checked(&app, Role::Pitch));
         assert!(listed(&app, Role::Terms).is_empty(), "a pitch archive defines nothing");
         assert!(listed(&app, Role::Frequency).is_empty());
-        assert_eq!(vec!["FixturePitch".to_string()], saved(&app).dictionaries.pitch);
+        assert_eq!(vec!["FixturePitch".to_string()], saved_resolved(&app).dictionaries.pitch);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -3917,8 +4031,7 @@ mod tests {
             checked(&app, Role::Terms),
         );
         let cfg = saved(&app);
-        assert_eq!(vec!["Jitendex".to_string()], cfg.dictionaries.terms);
-        assert!(cfg.dictionaries.terms_disabled.is_empty(), "a listed file is not a Dictionary");
+        assert_eq!(vec!["Jitendex".to_string()], cfg.resolve(&app.form.profile_id).unwrap().dictionaries.terms.enabled);
         every_page(&app);
 
         let _ = update(&mut app, Message::DictSelected(Role::Terms, "broken.zip".to_string()));
@@ -4023,6 +4136,7 @@ mod tests {
         app.form.frequency = rows(&["JPDB"]);
         app.form.pitch = rows(&["NHK", "Kanjium"]);
         let opened = saved(&app);
+        let opened_resolved = opened.resolved(Some(&app.form.profile_id)).unwrap();
 
         let _ = update(&mut app, Message::DictSelected(Role::Terms, "大辞林".to_string()));
         let _ = update(&mut app, Message::DictUp(Role::Terms));
@@ -4031,9 +4145,9 @@ mod tests {
         let _ = update(&mut app, Message::DictUp(Role::Pitch));
         let _ = update(&mut app, Message::DictEnabled(Role::Pitch, "NHK".into(), false));
 
-        let after = saved(&app);
-        assert_ne!(opened.dictionaries.terms, after.dictionaries.terms, "the edits landed");
-        assert_ne!(opened.dictionaries.pitch, after.dictionaries.pitch);
+        let after = saved_resolved(&app);
+        assert_ne!(opened_resolved.dictionaries.terms, after.dictionaries.terms, "the edits landed");
+        assert_ne!(opened_resolved.dictionaries.pitch, after.dictionaries.pitch);
         assert_eq!(DictionaryWork::None, work(&opened, &app));
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -4044,14 +4158,10 @@ mod tests {
     fn an_unchecked_terms_row_never_reaches_the_lookup_pipeline() {
         let dir = scratch("unchecked_terms");
         let mut app = app(&dir);
-        let installed = vec![
-            chibipop::present::DictInfo { dict_id: 1, name: "Jitendex".to_string() },
-            chibipop::present::DictInfo { dict_id: 2, name: "Daijirin".to_string() },
-        ];
         app.form.terms = rows(&["Jitendex", "Daijirin"]);
 
         let _ = update(&mut app, Message::DictEnabled(Role::Terms, "Daijirin".into(), false));
-        let present = saved(&app).present_config(&installed);
+        let present = saved_resolved(&app).present_config();
 
         assert_eq!(vec!["Jitendex".to_string()], present.terms);
         assert!(chibipop::present::keeps_dict("Jitendex", &present.terms));
@@ -4142,12 +4252,13 @@ mod tests {
     }
 
     fn init_at(config_home: &std::path::Path) -> Init {
+        let config_path = config_home.join("chibipop/chibipop.toml");
         let cfg = chibipop::config::Config::default();
         let env = Env { xdg_config_home: Some(config_home.to_path_buf()), ..Env::default() };
         Init {
             form: chibipop::settings::from_config(&cfg, &[]),
             linux: LinuxFields::from_config(&cfg),
-            config_path: config_home.join("chibipop/chibipop.toml"),
+            config_path,
             socket_path: config_home.join("sock"),
             log_path: config_home.join("log"),
             compositor: Compositor::Hyprland,
@@ -4232,20 +4343,5 @@ mod tests {
         assert!(!app.checking_update, "a finished check reopens the button");
         assert_eq!("v9.9.9 is available.", app.status);
         let _ = std::fs::remove_dir_all(&dir);
-    }
-}
-
-#[cfg(test)]
-mod search_key_tests {
-    use super::*;
-    use iced::keyboard::{key::Named, Key, Modifiers};
-
-    #[test]
-    fn capture_ignores_modifiers_and_converts_native_keys_to_portal_chords() {
-        assert_eq!(captured_search_chord(&Key::Named(Named::Shift), Modifiers::SHIFT), None);
-        assert_eq!(captured_search_chord(&Key::Named(Named::F6), Modifiers::CTRL | Modifiers::SHIFT),
-            Some("CTRL+SHIFT+F6".into()));
-        assert_eq!(captured_search_chord(&Key::Character("f".into()), Modifiers::LOGO), Some("SUPER+F".into()));
-        assert_eq!(captured_search_chord(&Key::Character("猫".into()), Modifiers::CTRL), None);
     }
 }

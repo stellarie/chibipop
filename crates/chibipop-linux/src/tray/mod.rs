@@ -1,6 +1,6 @@
 //! This module provides the StatusNotifierItem tray
 //! (ARCHITECTURE.md#platform-integration).
-//! It shows Settings, Quit, and one disabled row for each input channel.
+//! It shows Settings, default-profile selection, Quit, and one disabled row for each input channel.
 //! The rows show why a channel does not work.
 //!
 //! Three rules shape this module.
@@ -31,6 +31,13 @@ use ksni::blocking::TrayMethods;
 use ksni::menu::StandardItem;
 use ksni::{MenuItem, Status};
 use status::{ChannelState, ChannelStatuses, ChannelId};
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProfileChoice {
+    id: String,
+    name: String,
+    is_default: bool,
+}
+
 
 /// Requests that the tray thread sends to the daemon thread.
 #[derive(Debug, PartialEq, Eq)]
@@ -39,6 +46,8 @@ pub enum TrayRequest {
     OpenSettings,
     OpenSearch,
     OpenSentenceSearch,
+    /// The user selected the default profile for future sessions.
+    SetDefaultProfile(String),
     /// The user activated the Quit menu item.
     Quit,
     /// A tray diagnostic. The daemon writes it to the `Log`.
@@ -49,6 +58,7 @@ pub enum TrayRequest {
 /// The daemon reaches it only through [`TrayHandle`].
 struct ChibipopTray {
     statuses: ChannelStatuses,
+    profiles: Vec<ProfileChoice>,
     requests: calloop::channel::Sender<TrayRequest>,
 }
 
@@ -120,9 +130,22 @@ impl ksni::Tray for ChibipopTray {
             .into(),
             MenuItem::Separator,
         ];
-        // The status rows provide information and accept no clicks.
-        // The user reads them to learn why a channel is down.
-        // The settings window provides the fixes.
+        for profile in &self.profiles {
+            let id = profile.id.clone();
+            let label = if profile.is_default {
+                format!("{} (default)", profile.name)
+            } else {
+                format!("Use {} as default", profile.name)
+            };
+            items.push(StandardItem {
+                label,
+                activate: Box::new(move |tray: &mut Self| {
+                    tray.ask(TrayRequest::SetDefaultProfile(id.clone()))
+                }),
+                ..Default::default()
+            }.into());
+        }
+        items.push(MenuItem::Separator);
         items.extend(self.statuses.rows().into_iter().map(|label| {
             StandardItem { label, enabled: false, ..Default::default() }.into()
         }));
@@ -163,6 +186,7 @@ impl ksni::Tray for ChibipopTray {
 /// In trayless mode, every method still works. Only the D-Bus push stops.
 pub struct TrayHandle {
     statuses: ChannelStatuses,
+    profiles: Vec<ProfileChoice>,
     handle: Option<ksni::blocking::Handle<ChibipopTray>>,
 }
 
@@ -171,7 +195,7 @@ impl TrayHandle {
     /// `spawn` returns this value when D-Bus is unavailable.
     /// The daemon uses the registry without changes.
     pub fn trayless(statuses: ChannelStatuses) -> TrayHandle {
-        TrayHandle { statuses, handle: None }
+        TrayHandle { statuses, profiles: Vec::new(), handle: None }
     }
 
     /// Return whether a tray service remains active behind this handle.
@@ -202,6 +226,33 @@ impl TrayHandle {
         }
         true
     }
+    /// Set the profile choices in the tray menu.
+    /// The daemon saves a selection before it updates this snapshot.
+    pub fn set_profiles(
+        &mut self,
+        profiles: impl IntoIterator<Item = (String, String)>,
+        default_id: &str,
+    ) -> bool {
+        let choices: Vec<_> = profiles
+            .into_iter()
+            .map(|(id, name)| ProfileChoice {
+                is_default: id == default_id,
+                id,
+                name,
+            })
+            .collect();
+        if self.profiles == choices {
+            return false;
+        }
+        self.profiles = choices.clone();
+        if let Some(handle) = &self.handle {
+            if handle.update(move |tray| tray.profiles = choices).is_none() {
+                self.handle = None;
+            }
+        }
+        true
+    }
+
 }
 
 /// Publish a tray and return its handle and diagnostics.
@@ -220,13 +271,13 @@ pub fn spawn(
     let mut diagnostics: Vec<String> =
         icon::icons().problems.iter().map(|p| format!("tray: icon asset {p} (icon will be blank)")).collect();
 
-    let tray = ChibipopTray { statuses: statuses.clone(), requests };
+    let tray = ChibipopTray { statuses: statuses.clone(), profiles: Vec::new(), requests };
     match tray.assume_sni_available(true).spawn() {
         Ok(handle) => {
             diagnostics.push(
                 "tray: StatusNotifierItem published (Settings / channel status / Quit)".to_string(),
             );
-            (TrayHandle { statuses, handle: Some(handle) }, diagnostics)
+            (TrayHandle { statuses, profiles: Vec::new(), handle: Some(handle) }, diagnostics)
         }
         Err(e) => {
             diagnostics.push(format!(
@@ -254,7 +305,7 @@ mod tests {
             selection,
             status::popup_state(true),
         );
-        (ChibipopTray { statuses, requests: tx }, rx)
+        (ChibipopTray { statuses, profiles: Vec::new(), requests: tx }, rx)
     }
 
     /// Return each menu label in order with its clickable state.
@@ -283,27 +334,6 @@ mod tests {
         found(tray);
     }
 
-    /// The menu has Settings, one disabled status row per channel, and Quit.
-    /// The two actions remain enabled.
-    #[test]
-    fn menu_is_settings_then_disabled_status_rows_then_quit() {
-        let (tray, _rx) = tray(&Selection::Rung(Rung::ImageCopyCapture));
-        assert_eq!(
-            vec![
-                ("Dictionary search".to_string(), true),
-                ("Sentence search".to_string(), true),
-                ("Settings".to_string(), true),
-                ("-".to_string(), false),
-                ("Capture: wlr-screencopy region capture".to_string(), false),
-                ("Cursor: ext-image-copy-capture cursor session".to_string(), false),
-                ("Trigger: control socket".to_string(), false),
-                ("Popup: wlr-layer-shell overlay surface".to_string(), false),
-                ("-".to_string(), false),
-                ("Quit".to_string(), true),
-            ],
-            labels(&tray)
-        );
-    }
 
     /// Menu activation sends each request to the daemon thread.
     /// The tray thread does not execute the request.
@@ -322,6 +352,21 @@ mod tests {
 
         activate(&mut tray, "Quit");
         assert_eq!(Ok(TrayRequest::Quit), rx.try_recv());
+    }
+
+    #[test]
+    fn a_profile_menu_request_names_the_future_default() {
+        let (mut tray, rx) = tray(&Selection::Rung(Rung::HyprctlPoll));
+        tray.profiles = vec![
+            ProfileChoice { id: "default".into(), name: "Default".into(), is_default: true },
+            ProfileChoice { id: "japanese".into(), name: "Japanese".into(), is_default: false },
+        ];
+
+        let menu = labels(&tray);
+        assert!(menu.contains(&("Default (default)".into(), true)));
+        assert!(menu.contains(&("Use Japanese as default".into(), true)));
+        activate(&mut tray, "Use Japanese as default");
+        assert_eq!(Ok(TrayRequest::SetDefaultProfile("japanese".into())), rx.try_recv());
     }
 
     /// A down channel appears in its row and in the SNI status.

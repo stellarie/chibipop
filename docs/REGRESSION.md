@@ -29,9 +29,13 @@ This runner's Tier 0 commands target Windows. Use `scripts/linux_container_regre
 
 ## Recent feature case index
 
-Cases 1.31-1.42 cover the newer search, hover, clipboard, furigana, sentence-field, audit-isolation, and cache-invalidation behavior.
-Cases 1.30.11-1.30.16 cover screenshot modes and saved targets. Existing settings, plugin, and live-log cases retain their identifiers.
-Record the exact feature-bearing revision. Chinese sentence segmentation and search resize repaint require their implementation in the tested build.
+Cases 1.31-1.43 cover Search, hover, clipboard, furigana, sentence-field,
+audit-isolation, cache invalidation, and profile catalog behavior.
+Cases 1.30.11-1.30.16 cover screenshot modes and saved targets.
+Existing settings, plugin, and live-log cases retain their identifiers.
+Record the exact feature-bearing revision.
+Chinese sentence segmentation and Search resize repaint require their
+implementation in the tested build.
 A feature branch may be tested before merge; a missing feature in an older build is not a successful regression result.
 
 No new case is pre-marked as passed. The following commands are optional native regressions and do not replace visible acceptance:
@@ -818,8 +822,8 @@ example, with real numbers:
 - 宿 at `x=2730 y=257 w=26 h=27`, 舎 at `x=2758 y=257 w=26 h=27`, top hit 宿舎 `match=2`
 - → `match: x=2727 y=254 w=60 h=33`
 
-**Predict the rect from the word boxes before running it.** A highlight that merely looks plausible
-is the failure this catches.
+**Predict the rect from the word boxes before running it.** Test horizontal and vertical wrapped text,
+including thin glyphs. A highlight that merely looks plausible is the failure this catches.
 
 > [!success] 1.2 regressed 2026-08-04, fixed 2026-08-17 — read before you touch geom
 > **Passing, to the pixel.** 宿舎 gives `x=176 y=123 w=56 h=30`, which is what the word boxes
@@ -1102,7 +1106,7 @@ off, press Apply, and repeat: the popup must now hold on 経験.
   still work. That is the property the split freeze/reach rects exist to preserve.
 - In hold-key mode the setting is inert **and the checkbox greys out**, by design. Change lookup mode
   to `While held` on Shortcuts and watch the checkbox disable on Text recognition; the grey-out uses the
-  same predicate as the back end, so a legacy `HoldShift` config greys correctly too.
+  same predicate as the back end, so a legacy `HoldShift` config keeps the `Shift` trigger.
 - **The PID must not change** across either Apply. This setting is consumed on the pump thread in
   the `WM_TIMER` freeze check, and it applies to an **already-visible** popup the moment Apply
   lands — you do not need a fresh lookup to see it take effect.
@@ -1232,19 +1236,15 @@ limit 3: the fallback fixes "does nothing", not "says nothing".
 - **This is a third message, and it is not either of 1.15's.** `installed; starting with` is the
   startup substitution; the two lines in 1.15's table are reload-path only. Confusing them means
   reporting on a path you did not test.
-- **Settings will show the tag you configured, not the one that is running** — the dropdown reads
+- **Settings shows the tag you configured, not the tag that runs** — the dropdown reads
   `ko (not installed)` while OCR runs `ja`. `from_config` seeds it from `cfg.ocr.language`
-  (`src/settings.rs:302`) and the substitution is a local in the worker thread that never writes
-  the config back. Expected, not a failure.
-- **A per-language dictionary list is not applied while the pack is missing** — the list belongs to
-  the tag you configured, and the tag that is *running* is the fallback, so lookups search every
-  dictionary by `display_order` instead. Deliberate as of 2026-08-12: filtering the fallback's
-  Japanese hits through a list written for the missing language returns an **empty popup with no
-  error at all**, which is worse than an unfiltered one. The main thread makes the same
-  `startup_language` + `recogniser_available` call the worker does (`configured_recogniser_runs`,
-  `src/app.rs:2379`), so the two cannot disagree about whether the pack is there. If the entry is
-  for a language you can see results in, add it to `[dictionaries.per_language]` and confirm every
-  dictionary still answers.
+  (`src/settings.rs:302`) and the worker keeps the fallback local. The saved profile stays unchanged.
+  The active fallback searches every enabled terms Dictionary in that profile.
+  Filtering the fallback's Japanese hits through a list for the missing language returns an **empty
+  popup with no error**, which is worse than an unfiltered lookup. The main thread makes the same
+  `startup_language` + `recogniser_available` call as the worker (`src/app.rs:2379`).
+  If the tag runs, add its list to the selected profile's
+  `[profiles.settings.dictionaries.per_language]` map and confirm every Dictionary answers.
 - **Not covered by this step:** a language that *is* listed but whose engine will not build. That
   still aborts startup exactly as before, and cannot be fixed without splitting
   `init_dpi_awareness` out of `OcrTextSource::new` — BACKLOG 13, limit 2.
@@ -1265,24 +1265,21 @@ boundary. The single list split by a `──── not searched ────` ro
 `Include / exclude` button — **four** buttons only. Every step below is written against that
 shape; a divider row appearing anywhere is a failure, not a stale checklist.
 
-Set the first language's list to one dictionary and the second language's to the other, then switch
-**Text language** and press Apply.
+Select a profile with two language lists. Set one language to one Dictionary
+and the other language to another Dictionary, then switch **Text language**.
+Press Apply after each profile edit.
 
-- The **PID is unchanged** (`Get-Process chibipop`) — that is the test of "no restart", not a proxy.
-- The Dictionaries tab re-scopes **as soon as the language dropdown changes**, before Apply: both
-  boxes refill, the new language's list in *Searched* and the rest in *Not searched*. The caption
-  above the top box reads `Searched — for the selected OCR language`; the one above the bottom box
-  reads `Not searched`.
-- Hovering the same word is answered by a **different dictionary set**. That is the acceptance; the
-  tab agreeing with itself is not, and neither is the unchanged PID alone.
-- Edit one language's list, switch language, switch back **without pressing Apply**: the edit is
-  still there. Losing it is the failure this design exists to prevent.
-- A language with **no** list still searches everything, exactly as v0.7.0 did.
-- After Apply, `chibipop.toml` shows `[dictionaries.per_language]` with an entry per visited
-  language. Each name is stored cut at its first `[` or `(`, so `Jitendex.org [2026-07-09]` must
-  appear as `Jitendex.org`. **A surviving date stamp means the keying regressed**, and the entry
-  will quietly stop matching the next time that dictionary is rebuilt. A title that contains no
-  bracket (`大辞林　第四版`, `中日大辞典`) is stored whole and is **correct** — do not file it.
+- The **PID is unchanged** (`Get-Process chibipop`) across Apply.
+- The Dictionaries tab shows the selected profile's list before Apply.
+- Hovering the same word uses a **different Dictionary set** after the language change.
+- Edit one language list, switch language, then switch back before Apply.
+  The edit remains in the selected profile.
+- A missing language list searches every enabled terms Dictionary in that profile.
+- An explicit empty list searches no Dictionary.
+- After Apply, inspect
+  `[profiles.settings.dictionaries.per_language]` under the selected profile.
+  Each key uses the exact OCR language tag.
+  Each list stores exact Dictionary names.
 
 **Five checks that each cost a fix round, or a redesign. If time is short, run these.**
 
@@ -1904,8 +1901,9 @@ exists.
    as any pre-plugin build.
 6. No `[meikiocr-adapter]` line appears anywhere in stderr. The built-in engine
    is still selected, so discovery has not spawned the adapter process.
-7. The first-run TOML keeps an empty `enabled` list. Applying the unchecked
-   plugin row after checking it saves its name; reopening settings reads the saved list.
+7. Before enabling, the first-run TOML keeps an empty `enabled` list. Check
+   **Enable** beside meikiocr and click **Apply**. Reopen settings and confirm
+   the checkbox stays checked. Discovery alone must not change the saved list.
 
 **Pass** when all seven hold with `plugins/meikiocr` discovered on disk: the
 provider is visible in the dropdown, its checkbox is unchecked, the built-in
@@ -1938,8 +1936,9 @@ the fixture's own label calls it the same line and size as `ocr-corpus.html`'s J
    startup line reads `chibipop: OCR engine: windows-ocr`.
 2. **meikiocr.** Set `engine = "meikiocr"` under `[ocr]`. Apply. Open page 01, hover the same spot
    on `m26`, record the resolved word. Confirm the stderr startup line reads
-   `chibipop: OCR engine: meikiocr` (`PluginText::name()` returns the manifest's own `name`,
-   `src/plugin/text.rs:98,149-151`). Confirm adapter lines appear on stderr: the adapter process
+   `chibipop: OCR engine: meikiocr`. Leave an alternate OCR session idle and require its backend
+   to stay meikiocr. `PluginText::name()` returns the manifest's own `name`
+   (`src/plugin/text.rs:98,149-151`). Confirm adapter lines appear on stderr: the adapter process
    prints them itself (`adapter.py`'s `log()`, `:90-92`) and chibipop's stderr reader relays every
    line unconditionally (`src/plugin/host.rs:206-217`) — the `show_adapter_log` debug checkbox only
    echoes a status string inside the Settings window (`src/app.rs:1537-1539`); it does not gate this
@@ -1991,6 +1990,8 @@ saved targets, configuration, and scratch screenshots afterward.
    window. Confirm the image excludes hidden or occluded content.
 3. Press **Esc** during selection. Windows also supports right-click. The card
    must save without an image, and the popup must return.
+4. While the region selector is active, release an active Hold key. Require the
+   selector to finish without reopening lookup.
 
 #### 1.30b Fixed target persistence
 
@@ -2005,7 +2006,8 @@ saved targets, configuration, and scratch screenshots afterward.
 #### 1.30c Reset, migration, and failure behavior
 
 1. Confirm Settings shows the mode, target summaries, and reset control. Apply
-   the reset, then require a new target on the next fixed-mode add.
+   the reset, then require a new target on the next fixed-mode add. Conditional
+   static-overlay Reset buttons must hide with their entry.
 2. Disable **Attach a screenshot to cards**. Add a card without a selector,
    PNG, or image field.
 3. Load a config with retired screenshot hotkey keys. Save it and confirm the
@@ -2022,9 +2024,11 @@ Run it only with `--allow-anki-write`. Do not keep the target note open in
 Anki Browser during the update.
 
 1. Create one note and record its note ID, card IDs, tags, scheduling, deck,
-   mapped fields, and one unmapped field.
+   mapped fields, and one unmapped field. Use a literal deck named `current`
+   and a filtered deck.
 2. Enable **Update cards already in this deck** and Apply. Mine the same
-   expression with changed mapped content.
+   expression with changed mapped content. Test note types whose first field has
+   reserved names such as `Note`, `Deck`, `Card`, `Tag`, and `Is`.
 3. Require the same note ID and card IDs. Require changed mapped fields and
    the unchanged unmapped field, tags, scheduling, and deck placement.
 4. Repeat with a new screenshot. Require one new image tag in the mapped
@@ -2034,9 +2038,8 @@ Anki Browser during the update.
 6. Disable the setting and repeat the duplicate write. Require normal Anki
    duplicate rejection and no mutation.
 
-**Pass** requires one verified update, one safe ambiguous failure, unchanged
-default-off behavior, and the screenshot path. Record note IDs and AnkiConnect
-request logs without recording private screen text.
+**Pass** requires one verified update in a literal or filtered deck, one safe
+ambiguous failure, unchanged default-off behavior, and the screenshot path.
 
 #### 1.30e Deck-scoped duplicates and live re-check
 
@@ -2069,9 +2072,9 @@ The following registered cases cover the saved-target behavior independently:
 | 1.30.12 | Fixed region restart | Save a region, restart, and add without selecting again. Require the saved physical rectangle. |
 | 1.30.13 | Fixed window current bounds | Save a window, restart, move or resize it, and add using current visible bounds. |
 | 1.30.14 | Invalid window identity | Close the saved window or create an ambiguous identity. Refuse a different target. |
-| 1.30.15 | Reset targets | Reset and Apply. Clear summaries, require a new fixed-mode target, and preserve unrelated settings. |
+| 1.30.15 | Reset targets | Reset and Apply. Clear summaries, hide conditional static-overlay Reset buttons with their entry, require a new fixed-mode target, and preserve unrelated settings. |
 | 1.30.16 | Optional screenshot cancellation | Cancel include-on-add capture and save the requested card without an image. |
-| 1.30.17 | Verified duplicate overwrite | Enable overwrite, update one exact note, reject ambiguous matches, and confirm default-off duplicate rejection. |
+| 1.30.17 | Verified duplicate overwrite | Enable overwrite. Update one exact note in a literal `current` deck and a filtered deck. Test reserved first field names. Reject ambiguous matches and confirm default-off duplicate rejection. |
 
 ---
 
@@ -2142,8 +2145,8 @@ Linux OCR popups still lack CSS support; that separate gap must not fail the imp
 | 1.34 | Built-in search themes | Windows/Linux: compare dark and light search windows and definitions. Inputs, centered button labels, and candidate cards need clear boundaries. Candidate words are bold, summaries italic, and sentence text larger. Restore theme state. |
 | 1.34.1 | Search CSS and live definition sizing | Windows/Linux: apply the CSS sample in this section with a definition open. Verify colors, font roles, borders, padding, and opacity. Windows Save & Apply updates search; Linux updates on the next lookup. Larger fonts must reflow definitions. Restore CSS. |
 | 1.34.2 | Search close reopen and launch identity | Windows/Linux: repeat a daemon tray or settings launch, close search, and reopen it. Keep the daemon alive and avoid duplicate empty sessions for that route. Explicit prefilled CLI sessions may be independent. |
-| 1.34.3 | Dictionary selection refreshes search | Windows/Linux: disable a known dictionary, Apply, and repeat the lookup. Its candidates must disappear. Restore it and require the candidates to return without stale definitions. |
-| 1.34.4 | Search display scaling | Windows/Linux where supported: inspect search and definitions at 100%, 125%, and 150% scaling. Keep labels, hit targets, borders, and highlighted words aligned. Change scaling only when authorized; restore the original scale. |
+| 1.34.3 | Dictionary selection applies to new Search sessions | Windows/Linux: disable a known dictionary and Apply. Close the current Search, open a new Search session, and repeat the lookup. Its candidates must disappear. Restore the dictionary, Apply, and use another new Search session to require the candidates to return. |
+| 1.34.4 | Search display scaling | Windows/Linux where supported: inspect Search and definitions at 100%, 125%, 150%, and 200% scaling. Keep labels, hit targets, borders, and highlighted words aligned. Change scaling only when authorized; restore the original scale. |
 | 1.34.5 | Windows search input caret and spacing | Windows: focus both search inputs and type. Require a visible insertion caret and an I-beam over editable text. Keep the upper border below the title and label, with enough input height for readable text. |
 
 **Evidence and cleanup.** Record observed results per ID, screenshots or logs, and the tested build. Restore case-specific changes.
@@ -2156,9 +2159,9 @@ Linux OCR popups still lack CSS support; that separate gap must not fail the imp
 | ID | Case | Steps and expected result |
 |---|---|---|
 | 1.35 | Hover creates dictionary children | Windows/Linux: open an OCR popup, then hover Japanese text in its definition and in the resulting child. Open dictionary children while retaining their parents. |
-| 1.35.1 | Hover navigation preserves parent state | Windows/Linux: scroll and select text in a parent, enter a child, then return with Back or Escape. Preserve parent state, retire descendants, and prevent late replies from reviving them. |
+| 1.35.1 | Hover navigation preserves parent state | Windows/Linux: scroll and select text in a parent, enter a child, and return with Back or Escape. Preserve click history and parent state. Retire descendants on reentry, even after a miss. Expansion must invalidate late replies. Expire deferred plain-click clears. |
 | 1.35.2 | Ruby lookup and sub-popup toggle | Windows/Linux: in Press mode, hover a ruby-backed 食べる definition. Require the complete word and no new OCR stage for child lookup. Disable sub-popups and repeat; retain the root with no child. Restore configuration. |
-| 1.35.3 | Hover edges scrolling and hit regions | Windows/Linux: repeat near screen edges, across whitespace, while scrolling, and during text selection. Keep children reachable and hit regions aligned. Dismiss the root; invisible windows must not capture input. |
+| 1.35.3 | Hover edges scrolling and hit regions | Windows/Linux: repeat near screen edges, across whitespace, while scrolling, and during text selection. Shift hover targets and painted text must match. Keep long paragraphs responsive. |
 | 1.35.4 | Hover modes and bounded depth | Windows/Linux: repeat in Follow pointer, While held, Turn on / off, and Once per press modes. With a linked fixture, enforce current hover bounds: 17 normal popup levels, 16 Windows search definitions, and 8 Linux search definitions. Navigation must remain responsive. Restore mode. |
 
 **Evidence and cleanup.** Record observed results per ID, screenshots or logs, and the tested build. Restore case-specific changes.
@@ -2253,13 +2256,39 @@ Keep a Search window open beside the popup. Record the database, library, config
 
 | ID | Case | Steps and expected result |
 |---|---|---|
-| 1.42 | Clear running-daemon lookup caches | Warm a popup lookup, a dictionary Search result, and a definition window. Record SHA-256 hashes for the database, library archives, `chibipop.toml`, `.roles-v1.json`, and logs. Open **Settings > Debug > Clear lookup cache**. Confirm the exact scope text. The popup closes, the Search result and definitions clear, and status shows `Clearing lookup cache...` followed by success. The next popup lookup recaptures text and rereads dictionary data. |
+| 1.42 | Clear running-daemon lookup caches | Warm a popup lookup, a dictionary Search result, and a definition window. Record hashes. Open **Settings > Debug > Clear lookup cache**. Confirm the popup closes, Search results and definitions clear, and status reports success. The next popup lookup recaptures text and rereads dictionary data. |
 | 1.42.1 | Preserve authoritative files | Compare the recorded hashes after completion. The database, library, settings, role cache, and logs must remain byte-identical. No rebuild, archive scan, or Apply operation starts. |
 | 1.42.2 | Media warning remains truthful | Make dictionary media unavailable only in a disposable fixture, repeat the action, and verify the status names the reopen warning. Images use alt text, and stale decoded pixels do not appear. |
 | 1.42.3 | Search future-query behavior | Submit a new query after the clear. It must use a fresh SearchService and return current dictionary data. The action does not modify Linux maintenance transport or separate Search processes. |
 
 **Evidence and cleanup.** Record status text, screenshots, hashes, tested revision, and executable hash per ID.
 Restore only disposable fixture changes.
+
+---
+
+<a id="case-1-43"></a>
+### 1.43 Profile catalog and Bind behavior
+
+**Prerequisites.** Use a disposable configuration with two imported Dictionaries.
+Use the [profile catalog example](REFERENCE.md#configuration-file) as the configuration template.
+Replace its Dictionary names with the installed Dictionary names.
+Use a word that both Dictionaries contain.
+
+Run the profile cases on each platform.
+Use configured hotkeys on Windows.
+Use configured hotkeys or `chibipop ctl` on Linux.
+
+| ID | Case | Steps and expected result |
+|---|---|---|
+| 1.43 | Full and Derived profiles | Start with `bilingual` as the default Full profile and `monolingual` as a Derived profile. Confirm stable IDs, the parent ID, and the separate display names. Change `popup.theme` in the parent. The Derived `popup.theme` override must remain. |
+| 1.43.1 | Independent role lists and empty lists | Set the Derived terms list to `enabled = ["Monolingual"]` and `disabled = ["Bilingual"]`. Set its pitch `enabled` and `disabled` arrays to empty. The terms lookup must use only Monolingual. The pitch lookup must use no Dictionary. A missing role override must inherit the parent result. Conditional static-overlay Reset buttons must hide with the entry. |
+| 1.43.2 | Bind IDs and profile ownership | Activate the Bilingual and Monolingual lookup Binds with `chibipop ctl bind-down <id>`. Require each popup to use its Bind profile. Test Hold with matching `bind-up`. Test Toggle with two activations. Reject an unknown or disabled ID. A new lookup Bind must replace the active chain, pause Live lookup, and ignore the displaced release. |
+| 1.43.3 | Nested routing and Back | Set `nested_profile` and open same-word links in the same profile and a cross-profile child. Suppress only same-word, same-profile children. Press Back and require click history, parent content, scroll, and selections. Retire descendants on reentry, even after a miss. |
+| 1.43.4 | Search identity and retained settings | Open Search with the Bilingual and Monolingual Search Binds. Keep both windows open. Reuse each mode and Profile ID with its original settings. Confirm different Profile IDs remain separate. Apply new settings and require existing sessions to keep their catalogs while new sessions use the saved catalog. Select the default profile from the tray twice, including when disk already matches. |
+| 1.43.5 | Import, deletion, and migration | Stage an import while a profile is selected. Switch profiles and require the unchecked import to stay unchecked. Cancel the import and require independent Derived overrides to remain. Enable detected roles in the selected profile and add the Dictionary disabled to other explicit lists. Block deletion while the profile is the default, a Bind target, a nested choice, or a Derived parent. Load a legacy global-key TOML and confirm one default Full profile plus configured Bind records. Restore disposable changes. |
+
+**Evidence and cleanup.** Record the profile IDs, Bind IDs, config path,
+screenshots, logs, and tested revision. Restore only disposable changes.
 
 ---
 
@@ -2284,8 +2313,9 @@ Restore only disposable fixture changes.
    character.
 7. **Overflowing entry** → thin scrollbar at the right edge; wheel scrolls it end to end and the
    thumb ends flush.
-8. **Hover a word, do not move, wheel** → **the page underneath scrolls.** *(This is the D7 defect:
-   arming on the whole sticky region would freeze the page whenever you hovered while reading.)*
+8. **Hover a word, do not move, and wheel** → **the page underneath scrolls.** Send partial
+   wheel deltas and require them to accumulate. *(This is the D7 defect: arming on the whole
+   sticky region would freeze the page whenever you hovered while reading.)*
 9. **Tray menu open + wheel** → wheel still works. *(D9: `TrackPopupMenuEx` pumps its own loop and
    discards `WM_TIMER`, so the arm cannot be recomputed while it is open.)*
 10. **Quit chibipop, then wheel** → still works. The one failure that would outlive the app.
@@ -2434,7 +2464,7 @@ Each of these has bitten at least once. They are cheap to check and expensive to
 | **First `ShowWindow` obeys `STARTUPINFO`, not you** | A window created and sized but `WS_VISIBLE` never set. Launch-hidden makes Settings do nothing. Show via `SetWindowPos(SWP_SHOWWINDOW)`. |
 | **`&` in a button caption is an accelerator** | "Apply & Restart" renders "Apply ‗Restart". Double it. |
 | **Nested message pumps eat `WM_TIMER`** | `TrackPopupMenuEx`, `MessageBoxW`, `DialogBoxParamW`, caption drag. The wheel arm latches. Disarm before any of them. |
-| **`display_order` holds substrings, not names** | Order works today, silently stops after the next dictionary rebuild. Never write live names back. |
+| **A role list is not a shared list** | Terms, pitch, and per-language lists belong to one profile. A Derived override replaces the complete role list. An empty list means no Dictionary. |
 | **A task that adds a field must be the task that reads it** | `field never read` is a dead-code error, and the gate asserts an exact count — one extra breaks it. (Caught once as a 6th error against the 5-error gate of the day; the gate is 3 now, the trap is unchanged.) |
 | **Ghost tray icons** | A force-killed instance leaves a corpse; right-clicking it does nothing. Sweep the cursor over the tray to reap them. |
 | **Windows will not rename onto an open file** | A rebuild that ends in `Access is denied (os error 5)`. SQLite opens without `FILE_SHARE_DELETE`, so a `build-dict` cannot have its output renamed over a database another process is holding. **This is why v0.8.0 stopped renaming.** Dictionary changes now edit the live database through a second read-write connection in WAL mode; nothing is staged and nothing is renamed, so the trap is not on that path at all. It is still live for the two paths that do build a whole file: `chibipop build-dict` from a terminal, and `chibipop settings` (§1.20) — both fail at the rename against an open database, which is why every "quit chibipop first" instruction in the app says so. **The v0.7.2 answer to this trap — stage a `.new`, stop and *join* the worker, rename, respawn — is deleted**, because that join is what deadlocked the main thread and froze the desktop. |

@@ -12,7 +12,7 @@ use std::io::Read;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-const SEARCH_STDIN_LIMIT: u64 = 64 * 1024;
+const SEARCH_STDIN_LIMIT: u64 = crate::search::MAX_SEARCH_TEXT_BYTES as u64;
 
 #[derive(Parser)]
 #[command(name = "chibipop", version, about = "Japanese lookup engine (Wayland)")]
@@ -30,17 +30,7 @@ enum Command {
     /// Run the daemon. This is the default when no subcommand is given.
     Run,
     /// Send one verb to the active daemon's control socket.
-    ///
-    /// The forever verb set contains reload, trigger-down, trigger-up, toggle,
-    /// anki-add, ocr-clipboard, and static-region. Each verb names
-    /// one global action. This is not an API for scripts
-    /// (ARCHITECTURE.md#input-ladders). Bind these verbs in your compositor.
-    /// For example, use these sway binds:
-    ///   bindsym --no-repeat Mod4+j exec chibipop ctl trigger-down
-    ///   bindsym --no-repeat Mod4+a exec chibipop ctl anki-add
-    ///   bindsym --no-repeat Mod4+c exec chibipop ctl ocr-clipboard
-    ///   bindsym --no-repeat Mod4+r exec chibipop ctl static-region
-    Ctl { verb: String },
+    Ctl { verb: String, bind_id: Option<String> },
     /// Open the settings window in its own process
     /// (ARCHITECTURE.md#settings-and-config). A settings crash must not stop
     /// live hover.
@@ -52,6 +42,10 @@ enum Command {
         read_stdin: bool,
         #[arg(long, hide = true)]
         data_dir: Option<PathBuf>,
+        #[arg(long, hide = true)]
+        profile_catalog: Option<PathBuf>,
+        #[arg(long)]
+        profile_id: Option<String>,
     },
     SentenceSearch {
         #[arg(long)]
@@ -60,6 +54,10 @@ enum Command {
         read_stdin: bool,
         #[arg(long, hide = true)]
         data_dir: Option<PathBuf>,
+        #[arg(long, hide = true)]
+        profile_catalog: Option<PathBuf>,
+        #[arg(long)]
+        profile_id: Option<String>,
     },
     /// Connect to the Wayland display, print the capability report, and exit.
     Probe,
@@ -118,11 +116,17 @@ fn read_search_stdin(reader: impl Read) -> Result<String> {
 }
 
 fn run_search(mut paths: Paths, mode: chibipop::search::SearchMode, text: Option<String>,
-    read_stdin: bool, data_dir: Option<PathBuf>) -> Result<()> {
+    read_stdin: bool, data_dir: Option<PathBuf>, profile_catalog: Option<PathBuf>,
+    profile_id: Option<String>) -> Result<()> {
     if let Some(data_dir) = data_dir { paths.data_dir = data_dir; }
-    let initial = if read_stdin { read_search_stdin(std::io::stdin().lock())? }
-        else { text.unwrap_or_default() };
-    crate::search::run(paths, mode, initial)
+    let initial = if read_stdin { Some(read_search_stdin(std::io::stdin().lock())?) }
+        else { text };
+    let catalog = match profile_catalog {
+        Some(path) => crate::search::take_snapshot(&paths, &path)?,
+        None => chibipop::config::load_or_create(&paths.config_file)?,
+    };
+    let profile_id = profile_id.unwrap_or_else(|| catalog.default_profile.clone());
+    crate::search::run(paths, mode, initial, catalog, profile_id)
 }
 
 pub fn run() -> ExitCode {
@@ -131,13 +135,13 @@ pub fn run() -> ExitCode {
     let paths = paths::resolve(&env, cli.config);
     let result = match cli.command.unwrap_or(Command::Run) {
         Command::Run => daemon::run(paths),
-        Command::Ctl { verb } => ctl(&paths, &verb),
+        Command::Ctl { verb, bind_id } => ctl(&paths, &verb, bind_id.as_deref()),
         Command::Settings => settings::run(paths),
-        Command::Search { text, read_stdin, data_dir } => run_search(
-            paths, chibipop::search::SearchMode::Dictionary, text, read_stdin, data_dir,
+        Command::Search { text, read_stdin, data_dir, profile_catalog, profile_id } => run_search(
+            paths, chibipop::search::SearchMode::Dictionary, text, read_stdin, data_dir, profile_catalog, profile_id,
         ),
-        Command::SentenceSearch { text, read_stdin, data_dir } => run_search(
-            paths, chibipop::search::SearchMode::Sentence, text, read_stdin, data_dir,
+        Command::SentenceSearch { text, read_stdin, data_dir, profile_catalog, profile_id } => run_search(
+            paths, chibipop::search::SearchMode::Sentence, text, read_stdin, data_dir, profile_catalog, profile_id,
         ),
         Command::Probe => probe(),
         Command::CaptureDump { region, out, dwell, full } => {
@@ -198,13 +202,20 @@ fn clipboard_check(text: &str, hold: u64) -> Result<()> {
 }
 
 /// Send one verb through the socket and print the daemon's reply.
-fn ctl(paths: &Paths, verb_text: &str) -> Result<()> {
-    let Some(verb) = Verb::parse(verb_text) else {
-        bail!("unknown verb {verb_text:?}; expected one of {}", control::verb_list());
-    };
+fn ctl(paths: &Paths, verb_text: &str, bind_id: Option<&str>) -> Result<()> {
     let display = wayland::display_name()?;
     let runtime_dir = paths.runtime_dir()?;
-    let reply = control::send(runtime_dir, &display, verb).with_context(|| {
+    let result = if matches!(verb_text, "bind-down" | "bind-up") {
+        let id = bind_id.context("Specify a configured bind ID.")?;
+        control::send_bind(runtime_dir, &display, id, verb_text == "bind-down")
+    } else {
+        anyhow::ensure!(bind_id.is_none(), "This action does not accept a bind ID.");
+        let Some(verb) = Verb::parse(verb_text) else {
+            bail!("Unknown action {verb_text:?}. Use {}, bind-down, or bind-up.", control::verb_list());
+        };
+        control::send(runtime_dir, &display, verb)
+    };
+    let reply = result.with_context(|| {
         format!(
             "connecting to {} - is the daemon running?",
             runtime_dir.join(control::file_name(&display)).display()
@@ -273,5 +284,17 @@ mod tests {
         assert!(Cli::try_parse_from([
             "chibipop", "sentence-search", "--text", "猫", "--read-stdin",
         ]).is_err());
+    }
+
+    #[test]
+    fn leading_hyphen_bind_ids_parse_as_positionals() {
+        let cli = Cli::try_parse_from([
+            "chibipop", "ctl", "bind-down", "--", "-lookup",
+        ]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Ctl { verb, bind_id })
+                if verb == "bind-down" && bind_id.as_deref() == Some("-lookup")
+        ));
     }
 }

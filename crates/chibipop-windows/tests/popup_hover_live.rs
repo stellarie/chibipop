@@ -35,12 +35,18 @@ impl Fixture {
         std::fs::copy(repo.join("data/deconjugator.json"), root.join("data/deconjugator.json")).unwrap();
         std::fs::copy(env!("CARGO_BIN_EXE_chibipop"), root.join("chibipop.exe")).unwrap();
         let mut config = Config::default();
-        config.trigger.mode = mode;
-        config.trigger.trigger_key = "F8".into();
-        config.anki.enabled = false;
-        config.actions.enabled = false;
-        config.popup.sub_popups = enabled;
-        config.ocr.language = "ja".into();
+        let mut profile = config.resolve("default").unwrap();
+        profile.anki.enabled = false;
+        profile.actions.enabled = false;
+        profile.popup.sub_popups = enabled;
+        profile.ocr.language = "ja".into();
+        config.update_profile("default", &profile).unwrap();
+        let live_lookup = mode == TriggerMode::Live;
+        config.live_lookup = live_lookup;
+        let lookup = config.binds.iter_mut().find(|bind| bind.action == chibipop::config::BindAction::Lookup).unwrap();
+        lookup.windows = "F8".into();
+        lookup.mode = if live_lookup { TriggerMode::Press } else { mode };
+        lookup.enabled = true;
         config.save(&root.join("chibipop.toml")).unwrap();
         let mut cursor = POINT::default();
         // SAFETY: The cursor output buffer is initialized and live.

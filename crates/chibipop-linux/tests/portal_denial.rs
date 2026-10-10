@@ -327,7 +327,9 @@ impl Session {
         // Use hold-key mode. Live mode would run lookups from the user's cursor.
         // This test checks a failed channel, not the hover loop.
         let mut config = chibipop::config::Config::default();
-        config.trigger.mode = chibipop::config::TriggerMode::HoldKey;
+        config.live_lookup = false;
+        config.binds[0].enabled = true;
+        config.binds[0].mode = chibipop::config::TriggerMode::HoldKey;
         config.save(&dir.join("config/chibipop/chibipop.toml")).expect("writing the config");
 
         let mut command = Command::new(BIN);

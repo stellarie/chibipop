@@ -484,12 +484,12 @@ mod tests {
         let dict = SqliteDictionary::open(db).expect("the built database opens");
         let found = LookupEngine::new(Deconjugator::new(Vec::new())).run(&dict, text).unwrap();
         let installed = dict.dicts().unwrap();
-        // An empty config enables every Dictionary that the database finds. This is the
-        // state after a new install.
+        let mut profile = crate::config::ResolvedConfig::default();
+        profile.dictionaries.terms = installed.iter().map(|dict| dict.name.clone()).collect();
         let shown = present::build(
             &found,
             &installed,
-            &crate::config::Config::default().present_config(&installed),
+            &profile.present_config(),
             &dict,
         );
         shown

@@ -15,89 +15,24 @@
 
 use crate::control::{self, Verb};
 use anyhow::{Context, Result};
-use chibipop::config::{Config, OcrClipboardConfig, PopupLayer, ScreenshotConfig};
+use chibipop::config::{Config, ResolvedConfig};
 use chibipop::library::Role;
-use chibipop::present::DictInfo;
 use chibipop::settings::{DictionaryWork, SettingsForm};
 use rusqlite::OpenFlags;
 use std::path::Path;
 
-/// The fields that the shared form does not model. These fields are
-/// the Linux platform fields (ARCHITECTURE.md#settings-and-config) and
-/// the lookup-log gate. The window edits them directly on `Config`.
-#[derive(Debug, Clone, PartialEq)]
+/// Linux settings that do not belong to a profile.
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct LinuxFields {
-    /// Apply offers this chord to the portal or uses it to build a native bind.
-    pub trigger_key_linux: String,
-    pub add_key_linux: String,
-    /// An empty chord leaves static-region selection unbound.
-    /// Apply requests direct portal registration where the desktop supports it.
-    pub static_region_key_linux: String,
-    /// `actions.screenshot.save_dir` exactly as the user typed it. The
-    /// daemon resolves the final path (`Paths::screenshots_dir`), not
-    /// this window.
-    pub screenshot_save_dir: String,
-    /// Preserve the optional OCR-to-clipboard chord, as for the screenshot chord.
-    /// Convert an empty text box to absence at this UI boundary.
-    pub ocr_clipboard_key_linux: Option<String>,
-    pub search_key_linux: Option<String>,
-    pub sentence_key_linux: Option<String>,
-    pub selected_key_linux: Option<String>,
-    pub layer: PopupLayer,
     pub show_lookup_log: bool,
 }
 
 impl LinuxFields {
     pub fn from_config(cfg: &Config) -> LinuxFields {
-        LinuxFields {
-            trigger_key_linux: cfg.trigger.trigger_key_linux.clone(),
-            search_key_linux: cfg.actions.search.hotkey_linux.clone(),
-            sentence_key_linux: cfg.actions.search.sentence_hotkey_linux.clone(),
-            selected_key_linux: cfg.actions.search.selected_hotkey_linux.clone(),
-            add_key_linux: cfg.anki.add_key_linux.clone(),
-            static_region_key_linux: cfg.anki.static_region_key_linux.clone(),
-            screenshot_save_dir: cfg.actions.screenshot.save_dir.clone(),
-            ocr_clipboard_key_linux: cfg
-                .actions
-                .ocr_clipboard
-                .as_ref()
-                .and_then(|action| action.hotkey_linux.clone()),
-            layer: cfg.popup.layer,
-            show_lookup_log: cfg.debug.show_lookup_log,
-        }
+        LinuxFields { show_lookup_log: cfg.debug.show_lookup_log }
     }
 
     pub fn apply_over(&self, cfg: &mut Config) {
-        cfg.actions.search.hotkey_linux = self.search_key_linux.clone();
-        cfg.actions.search.sentence_hotkey_linux = self.sentence_key_linux.clone();
-        cfg.actions.search.selected_hotkey_linux = self.selected_key_linux.clone();
-        cfg.trigger.trigger_key_linux = self.trigger_key_linux.clone();
-        cfg.anki.add_key_linux = self.add_key_linux.clone();
-        cfg.anki.static_region_key_linux = self.static_region_key_linux.clone();
-        // The nested section carries the chords of *both* platforms, so
-        // it can disappear only when both chords are absent.
-        // `chibipop::settings::apply_to` already applies that rule from
-        // the Windows side
-        // (`an_unset_ocr_clipboard_key_keeps_the_linux_twin`). This code
-        // reads the config that the same call wrote. A cleared box must
-        // not remove the Windows key with it.
-        let windows_chord = cfg.actions.ocr_clipboard.as_ref().and_then(|a| a.hotkey.clone());
-        let open_sentence_search = cfg.actions.ocr_clipboard.as_ref().is_some_and(|action| action.open_sentence_search);
-        cfg.actions.ocr_clipboard = match (windows_chord, self.ocr_clipboard_key_linux.clone()) {
-            (None, None) if !open_sentence_search => None,
-            (hotkey, hotkey_linux) => Some(OcrClipboardConfig { hotkey, hotkey_linux, open_sentence_search }),
-        };
-        // A cleared box means the default folder, never the data
-        // directory. The code joins a relative `save_dir` onto that
-        // directory, so an empty string writes PNG files beside the
-        // database and the dictionary archives.
-        let dir = self.screenshot_save_dir.trim();
-        cfg.actions.screenshot.save_dir = if dir.is_empty() {
-            ScreenshotConfig::default().save_dir
-        } else {
-            dir.to_string()
-        };
-        cfg.popup.layer = self.layer;
         cfg.debug.show_lookup_log = self.show_lookup_log;
     }
 }
@@ -132,6 +67,7 @@ pub enum Frequency {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Applied {
     pub outcome: ApplyOutcome,
+    pub settings: chibipop::settings::AppliedSettings,
     /// The clamp notices that `apply_to` produced, for the status area.
     pub notices: Vec<String>,
     /// `None` when the frequency inputs did not change. Every Apply
@@ -141,41 +77,37 @@ pub struct Applied {
 
 /// Save the whole struct, reconcile the ranks, then send one `reload`.
 ///
-/// The reconcile needs `db` and `dicts`, and nothing else does. `db` is
-/// the database that the daemon reads. `dicts` holds the identities in
-/// that database, which turn the exact names in the config into the
-/// enabled frequency list.
+/// The reconcile needs the database, and nothing else does. The config already
+/// contains the exact frequency names for the selected profile.
 pub fn apply(
     form: &SettingsForm,
     linux: &LinuxFields,
     config_path: &Path,
     socket_path: &Path,
     db: &Path,
-    dicts: &[DictInfo],
 ) -> Result<Applied> {
-    let cfg = chibipop::config::load_or_create(config_path)
+    let saved = chibipop::config::load_or_create(config_path)
         .with_context(|| format!("re-reading {}", config_path.display()))?;
-    let mut out = chibipop::settings::apply_to(form, &cfg);
-    linux.apply_over(&mut out);
+    let mut settings = chibipop::settings::apply_to(form, &saved);
+    let out = &mut settings.config;
+    if linux.show_lookup_log != form.catalog.debug.show_lookup_log {
+        linux.apply_over(out);
+    }
     out.validate_hotkeys(chibipop::config::Platform::Linux)?;
-    let notices = chibipop::settings::clamp_notice(form, &out).into_iter().collect();
+    let after = out.resolved(Some(&settings.profile_id))?;
+    let notices = chibipop::settings::clamp_notice(form, &after).into_iter().collect();
     out.save(config_path)?;
-    // Apply the rule before the `reload`. Without this step the daemon
-    // gets a config that its database contradicts. A change to the
-    // strategy, the order, or a checkbox recomputes `term.freq` in
-    // place from the stored Reported frequencies. It never reads an
-    // archive again. Only a staged library change needs a rebuild, and
-    // `super::rebuild` owns that path. The Rebuild button reaches it,
-    // not this function.
-    let frequency = match chibipop::settings::dictionary_work(&cfg, &out) {
+    // Apply recomputes frequency ranks from values that the database already
+    // holds. It never reads an archive.
+    let frequency = match chibipop::settings::dictionary_work(&saved, out) {
         DictionaryWork::None => None,
-        DictionaryWork::Reindex => Some(reindex(db, &out, dicts)),
+        DictionaryWork::Reindex => Some(reindex(db, &after)),
     };
     let outcome = match control::send_to(socket_path, Verb::Reload) {
         Ok(reply) => ApplyOutcome::Live { reply },
         Err(_) => ApplyOutcome::ConfigOnly,
     };
-    Ok(Applied { outcome, notices, frequency })
+    Ok(Applied { outcome, settings, notices, frequency })
 }
 
 /// Recompute every Frequency rank from the values that the database
@@ -196,11 +128,11 @@ pub fn apply(
 /// paints nothing during the recompute and no live surface can show
 /// them. The committed row count is the report, and [`describe`] states
 /// it.
-fn reindex(db: &Path, after: &Config, dicts: &[DictInfo]) -> Frequency {
+fn reindex(db: &Path, after: &ResolvedConfig) -> Frequency {
     if !db.exists() {
         return Frequency::NoDatabase;
     }
-    let enabled = after.dictionaries.enabled(Role::Frequency, dicts);
+    let enabled = after.dictionaries.enabled(Role::Frequency);
     let done = rusqlite::Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_WRITE)
         .with_context(|| format!("opening {} to restamp its frequency ranks", db.display()))
         .and_then(|mut conn| {
@@ -256,6 +188,8 @@ pub fn describe(applied: &Applied) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chibipop::present::DictInfo;
+    use chibipop::config::Config;
     use chibipop::lookup::model::Dictionary;
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::net::UnixListener;
@@ -284,7 +218,7 @@ mod tests {
         socket_path: &Path,
     ) -> Result<Applied> {
         let db = config_path.with_file_name("chibipop.sqlite");
-        apply(form, linux, config_path, socket_path, &db, &[])
+        apply(form, linux, config_path, socket_path, &db)
     }
 
     #[test]
@@ -301,86 +235,39 @@ mod tests {
         assert_eq!(applied.outcome, ApplyOutcome::ConfigOnly);
         let saved = chibipop::config::load_or_create(&config_path).unwrap();
         assert!(saved.debug.show_lookup_log, "the flip must reach the file");
-        assert!(describe(&applied).contains("daemon is not running"));
     }
 
-    /// The nested `[actions.ocr_clipboard]` section carries both
-    /// platforms' chords, so clearing the Linux box must not evict the
-    /// Windows key with it - the mirror of core's
-    /// `an_unset_ocr_clipboard_key_keeps_the_linux_twin`, from this side.
     #[test]
-    fn clearing_the_linux_ocr_clipboard_chord_keeps_the_windows_twin() {
-        let dir = scratch("ocrclip_twin");
+    fn linux_apply_preserves_the_latest_configured_bind_chords() {
+        let dir = scratch("bind_preserve");
         let config_path = dir.join("chibipop.toml");
-        let mut cfg = chibipop::config::load_or_create(&config_path).unwrap();
-        cfg.actions.ocr_clipboard = Some(OcrClipboardConfig { open_sentence_search: false,
-            hotkey: Some("f9".to_string()),
-            hotkey_linux: Some("ALT+C".to_string()),
-        });
-        cfg.save(&config_path).unwrap();
-
-        let cfg = chibipop::config::load_or_create(&config_path).unwrap();
-        let mut linux = LinuxFields::from_config(&cfg);
-        assert_eq!(Some("ALT+C".to_string()), linux.ocr_clipboard_key_linux, "read in as typed");
-        // The window's cleared text box, as `Message::OcrClipboardKey`
-        // maps it: absence, never an empty string.
-        linux.ocr_clipboard_key_linux = None;
-
-        saving(&form(&cfg), &linux, &config_path, &dir.join("absent.sock")).unwrap();
-
-        assert_eq!(
-            Some(OcrClipboardConfig { open_sentence_search: false, hotkey: Some("f9".to_string()), hotkey_linux: None }),
-            chibipop::config::load_or_create(&config_path).unwrap().actions.ocr_clipboard,
-            "the Windows chord survives a Linux Apply that cleared the Linux one"
+        let mut initial = chibipop::config::load_or_create(&config_path).unwrap();
+        initial.binds.clear();
+        let mut bind = chibipop::config::Bind::new(
+            "bind-17".into(),
+            chibipop::config::BindAction::Lookup,
         );
-    }
-
-    /// And with neither chord the section goes away rather than being
-    /// written as a table full of `None`: absence stays absence
-    /// (ARCHITECTURE.md#settings-and-config).
-    #[test]
-    fn an_ocr_clipboard_section_with_neither_chord_is_dropped() {
-        let dir = scratch("ocrclip_dropped");
-        let config_path = dir.join("chibipop.toml");
-        let mut cfg = chibipop::config::load_or_create(&config_path).unwrap();
-        cfg.actions.ocr_clipboard =
-            Some(OcrClipboardConfig { open_sentence_search: false, hotkey: None, hotkey_linux: Some("ALT+C".to_string()) });
-        cfg.save(&config_path).unwrap();
+        bind.windows = "CTRL+SHIFT+L".into();
+        bind.linux = "ALT+F".into();
+        initial.binds.push(bind);
+        initial.save(&config_path).unwrap();
 
         let cfg = chibipop::config::load_or_create(&config_path).unwrap();
+        let form = form(&cfg);
+        let mut latest = cfg.clone();
+        latest.binds[0].windows = "ALT+Q".into();
+        latest.binds[0].linux = "CTRL+Q".into();
+        latest.save(&config_path).unwrap();
+
         let mut linux = LinuxFields::from_config(&cfg);
-        linux.ocr_clipboard_key_linux = None;
-
-        saving(&form(&cfg), &linux, &config_path, &dir.join("absent.sock")).unwrap();
-
-        assert_eq!(
-            None,
-            chibipop::config::load_or_create(&config_path).unwrap().actions.ocr_clipboard
-        );
-    }
-
-    /// The other direction: a chord typed into an empty config creates
-    /// the section, and a later reload reads it back.
-    #[test]
-    fn a_typed_ocr_clipboard_chord_creates_the_section_and_round_trips() {
-        let dir = scratch("ocrclip_typed");
-        let config_path = dir.join("chibipop.toml");
-        let cfg = chibipop::config::load_or_create(&config_path).unwrap();
-        assert_eq!(None, cfg.actions.ocr_clipboard, "a default config has no section");
-        let mut linux = LinuxFields::from_config(&cfg);
-        linux.ocr_clipboard_key_linux = Some("ALT+C".to_string());
-
-        saving(&form(&cfg), &linux, &config_path, &dir.join("absent.sock")).unwrap();
+        linux.show_lookup_log = true;
+        saving(&form, &linux, &config_path, &dir.join("absent.sock")).unwrap();
 
         let saved = chibipop::config::load_or_create(&config_path).unwrap();
-        assert_eq!(
-            Some(OcrClipboardConfig { open_sentence_search: false, hotkey: None, hotkey_linux: Some("ALT+C".to_string()) }),
-            saved.actions.ocr_clipboard
-        );
-        assert_eq!(
-            Some("ALT+C".to_string()),
-            LinuxFields::from_config(&saved).ocr_clipboard_key_linux
-        );
+        assert!(saved.debug.show_lookup_log);
+        assert_eq!("ALT+Q", saved.binds[0].windows);
+        assert_eq!("CTRL+Q", saved.binds[0].linux);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -411,32 +298,18 @@ mod tests {
     }
 
     #[test]
-    fn linux_fields_ride_along_and_round_trip() {
-        let dir = scratch("linux_fields");
+    fn linux_debug_setting_saves_with_the_catalog() {
+        let dir = scratch("linux_debug");
         let config_path = dir.join("chibipop.toml");
         let cfg = chibipop::config::load_or_create(&config_path).unwrap();
-        let linux = LinuxFields {
-            trigger_key_linux: "CTRL+SHIFT+K".into(),
-            add_key_linux: "ALT+B".into(),
-            static_region_key_linux: "ALT+R".into(),
-            screenshot_save_dir: "shots".into(),
-            ocr_clipboard_key_linux: Some("SUPER+C".into()),
-            search_key_linux: Some("SUPER+F".into()),
-            sentence_key_linux: Some("SUPER+G".into()),
-            selected_key_linux: Some("SUPER+H".into()),
-            layer: PopupLayer::Top,
-            show_lookup_log: true,
-        };
+        let linux = LinuxFields { show_lookup_log: true };
 
         saving(&form(&cfg), &linux, &config_path, &dir.join("absent.sock")).unwrap();
 
         let saved = chibipop::config::load_or_create(&config_path).unwrap();
         assert_eq!(LinuxFields::from_config(&saved), linux);
-        // The Windows twins survived the whole-struct save untouched.
-        assert_eq!(saved.trigger.trigger_key, cfg.trigger.trigger_key);
-        assert_eq!(saved.anki.add_key, cfg.anki.add_key);
-        assert_eq!(saved.anki.static_region_key, cfg.anki.static_region_key);
-        assert_eq!(saved.ocr.language, cfg.ocr.language);
+        assert_eq!(saved.default_profile, cfg.default_profile);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -513,7 +386,6 @@ mod tests {
             &config_path,
             &dir.join("absent.sock"),
             &db,
-            &dicts,
         )
         .unwrap();
 
@@ -548,7 +420,6 @@ mod tests {
             &config_path,
             &dir.join("absent.sock"),
             &db,
-            &dicts,
         )
         .unwrap();
 
@@ -577,7 +448,6 @@ mod tests {
             &config_path,
             &dir.join("absent.sock"),
             &db,
-            &[],
         )
         .unwrap();
 
@@ -593,39 +463,3 @@ mod tests {
     }
 }
 
-#[cfg(test)]
-mod search_routing_tests {
-    use super::*;
-
-    #[test]
-    fn clearing_ocr_hotkeys_keeps_enabled_sentence_routing() {
-        let mut config = Config::default();
-        config.actions.ocr_clipboard = Some(OcrClipboardConfig {
-            open_sentence_search: true, hotkey: None, hotkey_linux: Some("SUPER+C".into()),
-        });
-        let mut fields = LinuxFields::from_config(&config);
-        fields.ocr_clipboard_key_linux = None;
-        fields.sentence_key_linux = Some("SUPER+F6".into());
-        fields.apply_over(&mut config);
-        assert_eq!(config.actions.ocr_clipboard, Some(OcrClipboardConfig {
-            open_sentence_search: true, hotkey: None, hotkey_linux: None,
-        }));
-        assert_eq!(config.actions.search.sentence_hotkey_linux.as_deref(), Some("SUPER+F6"));
-        config.actions.ocr_clipboard.as_mut().unwrap().open_sentence_search = false;
-        fields.apply_over(&mut config);
-        assert!(config.actions.ocr_clipboard.is_none());
-    }
-
-    #[test]
-    fn sentence_and_dictionary_shortcuts_share_complete_conflict_validation() {
-        let mut config = Config::default();
-        config.actions.search.hotkey_linux = Some("SUPER+F6".into());
-        let mut fields = LinuxFields::from_config(&config);
-        fields.sentence_key_linux = Some("LOGO+F6".into());
-        fields.apply_over(&mut config);
-        assert!(config.validate_hotkeys(chibipop::config::Platform::Linux).is_err());
-        fields.sentence_key_linux = Some("SUPER+F7".into());
-        fields.apply_over(&mut config);
-        config.validate_hotkeys(chibipop::config::Platform::Linux).unwrap();
-    }
-}

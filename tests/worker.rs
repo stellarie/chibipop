@@ -3,6 +3,9 @@
 //! They cover the trigger-to-result flow, latest-wins behavior, and reload
 //! semantics that the platform bins use. They do not use an OS.
 
+use chibipop::config::{
+    Config, ProfileCatalog, ProfileData, ProfileSession,
+};
 use chibipop::controller::{LookupOutcome, RequestId};
 use chibipop::geom::{PhysPoint, PhysRect, ScanDisplay};
 use chibipop::lookup::deconj::Deconjugator;
@@ -15,7 +18,7 @@ use chibipop::text::{Frame, OcrEngine, RegionCapture, TextSource};
 use chibipop::worker::{
     Hover, ReopenDict, ServeHook, Trigger, TriggerKind, Worker, WorkerParts, WorkerSettings,
 };
-use std::sync::mpsc;
+use std::sync::{mpsc, LazyLock};
 use std::time::Duration;
 
 /// Set a timeout that a healthy test does not reach.
@@ -124,6 +127,16 @@ fn dict_named(name: &str) -> FakeDictionary {
     d.add_entry(10, 1, r#"["to eat"]"#);
     d
 }
+fn two_dictionaries() -> FakeDictionary {
+    let mut d = FakeDictionary::new();
+    d.add_dict(1, "First");
+    d.add_dict(2, "Second");
+    d.add_term("食", Some("食"), None, "", None, 10, 1);
+    d.add_term("食", Some("食"), None, "", None, 20, 2);
+    d.add_entry(10, 1, r#"["first result"]"#);
+    d.add_entry(20, 2, r#"["second result"]"#);
+    d
+}
 
 /// List each Dictionary name that these fakes can answer.
 /// The config must use these exact names.
@@ -140,9 +153,59 @@ fn dict_named(name: &str) -> FakeDictionary {
 /// The reopened file must replace this stale name.
 /// A card with this name is the failure that the test detects.
 const SEARCHED: [&str; 4] = ["FakeDict", "Renamed", "BeforeTheRebuild", "AfterTheRebuild"];
+fn named_dicts(names: &[&str]) -> Vec<DictInfo> {
+    names
+        .iter()
+        .enumerate()
+        .map(|(index, name)| DictInfo { dict_id: index as i64 + 1, name: (*name).to_string() })
+        .collect()
+}
+
+fn session_with(terms: &[&str], installed: &[DictInfo], language: &str) -> ProfileSession {
+    let mut config = Config::default();
+    let ProfileData::Full { settings } = &mut config.profiles[0].data else {
+        panic!("the default test profile must be full");
+    };
+    settings.dictionaries.terms.enabled =
+        terms.iter().map(|name| (*name).to_string()).collect();
+    settings.ocr.language = language.to_string();
+    let catalog = ProfileCatalog::new(&config, installed)
+        .expect("the worker test profile must be valid");
+    catalog.session(None).expect("the default test profile must resolve")
+}
+
+fn session() -> ProfileSession {
+    static SESSION: LazyLock<ProfileSession> = LazyLock::new(|| {
+        let installed = named_dicts(&SEARCHED);
+        session_with(&SEARCHED, &installed, "ja")
+    });
+    SESSION.clone()
+}
+
+fn sessions_with_distinct_dictionaries() -> (ProfileSession, ProfileSession) {
+    let installed = named_dicts(&["First", "Second"]);
+    let mut config = Config::default();
+    let ProfileData::Full { settings } = &mut config.profiles[0].data else {
+        panic!("the default test profile must be full");
+    };
+    settings.dictionaries.terms.enabled = vec!["First".to_string()];
+    let mut second_settings = (**settings).clone();
+    second_settings.dictionaries.terms.enabled = vec!["Second".to_string()];
+    config.profiles.push(chibipop::config::Profile {
+        id: "second".to_string(),
+        name: "Second".to_string(),
+        data: ProfileData::Full { settings: Box::new(second_settings) },
+    });
+    let catalog = ProfileCatalog::new(&config, &installed)
+        .expect("the two-profile test catalog must be valid");
+    (
+        catalog.session(Some("default")).unwrap(),
+        catalog.session(Some("second")).unwrap(),
+    )
+}
 
 fn settings() -> WorkerSettings {
-    let mut cfg = chibipop::config::Config::default();
+    let mut cfg = chibipop::config::ResolvedConfig::default();
     cfg.dictionaries.terms = SEARCHED.iter().map(|name| (*name).to_string()).collect();
     WorkerSettings {
         max_passes: 1,
@@ -153,7 +216,7 @@ fn settings() -> WorkerSettings {
         discard_furigana: true,
         show_lookup_log: false,
         language: "ja".to_string(),
-        present_cfg: cfg.present_config(&[]),
+        present_cfg: cfg.present_config(),
         scan_display: ScanDisplay { captures: false, highlight: false },
         sentence_mode: chibipop::config::SentenceMode::Line,
         static_region: None,
@@ -212,8 +275,12 @@ fn spawn(
 const AT: PhysPoint = PhysPoint { x: 600, y: 300 };
 
 fn hover(id: u64) -> Trigger {
+    hover_with_session(id, session())
+}
+
+fn hover_with_session(id: u64, session: ProfileSession) -> Trigger {
     Trigger {
-        kind: TriggerKind::Hover(Hover { at: AT, mask: CaptureMask::NONE }),
+        kind: TriggerKind::Hover(Hover { at: AT, mask: CaptureMask::NONE, session }),
         id: RequestId(id),
     }
 }
@@ -222,7 +289,11 @@ fn hover(id: u64) -> Trigger {
 fn masked_hover(id: u64, mode: CaptureMode) -> Trigger {
     let popup = PhysRect { x: AT.x - 50, y: AT.y - 50, w: 100, h: 100 };
     Trigger {
-        kind: TriggerKind::Hover(Hover { at: AT, mask: CaptureMask::for_mode(mode, Some(popup)) }),
+        kind: TriggerKind::Hover(Hover {
+            at: AT,
+            mask: CaptureMask::for_mode(mode, Some(popup)),
+            session: session(),
+        }),
         id: RequestId(id),
     }
 }
@@ -242,7 +313,7 @@ fn a_live_hover_under_our_own_popup_resolves_nothing() {
         "a word touching the mask must be dropped, not half-recognised"
     );
     assert_eq!(
-        vec!["begin_read", "grab", "ocr", "end_read"],
+        vec!["set_language ja", "begin_read", "grab", "ocr", "end_read"],
         events(&log_rx),
         "masking is arithmetic on the grabbed pixels: no extra pass"
     );
@@ -373,10 +444,14 @@ fn a_hover_trigger_yields_a_ready_result() {
     };
     let top = presentation.top.expect("the hit must present a top card");
     assert_eq!("FakeDict", top.blocks[0].dict_name);
-    assert!(scan.is_empty(), "scan rects are debug-only and were not requested");
+    assert_eq!(
+        vec![chibipop::geom::ScanKind::Match],
+        scan.iter().map(|rect| rect.kind).collect::<Vec<_>>(),
+        "the retained profile requests its match highlight, but shared capture diagnostics stay off",
+    );
 
     // One read: the guard surrounds capture and OCR.
-    assert_eq!(vec!["begin_read", "grab", "ocr", "end_read"], events(&log_rx));
+    assert_eq!(vec!["set_language ja", "begin_read", "grab", "ocr", "end_read"], events(&log_rx));
 }
 
 #[test]
@@ -394,13 +469,62 @@ fn a_drilldown_never_touches_the_screen() {
     let (worker, _dicts, log_rx) = spawn(Some("食"), false, None, None);
     worker
         .trigger()
-        .send(Trigger { kind: TriggerKind::DrillDown("食".to_string()), id: RequestId(3) })
+        .send(Trigger {
+            kind: TriggerKind::DrillDown { text: "食".to_string(), session: session() },
+            id: RequestId(3),
+        })
         .unwrap();
     let result = worker.results().recv_timeout(TIMEOUT).unwrap();
     assert_eq!(RequestId(3), result.id);
     assert!(matches!(result.outcome, LookupOutcome::DrillDown(_)));
     let seen = events(&log_rx);
-    assert!(seen.is_empty(), "no capture, no OCR: {seen:?}");
+    assert!(
+        !seen.iter().any(|event| event == "grab" || event == "ocr"),
+        "a drill-down must not capture the screen or run OCR: {seen:?}"
+    );
+}
+#[test]
+fn identical_ocr_profiles_keep_dictionary_results_and_frozen_pixels_separate() {
+    let (first_session, second_session) = sessions_with_distinct_dictionaries();
+    assert!(!(first_session == second_session));
+    assert_eq!(first_session.config().ocr, second_session.config().ocr);
+    assert_eq!(vec!["First"], first_session.present_config().terms);
+    assert_eq!(vec!["Second"], second_session.present_config().terms);
+
+    let (log_tx, log_rx) = mpsc::channel::<String>();
+    let capture_log = log_tx.clone();
+    let ocr_log = log_tx.clone();
+    let (worker, _) = Worker::spawn(
+        settings(),
+        move || {
+            Ok(parts(
+                Box::new(FakeCapture { log: capture_log, gate: None, entered_tx: None }),
+                Box::new(FakeOcr { log: ocr_log, text: Some("食".to_string()), panics: false }),
+                Box::new(two_dictionaries()),
+                None,
+                None,
+            ))
+        },
+        || {},
+    )
+    .expect("the worker starts with both dictionaries");
+
+    worker.trigger().send(freeze(1, AT)).unwrap();
+    worker.trigger().send(hover_with_session(2, first_session)).unwrap();
+    let LookupOutcome::Ready { presentation: first, .. } = answer(&worker).outcome else {
+        panic!("the first profile must find its dictionary result");
+    };
+    assert_eq!("First", first.top.unwrap().blocks[0].dict_name);
+
+    worker.trigger().send(hover_with_session(3, second_session)).unwrap();
+    let LookupOutcome::Ready { presentation: second, .. } = answer(&worker).outcome else {
+        panic!("the second profile must find its dictionary result");
+    };
+    assert_eq!("Second", second.top.unwrap().blocks[0].dict_name);
+
+    let seen = events(&log_rx);
+    assert_eq!(1, seen.iter().filter(|event| *event == "grab").count());
+    assert_eq!(2, seen.iter().filter(|event| *event == "ocr").count());
 }
 
 /// One bad frame does not stop the Worker.
@@ -418,7 +542,10 @@ fn a_panicking_backend_fails_the_hover_and_the_worker_survives() {
     // The Worker still serves a screen-free lookup.
     worker
         .trigger()
-        .send(Trigger { kind: TriggerKind::DrillDown("食".to_string()), id: RequestId(5) })
+        .send(Trigger {
+            kind: TriggerKind::DrillDown { text: "食".to_string(), session: session() },
+            id: RequestId(5),
+        })
         .unwrap();
     let next = worker.results().recv_timeout(TIMEOUT).unwrap();
     assert_eq!(RequestId(5), next.id);
@@ -454,16 +581,12 @@ fn queued_hovers_coalesce_to_the_newest() {
     assert_eq!(2, grabs, "the dropped hover must not have captured");
 }
 
-/// Apply a reload before the next hover.
-/// The reload changes Dictionary identities, language, and scan settings.
-/// The reload does not return a result.
 #[test]
 fn a_reload_is_applied_before_the_next_hover() {
-    let (worker, dicts, log_rx) = spawn(Some("食"), false, None, None);
+    let (worker, dicts, _log_rx) = spawn(Some("食"), false, None, None);
     assert_eq!("FakeDict", dicts[0].name);
 
     let mut reloaded = settings();
-    reloaded.language = "ko".to_string();
     reloaded.scan_display = ScanDisplay { captures: true, highlight: false };
     reloaded.dicts = vec![DictInfo { dict_id: 1, name: "Renamed".to_string() }];
     worker
@@ -479,12 +602,8 @@ fn a_reload_is_applied_before_the_next_hover() {
     };
     let top = presentation.top.expect("the hit must still present");
     assert_eq!("Renamed", top.blocks[0].dict_name, "identities must come from the reload");
-    assert!(!scan.is_empty(), "the reloaded scan_display asked for capture rects");
-    let seen = events(&log_rx);
-    assert!(
-        seen.contains(&"set_language ko".to_string()),
-        "the reload must reach the OCR backend: {seen:?}"
-    );
+    assert!(scan.iter().any(|rect| rect.kind == chibipop::geom::ScanKind::Pass1));
+    assert!(scan.iter().any(|rect| rect.kind == chibipop::geom::ScanKind::Match));
 }
 
 /// Report startup failure from `spawn`, not from a dead Worker.
@@ -533,7 +652,7 @@ fn wake_fires_after_each_result() {
 /// Return a hover at another point. The hold then asks for another box.
 fn hover_at(id: u64, at: PhysPoint) -> Trigger {
     Trigger {
-        kind: TriggerKind::Hover(Hover { at, mask: CaptureMask::NONE }),
+        kind: TriggerKind::Hover(Hover { at, mask: CaptureMask::NONE, session: session() }),
         id: RequestId(id),
     }
 }
@@ -568,8 +687,10 @@ fn a_trigger_hold_copies_once_and_serves_every_lookup_from_that_copy() {
     );
     assert_eq!(
         vec!["begin_read", "grab", "end_read"],
-        seen.iter().filter(|e| *e != "ocr").cloned().collect::<Vec<_>>(),
-        "only the press-time grab brackets a read: {seen:?}"
+        seen.iter()
+            .filter(|event| *event != "ocr" && *event != "set_language ja")
+            .cloned()
+            .collect::<Vec<_>>(),
     );
     assert_eq!(2, seen.iter().filter(|e| *e == "ocr").count(), "each box is read once");
 }
@@ -715,8 +836,13 @@ fn spawn_serving(
                 Box::new(FakeOcr { log: log_tx, text: Some("食".to_string()), panics: false }),
                 Box::new(dict()),
                 None,
-                Some(Box::new(move |source: &TextSource| {
-                    let _ = hook_log.send("serve".to_string());
+                Some(Box::new(move |source: &TextSource, session: Option<&ProfileSession>| {
+                    let event = if let Some(session) = session {
+                        format!("serve request {}", session.config().ocr.language)
+                    } else {
+                        "serve".to_string()
+                    };
+                    let _ = hook_log.send(event);
                     while let Ok(job) = job_rx.try_recv() {
                         let lines = source
                             .recognise(&job.bgra, job.w, job.h)
@@ -772,6 +898,34 @@ fn a_nudged_job_wakes_a_blocked_worker_and_is_read_through_the_facade() {
         worker.results().try_recv().is_err(),
         "a nudge is not a lookup: it must answer nothing"
     );
+}
+#[test]
+fn request_session_settings_are_active_before_the_serve_hook_reads_ocr() {
+    let (worker, jobs, log_rx) = spawn_serving(None, None);
+    wait_for_a_hook_run(&log_rx);
+    let installed = named_dicts(&["FakeDict"]);
+    let request_session = session_with(&["FakeDict"], &installed, "ko");
+    let (job, answered) = job();
+
+    jobs.send(job).unwrap();
+    worker.trigger().send(hover_with_session(91, request_session)).unwrap();
+    assert!(matches!(answer(&worker).outcome, LookupOutcome::Ready { .. }));
+    let lines = answered
+        .recv_timeout(TIMEOUT)
+        .expect("the hook must answer the queued OCR job")
+        .expect("the OCR facade must work");
+    assert_eq!("食", lines[0].words[0].text);
+
+    let seen = events(&log_rx);
+    let language = seen
+        .iter()
+        .position(|event| event == "set_language ko")
+        .expect("the request language must reach the OCR engine");
+    let hook = seen
+        .iter()
+        .position(|event| event == "serve request ko")
+        .expect("the hook must receive the request session");
+    assert!(language < hook, "apply the request settings before the hook: {seen:?}");
 }
 
 /// The idle budget is 0 wakeups/s. The Worker must wait when no job exists.

@@ -232,12 +232,16 @@ pub(super) fn place_images(
 /// A width-only constraint would squash a scanned illustration.
 /// This function scales both axes together, so the reader sees the full picture inside its cell.
 ///
-/// This function negates the fit condition instead of reversing the comparison.
-/// A non-number room or width leaves the declared box unchanged.
+/// This function preserves the declared box for an invalid room or width.
+/// A zero share with a valid positive room produces a zero-sized box.
 ///
 /// [`Pass::columns`]: super::pass::Pass::columns
 pub(super) fn image_box(img: &FlowImage, room: f32) -> (f32, f32) {
-    let room = room * img.fit;
+    let available = room;
+    let room = available * img.fit;
+    if room == 0.0 && available.is_finite() && available > 0.0 {
+        return (0.0, 0.0);
+    }
     if !(img.w > room && room > 0.0) {
         return (img.w, img.h);
     }
@@ -325,23 +329,23 @@ enum SheetLen {
 
 /// Reads one stylesheet length for an image box.
 ///
-/// [`css_len`] resolves `em`, `rem`, and `px` against `em`.
-/// A percentage on a box width is a share of the containing block, not of the font size.
+/// A percentage on a box width is a share of its containing block, not its font size.
 /// Therefore this function reads a percentage first.
-/// CSS drops a length with no unit, such as the `max-width: 75` in 小学館例解学習国語.
-/// [`css_len`] treats that number as an em count, as it does for the schema's
-/// numeric fields. This function therefore requires a unit.
-/// A negative length is invalid, and CSS drops it too.
-fn sheet_len(doc: &GlossDoc, value: Scalar, em: Ems) -> Option<SheetLen> {
+/// `em` uses the box's font size, `rem` the popup root, and `px` the text scale.
+/// CSS accepts unitless zero but ignores other unitless lengths.
+/// A negative or non-finite length is invalid.
+fn sheet_len(doc: &GlossDoc, value: Scalar, em: Ems, px_em: Ems) -> Option<SheetLen> {
     let text = doc.scalar_str(value)?.trim();
     if let Some(pct) = text.strip_suffix('%') {
         let share = pct.trim().parse::<f32>().ok()? / 100.0;
         return finite(share).filter(|s| *s >= 0.0).map(SheetLen::Share);
     }
     if !text.ends_with(|c: char| c.is_ascii_alphabetic()) {
-        return None;
+        let zero = finite(text.parse::<f32>().ok()?).filter(|n| *n == 0.0)?;
+        return Some(SheetLen::Px(zero));
     }
-    css_len(text, em).filter(|px| *px >= 0.0).map(|px| SheetLen::Px(px.min(IMAGE_MAX_PX)))
+    let base = if text.ends_with("px") { px_em } else { em };
+    css_len(text, base).filter(|px| *px >= 0.0).map(|px| SheetLen::Px(px.min(IMAGE_MAX_PX)))
 }
 
 /// Returns one declared length as a bare number.
@@ -657,7 +661,7 @@ impl Paragraphs<'_> {
                 StyleKey::ImageLinkMaxWidth => text,
                 _ => continue,
             };
-            let Some(len) = sheet_len(doc, *value, ems) else { continue };
+            let Some(len) = sheet_len(doc, *value, ems, text) else { continue };
             match (key, len) {
                 (StyleKey::ImageWidth, SheetLen::Px(px)) => {
                     let scale = px / w;

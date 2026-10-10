@@ -48,7 +48,7 @@ use zbus::message::Type as MessageType;
 use zbus::zvariant::{ObjectPath, OwnedObjectPath, OwnedValue, Value};
 use zbus::MatchRule;
 
-use super::{Binding, Event, SessionId, ShortcutId};
+use super::{Binding, Event, SessionId, ShortcutId, ShortcutSpec};
 
 /// The interface that proves this rung's capability on the session bus.
 /// The probe checks advertised capability, not compositor identity.
@@ -87,7 +87,7 @@ pub fn version() -> Option<u32> {
 /// the returned handle and stops it before replacing the configuration.
 pub fn spawn(
     session: SessionId,
-    preferred: Vec<(ShortcutId, String)>,
+    preferred: Vec<ShortcutSpec>,
     reconfigure: bool,
     tx: SyncSender<Event>,
 ) -> std::io::Result<super::SessionHandle> {
@@ -190,7 +190,7 @@ fn send_event(tx: &SyncSender<Event>, mut event: Event, cancel: &AtomicBool) -> 
 /// BindShortcuts, ListShortcuts, then pump.
 fn run(
     session_id: SessionId,
-    preferred: &[(ShortcutId, String)],
+    preferred: &[ShortcutSpec],
     reconfigure: bool,
     tx: &SyncSender<Event>,
     cancel: &AtomicBool,
@@ -265,7 +265,7 @@ fn run(
     if cancel.load(Ordering::Acquire) {
         return Ok(());
     }
-    let allowed: Vec<ShortcutId> = preferred.iter().map(|(id, _)| *id).collect();
+    let allowed: Vec<ShortcutId> = preferred.iter().map(|spec| spec.id.clone()).collect();
     let mut bindings = bound
         .get("shortcuts")
         .map(|value| bindings_from_value(value, &allowed))
@@ -355,19 +355,17 @@ fn configure_shortcuts(proxy: &Proxy<'static>, session: &ObjectPath<'_>) -> Resu
 
 /// Encode each shortcut's id, description, and preferred trigger.
 fn payload(
-    preferred: &[(ShortcutId, String)],
+    preferred: &[ShortcutSpec],
 ) -> Vec<(String, HashMap<&'static str, Value<'static>>)> {
     preferred
         .iter()
-        .map(|(id, chord)| {
+        .map(|spec| {
             let mut props: HashMap<&'static str, Value<'static>> = HashMap::new();
-            props.insert("description", Value::from(id.description()));
-            // The preferred trigger is optional. The user's binding takes
-            // priority, and an implementation can ignore this key entirely.
-            if !chord.is_empty() {
-                props.insert("preferred_trigger", Value::from(chord.clone()));
+            props.insert("description", Value::from(spec.description.clone()));
+            if !spec.trigger.is_empty() {
+                props.insert("preferred_trigger", Value::from(spec.trigger.clone()));
             }
-            (id.as_str().to_string(), props)
+            (spec.id.as_str().to_string(), props)
         })
         .collect()
 }
@@ -519,7 +517,7 @@ fn bindings_of(
     let mut found: Vec<(ShortcutId, Option<String>)> = Vec::with_capacity(allowed.len());
     for (id, trigger) in entries {
         let Some(id) = ShortcutId::parse(&id) else { continue };
-        if !allowed.contains(&id) || found.iter().any(|(known, _)| *known == id) {
+        if !allowed.contains(&id) || found.iter().any(|(known, _)| known == &id) {
             continue;
         }
         found.push((id, trigger.filter(|text| !text.trim().is_empty())));
@@ -530,7 +528,7 @@ fn bindings_of(
             found
                 .iter()
                 .find(|(known, _)| known == id)
-                .map(|(_, trigger)| Binding { id: *id, trigger: trigger.clone() })
+                .map(|(_, trigger)| Binding { id: id.clone(), trigger: trigger.clone() })
         })
         .collect()
 }
@@ -637,8 +635,8 @@ fn refusal(step: &str, name: &str, detail: Option<&str>) -> Why {
         return Why {
             reason: format!("{step}: the portal requires an app id"),
             advice: Some(
-                "xdg-desktop-portal names an app from the systemd unit a desktop-entry launch creates (app-chibipop-*.scope, with chibipop.desktop installed) and refuses shortcut sessions without one - launch chibipop from its desktop entry or autostart unit, or bind the control socket's `ctl trigger-down|trigger-up` verbs in your compositor instead (the settings window's hotkey section has the exact bind lines for this binary)"
-                    .to_string(),
+                "xdg-desktop-portal names an app from the systemd unit a desktop-entry launch creates (app-chibipop-*.scope, with chibipop.desktop installed) and refuses shortcut sessions without one - launch chibipop from its desktop entry or autostart unit, or bind the control socket's `ctl bind-down <id>` and `ctl bind-up <id>` requests in your compositor instead (the settings window shows the exact bind lines for this binary)"
+                .to_string()
             ),
         };
     }
@@ -668,14 +666,18 @@ fn string_of(value: &Value<'_>) -> Option<String> {
 mod tests {
     use super::*;
 
+    fn id(value: &str) -> ShortcutId {
+        ShortcutId::parse(value).unwrap()
+    }
+
     fn allowed() -> Vec<ShortcutId> {
-        ShortcutId::ALL.to_vec()
+        vec![id("bind-1"), id("bind-2")]
     }
 
     /// Build one `(sa{sv})` shortcut entry without a bus.
     fn shortcut(id: &str, trigger: Option<&str>) -> Value<'static> {
         let mut props: HashMap<String, Value<'static>> = HashMap::new();
-        props.insert("description".to_string(), Value::from("whatever the dialog said"));
+        props.insert("description".to_string(), Value::from("configured action"));
         if let Some(trigger) = trigger {
             props.insert("trigger_description".to_string(), Value::from(trigger.to_string()));
         }
@@ -686,37 +688,48 @@ mod tests {
         OwnedValue::try_from(Value::from(entries)).expect("a test value is ownable")
     }
 
+    fn spec(id: &str, trigger: &str, description: &str) -> ShortcutSpec {
+        ShortcutSpec { id: self::id(id), trigger: trigger.into(), description: description.into() }
+    }
+
     #[test]
-    fn the_spec_shape_parses_into_bindings() {
-        let payload =
-            shortcuts(vec![shortcut("trigger", Some("Alt+F")), shortcut("anki-add", Some("Alt+A"))]);
+    fn the_spec_shape_parses_into_configured_bindings() {
+        let payload = shortcuts(vec![
+            shortcut("bind-1", Some("Alt+F")),
+            shortcut("bind-2", Some("Alt+A")),
+        ]);
         assert_eq!(
             vec![
-                Binding { id: ShortcutId::Trigger, trigger: Some("Alt+F".into()) },
-                Binding { id: ShortcutId::AnkiAdd, trigger: Some("Alt+A".into()) },
+                Binding { id: id("bind-1"), trigger: Some("Alt+F".into()) },
+                Binding { id: id("bind-2"), trigger: Some("Alt+A".into()) },
             ],
             bindings_from_value(&payload, &allowed())
         );
     }
 
     #[test]
-    fn the_bindings_come_back_in_registration_order() {
-        let payload =
-            shortcuts(vec![shortcut("anki-add", Some("Alt+A")), shortcut("trigger", Some("Alt+F"))]);
-        let ids: Vec<ShortcutId> = bindings_from_value(&payload, &allowed()).iter().map(|b| b.id).collect();
-        assert_eq!(vec![ShortcutId::Trigger, ShortcutId::AnkiAdd], ids);
+    fn bindings_return_in_registration_order() {
+        let payload = shortcuts(vec![
+            shortcut("bind-2", Some("Alt+A")),
+            shortcut("bind-1", Some("Alt+F")),
+        ]);
+        let ids: Vec<ShortcutId> = bindings_from_value(&payload, &allowed())
+            .iter()
+            .map(|binding| binding.id.clone())
+            .collect();
+        assert_eq!(vec![id("bind-1"), id("bind-2")], ids);
     }
 
     #[test]
-    fn an_empty_trigger_description_is_bound_without_a_key() {
-        let blank = shortcuts(vec![shortcut("trigger", Some(""))]);
+    fn blank_trigger_descriptions_are_bound_without_a_key() {
+        let blank = shortcuts(vec![shortcut("bind-1", Some(""))]);
         assert_eq!(
-            vec![Binding { id: ShortcutId::Trigger, trigger: None }],
+            vec![Binding { id: id("bind-1"), trigger: None }],
             bindings_from_value(&blank, &allowed())
         );
-        let missing = shortcuts(vec![shortcut("anki-add", None)]);
+        let missing = shortcuts(vec![shortcut("bind-2", None)]);
         assert_eq!(
-            vec![Binding { id: ShortcutId::AnkiAdd, trigger: None }],
+            vec![Binding { id: id("bind-2"), trigger: None }],
             bindings_from_value(&missing, &allowed())
         );
     }
@@ -726,24 +739,25 @@ mod tests {
         let mut props: HashMap<String, Value<'static>> = HashMap::new();
         props.insert("trigger_description".to_string(), Value::from("Meta+F"));
         let mut dict: HashMap<String, Value<'static>> = HashMap::new();
-        dict.insert("trigger".to_string(), Value::from(props));
+        dict.insert("bind-1".to_string(), Value::from(props));
         let payload = OwnedValue::try_from(Value::from(dict)).expect("ownable");
         assert_eq!(
-            vec![Binding { id: ShortcutId::Trigger, trigger: Some("Meta+F".into()) }],
+            vec![Binding { id: id("bind-1"), trigger: Some("Meta+F".into()) }],
             bindings_from_value(&payload, &allowed())
         );
     }
 
     #[test]
-    fn foreign_and_repeated_ids_are_dropped() {
+    fn foreign_repeated_and_malformed_ids_are_dropped() {
         let payload = shortcuts(vec![
-            shortcut("trigger", Some("Alt+F")),
-            shortcut("trigger", Some("Alt+G")),
-            shortcut("", None),
+            shortcut("bind-1", Some("Alt+F")),
+            shortcut("bind-1", Some("Alt+G")),
+            shortcut("unknown", Some("Alt+U")),
+            shortcut("bad/id", None),
         ]);
         assert_eq!(
-            vec![Binding { id: ShortcutId::Trigger, trigger: Some("Alt+F".into()) }],
-            bindings_from_value(&payload, &[ShortcutId::Trigger, ShortcutId::AnkiAdd])
+            vec![Binding { id: id("bind-1"), trigger: Some("Alt+F".into()) }],
+            bindings_from_value(&payload, &allowed())
         );
     }
 
@@ -763,32 +777,33 @@ mod tests {
             OwnedValue::try_from(Value::from("Alt+F")).expect("ownable"),
         );
         let pairs: WirePairs =
-            vec![("trigger".to_string(), props), ("nope".to_string(), HashMap::new())];
+            vec![("bind-1".to_string(), props), ("nope".to_string(), HashMap::new())];
         assert_eq!(
-            vec![Binding { id: ShortcutId::Trigger, trigger: Some("Alt+F".into()) }],
+            vec![Binding { id: id("bind-1"), trigger: Some("Alt+F".into()) }],
             bindings_from_pairs(pairs, &allowed())
         );
     }
 
     #[test]
-    fn the_bind_payload_contains_every_requested_id() {
+    fn the_bind_payload_contains_each_configured_id_and_description() {
         let asked = vec![
-            (ShortcutId::Trigger, "ALT+f".to_string()),
-            (ShortcutId::AnkiAdd, "ALT+a".to_string()),
+            spec("bind-1", "ALT+f", "Screen lookup"),
+            spec("bind-2", "ALT+a", "Anki add"),
         ];
         let built = payload(&asked);
         assert_eq!(2, built.len());
         let ids: Vec<&str> = built.iter().map(|(id, _)| id.as_str()).collect();
-        assert_eq!(vec!["trigger", "anki-add"], ids);
-        for (id, props) in &built {
-            assert!(props.contains_key("description"), "{id} needs dialog text");
-            assert!(props.contains_key("preferred_trigger"));
-        }
+        assert_eq!(vec!["bind-1", "bind-2"], ids);
+        assert!(built[0].1.contains_key("description"));
+        assert!(built[0].1.contains_key("preferred_trigger"));
     }
 
     #[test]
     fn an_empty_chord_sends_no_preferred_trigger() {
-        let asked = [(ShortcutId::Trigger, String::new()), (ShortcutId::AnkiAdd, "ALT+a".to_string())];
+        let asked = [
+            spec("bind-1", "", "Empty"),
+            spec("bind-2", "ALT+a", "Anki add"),
+        ];
         let built = payload(&asked);
         assert!(!built[0].1.contains_key("preferred_trigger"));
         assert!(built[1].1.contains_key("preferred_trigger"));
@@ -804,7 +819,7 @@ mod tests {
         assert_eq!("CreateSession: the portal requires an app id", said.reason);
         let advice = said.advice.expect("the app-id case has a way out");
         assert!(advice.contains("chibipop.desktop"), "{advice}");
-        assert!(advice.contains("ctl trigger-down|trigger-up"), "{advice}");
+        assert!(advice.contains("ctl bind-down <id>"), "{advice}");
         assert!(!advice.contains("chibipop ctl"), "{advice}");
     }
 

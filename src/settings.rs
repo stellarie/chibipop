@@ -3,7 +3,10 @@
 //! The settings process edits a shared Config through this form.
 //! The core keeps Dictionary roles, language lists, and staged changes here.
 
-use crate::config::{Config, FieldMapping, OcrClipboardConfig};
+use crate::config::{
+    Config, FieldMapping, FieldOverride, Profile, ProfileData, ProfileSettings, ResolvedConfig,
+    RoleList, PROFILE_FIELDS,
+};
 use crate::library::{roles_of, Library, Pending, Role, Roles};
 use crate::present::DictInfo;
 use anyhow::{Context, Result};
@@ -19,10 +22,24 @@ pub use crate::config::{
 /// The fields that the settings window edits.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SettingsForm {
-    /// The edited copy of the Config. `apply_to` copies the sections that this
-    /// form owns onto the latest saved Config, so a field that no window renders
-    /// keeps the saved value.
-    pub cfg: Config,
+    /// The effective view for the selected profile. The saved catalog stays in `catalog`.
+    pub cfg: ResolvedConfig,
+    /// The saved profile catalog that the settings form edits.
+    pub catalog: Config,
+    /// The stable ID of the profile shown by `cfg`.
+    pub profile_id: String,
+    /// The catalog as the form first loaded it. Apply uses this to merge changes.
+    baseline_catalog: Config,
+    /// The current profile and shared settings when the form last loaded them.
+    baseline_cfg: ResolvedConfig,
+    baseline_profile: ProfileSettings,
+    baseline_terms: Vec<DictRow>,
+    baseline_pitch: Vec<DictRow>,
+    screenshot_resets: std::collections::BTreeSet<String>,
+    staged_add_profiles: BTreeMap<PathBuf, String>,
+    staged_add_before: BTreeMap<String, StagedDictionaryState>,
+    dicts: Vec<DictInfo>,
+    baseline_frequency: Vec<DictRow>,
     /// The terms Dictionary list. It contains every Dictionary that the config
     /// names or that the Library holds with that role, in priority order. Each
     /// row has its own checkbox.
@@ -58,8 +75,8 @@ pub struct SettingsForm {
     pub field_map: Option<Vec<FieldMapping>>,
     /// Windows preference answer.
     pub background_on_close: Option<bool>,
-    /// The action is off when this value is `None`.
-    pub ocr_clipboard_key: Option<String>,
+    /// The loaded library helps profile switches retain role corrections.
+    library: Option<Library>,
     /// Saved targets can change while this form is open.
     /// Only an explicit reset can remove a target from the latest Config.
     pub screenshot_reset_targets: bool,
@@ -83,6 +100,191 @@ pub struct StagedAdd {
     pub source: PathBuf,
     /// The title that the Dictionary provides.
     pub name: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ListPosition {
+    enabled: bool,
+    index: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct StagedProfileDictionaryState {
+    terms: Option<ListPosition>,
+    pitch: Option<ListPosition>,
+    languages: BTreeMap<String, usize>,
+    terms_override: bool,
+    pitch_override: bool,
+    languages_override: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct StagedDictionaryState {
+    profiles: BTreeMap<String, StagedProfileDictionaryState>,
+    frequency: Option<ListPosition>,
+}
+fn role_position(list: &RoleList, name: &str) -> Option<ListPosition> {
+    list.enabled.iter().position(|entry| entry == name).map(|index| ListPosition {
+        enabled: true,
+        index,
+    }).or_else(|| list.disabled.iter().position(|entry| entry == name).map(|index| ListPosition {
+        enabled: false,
+        index,
+    }))
+}
+
+fn row_position(rows: &[DictRow], name: &str) -> Option<ListPosition> {
+    let index = rows.iter().position(|row| row.name == name)?;
+    let enabled = rows[index].enabled;
+    let role_index = rows[..index].iter().filter(|row| row.enabled == enabled).count();
+    Some(ListPosition { enabled, index: role_index })
+}
+
+fn staged_dictionary_state(form: &SettingsForm, name: &str) -> StagedDictionaryState {
+    let mut state = StagedDictionaryState {
+        frequency: row_position(&form.frequency, name),
+        ..Default::default()
+    };
+    for profile in &form.catalog.profiles {
+        let Ok(settings) = form.catalog.resolve(&profile.id) else { continue };
+        let (mut terms_override, mut pitch_override, mut languages_override) = match &profile.data {
+            ProfileData::Full { .. } => (true, true, true),
+            ProfileData::Derived { overrides, .. } => (
+                overrides.contains_key("dictionaries.terms"),
+                overrides.contains_key("dictionaries.pitch"),
+                overrides.contains_key("dictionaries.per_language"),
+            ),
+        };
+        for prior in form.staged_add_before.values()
+            .filter_map(|state| state.profiles.get(&profile.id))
+        {
+            terms_override &= prior.terms_override;
+            pitch_override &= prior.pitch_override;
+            languages_override &= prior.languages_override;
+        }
+        let mut profile_state = StagedProfileDictionaryState {
+            terms: role_position(&settings.dictionaries.terms, name),
+            pitch: role_position(&settings.dictionaries.pitch, name),
+            languages: settings.dictionaries.per_language.iter()
+                .filter_map(|(language, names)| {
+                    names.iter().position(|entry| entry == name)
+                        .map(|index| (language.clone(), index))
+                })
+                .collect(),
+            terms_override,
+            pitch_override,
+            languages_override,
+        };
+        if profile.id == form.profile_id {
+            profile_state.pitch = row_position(&form.pitch, name);
+            if is_scoped(form) {
+                let language = &form.cfg.ocr.language;
+                profile_state.languages.remove(language);
+                if let Some(prior) = row_position(&form.terms, name).filter(|prior| prior.enabled) {
+                    profile_state.languages.insert(language.clone(), prior.index);
+                }
+            } else {
+                profile_state.terms = row_position(&form.terms, name);
+            }
+        }
+        state.profiles.insert(profile.id.clone(), profile_state);
+    }
+    state
+}
+
+fn restore_role_name(list: &mut RoleList, name: &str, prior: Option<ListPosition>) -> bool {
+    let Some(prior) = prior else {
+        let before = list.enabled.len() + list.disabled.len();
+        list.enabled.retain(|entry| entry != name);
+        list.disabled.retain(|entry| entry != name);
+        return before != list.enabled.len() + list.disabled.len();
+    };
+    let current = role_position(list, name);
+    let Some(current) = current else { return false };
+    if current.enabled == prior.enabled {
+        return false;
+    }
+    list.enabled.retain(|entry| entry != name);
+    list.disabled.retain(|entry| entry != name);
+    let target = if prior.enabled { &mut list.enabled } else { &mut list.disabled };
+    target.insert(prior.index.min(target.len()), name.to_string());
+    true
+}
+
+fn restore_language_name(names: &mut Vec<String>, name: &str, prior: Option<usize>) -> bool {
+    let Some(index) = prior else {
+        let before = names.len();
+        names.retain(|entry| entry != name);
+        return names.len() != before;
+    };
+    if names.iter().any(|entry| entry == name) {
+        return false;
+    }
+    names.insert(index.min(names.len()), name.to_string());
+    true
+}
+
+fn restore_staged_dictionary(
+    cfg: &mut Config,
+    name: &str,
+    before: &StagedDictionaryState,
+    remaining: &[StagedAdd],
+) {
+    let mut frequency = RoleList {
+        enabled: cfg.dictionaries.frequency.clone(),
+        disabled: cfg.dictionaries.frequency_disabled.clone(),
+    };
+    if restore_role_name(&mut frequency, name, before.frequency) {
+        cfg.dictionaries.frequency = frequency.enabled;
+        cfg.dictionaries.frequency_disabled = frequency.disabled;
+    }
+
+    let mut ids: Vec<(bool, String)> = cfg.profiles.iter().map(|profile| {
+        (matches!(&profile.data, ProfileData::Derived { .. }), profile.id.clone())
+    }).collect();
+    ids.sort_by_key(|(derived, _)| *derived);
+    for (_, id) in ids {
+        let prior = before.profiles.get(&id).cloned().unwrap_or_default();
+        let mut settings = match cfg.resolve(&id) {
+            Ok(settings) => settings,
+            Err(_) => continue,
+        };
+        let mut changed = restore_role_name(&mut settings.dictionaries.terms, name, prior.terms);
+        changed |= restore_role_name(&mut settings.dictionaries.pitch, name, prior.pitch);
+        for (language, names) in &mut settings.dictionaries.per_language {
+            changed |= restore_language_name(names, name, prior.languages.get(language).copied());
+        }
+        if changed {
+            cfg.update_profile(&id, &settings)
+                .expect("a valid catalog must update its profile");
+        }
+        let Some(profile) = cfg.profiles.iter().find(|profile| profile.id == id) else { continue };
+        if !matches!(&profile.data, ProfileData::Derived { .. }) {
+            continue;
+        }
+        if !prior.terms_override && !remaining.iter().any(|add| {
+            role_position(&settings.dictionaries.terms, &add.name).is_some()
+        })
+        {
+            cfg.reset_override(&id, "dictionaries.terms")
+                .expect("the terms override must be valid");
+        }
+        if !prior.pitch_override && !remaining.iter().any(|add| {
+            role_position(&settings.dictionaries.pitch, &add.name).is_some()
+        })
+        {
+            cfg.reset_override(&id, "dictionaries.pitch")
+                .expect("the pitch override must be valid");
+        }
+        if !prior.languages_override && !remaining.iter().any(|add| {
+            settings.dictionaries.per_language.values()
+                .any(|names| names.contains(&add.name))
+        })
+        {
+            cfg.reset_override(&id, "dictionaries.per_language")
+                .expect("the language override must be valid");
+        }
+    }
 }
 
 impl SettingsForm {
@@ -113,43 +315,65 @@ impl SettingsForm {
     /// The function returns `None` when the archive is unreadable or already
     /// staged. An unreadable archive has no role list.
     pub fn stage_add(&mut self, source: &Path) -> Option<Roles> {
+        if self.staged_adds.iter().any(|add| add.source == source) {
+            return None;
+        }
         let roles = roles_of(source);
         if roles.is_empty() {
             return None;
         }
         let name = archive_title(source)?;
-        // Titles can repeat because split editions use one title.
-        if self.staged_adds.iter().any(|a| a.source == source) {
-            return None;
+        self.track_staged_dictionary_edits();
+        if !self.staged_add_before.contains_key(&name) {
+            let before = staged_dictionary_state(self, &name);
+            self.staged_add_before.insert(name.clone(), before);
         }
+        // Titles can repeat because split editions use one title.
         for role in roles.iter() {
-            self.list_mut(role).push(DictRow { name: name.clone(), enabled: true });
+            let rows = self.list_mut(role);
+            if let Some(row) = rows.iter_mut().find(|row| row.name == name) {
+                row.enabled = true;
+            } else {
+                rows.push(DictRow { name: name.clone(), enabled: true });
+            }
         }
         if roles.has(Role::Frequency) {
             self.freq_changed = true;
         }
-        self.staged_adds.push(StagedAdd { source: source.to_path_buf(), name });
+        let source = source.to_path_buf();
+        self.staged_add_profiles.insert(source.clone(), self.profile_id.clone());
+        self.staged_adds.push(StagedAdd { source, name });
         Some(roles)
     }
 
     /// Stages a row for removal.
     ///
-    /// The row leaves all role lists. One archive is one Dictionary, so removal
-    /// removes it from all three roles.
+    /// Cancels a staged import or stages a saved Dictionary for removal.
     pub fn stage_remove(&mut self, name: &str) {
         let was_freq = self.frequency.iter().any(|row| row.name == name);
-        for role in Role::EVERY {
-            self.list_mut(role).retain(|row| row.name != name);
-        }
-        let staged = self.staged_adds.len();
-        self.staged_adds.retain(|a| a.name != name);
-        // The staged import never reached the Library.
-        if self.staged_adds.len() == staged && !self.staged_removes.iter().any(|n| n == name) {
-            self.staged_removes.push(name.to_string());
+        if self.is_staged_add(name) {
+            self.save_current().expect("the selected profile must save before cancellation");
+            self.staged_adds.retain(|add| add.name != name);
+            self.staged_add_profiles.retain(|source, _| {
+                self.staged_adds.iter().any(|add| add.source == *source)
+            });
+            if let Some(before) = self.staged_add_before.remove(name) {
+                restore_staged_dictionary(&mut self.catalog, name, &before, &self.staged_adds);
+            }
+            let id = self.profile_id.clone();
+            self.load_profile(&id, None).expect("the selected profile must reload after cancellation");
+        } else {
+            for role in Role::EVERY {
+                self.list_mut(role).retain(|row| row.name != name);
+            }
+            if !self.staged_removes.iter().any(|entry| entry == name) {
+                self.staged_removes.push(name.to_string());
+            }
         }
         if was_freq {
             self.freq_changed = true;
         }
+
     }
 
     /// Returns true when the form has staged changes.
@@ -161,7 +385,9 @@ impl SettingsForm {
     pub fn clear_staged(&mut self) {
         self.staged_adds.clear();
         self.staged_removes.clear();
+        self.staged_add_before.clear();
         self.freq_changed = false;
+        self.staged_add_profiles.clear();
     }
 
     /// Copies the per-language lists that Apply wrote.
@@ -172,6 +398,269 @@ impl SettingsForm {
     /// Returns true when this row names a staged import.
     pub fn is_staged_add(&self, name: &str) -> bool {
         self.staged_adds.iter().any(|a| a.name == name)
+    }
+    /// Saves edits to the selected profile and shared settings.
+    pub fn save_current(&mut self) -> Result<()> {
+        let mut catalog = self.catalog.clone();
+        let mut settings = catalog.resolve(&self.profile_id)?;
+        let edited = profile_settings_from_form(self, &self.baseline_profile)?;
+        merge_profile_edits(
+            &self.baseline_profile,
+            &edited,
+            &mut settings,
+            &self.staged_removes,
+        )?;
+        catalog.update_profile(&self.profile_id, &settings)?;
+        merge_shared_form(
+            &mut catalog,
+            &self.baseline_cfg,
+            &self.baseline_frequency,
+            self,
+        );
+        if self.screenshot_reset_targets {
+            let profile = catalog.profiles.iter_mut().find(|profile| profile.id == self.profile_id)
+                .expect("the selected profile must exist");
+            reset_screenshot_targets(profile);
+            if !self.screenshot_resets.contains(&self.profile_id) {
+                self.screenshot_resets.insert(self.profile_id.clone());
+            }
+            self.screenshot_reset_targets = false;
+        }
+        self.track_staged_dictionary_edits();
+        self.catalog = catalog;
+        self.refresh_baseline()?;
+        Ok(())
+    }
+
+    pub fn accept_applied(&mut self, applied: AppliedSettings, dicts: &[DictInfo]) -> Result<()> {
+        anyhow::ensure!(
+            applied.config.profiles.iter().any(|profile| profile.id == applied.profile_id),
+            "Profile {:?} no longer exists.", applied.profile_id,
+        );
+        self.staged_add_profiles.retain(|source, _| {
+            self.staged_adds.iter().any(|add| add.source == *source)
+        });
+        for owner in self.staged_add_profiles.values_mut() {
+            if let Some(id) = applied.remapped.get(owner) {
+                owner.clone_from(id);
+            }
+        }
+        self.baseline_catalog = applied.config.clone();
+        self.catalog = applied.config;
+        self.screenshot_resets.clear();
+        if self.dicts.as_slice() != dicts {
+            self.dicts.clear();
+            self.dicts.extend_from_slice(dicts);
+        }
+        self.load_profile(&applied.profile_id, Some(dicts))
+    }
+
+    /// Saves current edits and loads a profile by stable ID.
+    pub fn select_profile(&mut self, id: &str, dicts: &[DictInfo]) -> Result<()> {
+        self.catalog.resolve(id)?;
+        self.save_current()?;
+        self.load_profile(id, Some(dicts))
+    }
+
+    /// Creates and selects a full default profile or a derived profile.
+    pub fn create_profile(
+        &mut self,
+        name: String,
+        parent: Option<&str>,
+        dicts: &[DictInfo],
+    ) -> Result<String> {
+        ensure_profile_name(&name)?;
+        self.save_current()?;
+        if let Some(parent) = parent {
+            let source = self.catalog.profiles.iter().find(|profile| profile.id == parent);
+            anyhow::ensure!(
+                source.is_some_and(|profile| matches!(&profile.data, ProfileData::Full { .. })),
+                "A derived profile must inherit a full profile."
+            );
+        }
+        let id = self.catalog.next_profile_id();
+        let data = match parent {
+            Some(parent) => ProfileData::Derived { parent: parent.to_string(), overrides: BTreeMap::new() },
+            None => ProfileData::Full { settings: Box::new(ProfileSettings::default()) },
+        };
+        self.catalog.profiles.push(Profile { id: id.clone(), name, data });
+        self.load_profile(&id, Some(dicts))?;
+        Ok(id)
+    }
+
+    /// Creates and selects a full copy of the selected effective profile.
+    pub fn duplicate_profile(&mut self, name: String, dicts: &[DictInfo]) -> Result<String> {
+        ensure_profile_name(&name)?;
+        self.save_current()?;
+        let settings = self.catalog.resolve(&self.profile_id)?;
+        let id = self.catalog.next_profile_id();
+        self.catalog.profiles.push(Profile {
+            id: id.clone(),
+            name,
+            data: ProfileData::Full { settings: Box::new(settings) },
+        });
+        self.load_profile(&id, Some(dicts))?;
+        Ok(id)
+    }
+
+    /// Renames the selected profile without changing its stable ID.
+    pub fn rename_profile(&mut self, name: String) -> Result<()> {
+        ensure_profile_name(&name)?;
+        let profile = self.catalog.profiles.iter_mut()
+            .find(|profile| profile.id == self.profile_id)
+            .with_context(|| format!("Profile {:?} does not exist.", self.profile_id))?;
+        profile.name = name;
+        Ok(())
+    }
+
+    /// Removes a profile only when no saved reference names it.
+    pub fn delete_profile(&mut self, id: &str, dicts: &[DictInfo]) -> Result<()> {
+        self.catalog.resolve(id)?;
+        self.save_current()?;
+        self.catalog.remove_profile(id)?;
+        if self.profile_id == id {
+            let default = self.catalog.default_profile.clone();
+            self.load_profile(&default, Some(dicts))?;
+        }
+        Ok(())
+    }
+
+    /// Changes only the catalog's default profile.
+    pub fn set_default_profile(&mut self, id: &str) -> Result<()> {
+        self.catalog.resolve(id)?;
+        self.catalog.default_profile = id.to_string();
+        Ok(())
+    }
+
+    /// Removes one inherited value from the selected derived profile.
+    pub fn reset_profile_override(&mut self, path: &str, dicts: &[DictInfo]) -> Result<()> {
+        self.save_current()?;
+        self.catalog.reset_override(&self.profile_id, path)?;
+        for state in self.staged_add_before.values_mut() {
+            if let Some(prior) = state.profiles.get_mut(&self.profile_id) {
+                match path {
+                    "dictionaries.terms" => prior.terms_override = false,
+                    "dictionaries.pitch" => prior.pitch_override = false,
+                    "dictionaries.per_language" => prior.languages_override = false,
+                    _ => {}
+                }
+            }
+        }
+        let id = self.profile_id.clone();
+        self.load_profile(&id, Some(dicts))
+    }
+
+    fn track_staged_dictionary_edits(&mut self) {
+        if self.staged_add_before.is_empty() {
+            return;
+        }
+        let same_names = |before: &[String], after: &[String]| {
+            before.iter().filter(|name| !self.is_staged_add(name))
+                .eq(after.iter().filter(|name| !self.is_staged_add(name)))
+        };
+        let same_rows = |before: &[DictRow], after: &[DictRow]| {
+            [true, false].into_iter().all(|enabled| {
+                let unchanged = |row: &&DictRow| row.enabled == enabled && !self.is_staged_add(&row.name);
+                before.iter().filter(unchanged).eq(after.iter().filter(unchanged))
+            })
+        };
+        let before = &self.baseline_cfg.dictionaries;
+        let after = &self.cfg.dictionaries;
+        let terms_changed = !same_rows(&self.baseline_terms, &self.terms);
+        let scoped = is_scoped(self);
+        let terms_override = (!scoped && terms_changed)
+            || !same_names(&before.terms, &after.terms)
+            || !same_names(&before.terms_disabled, &after.terms_disabled);
+        let pitch_override = !same_rows(&self.baseline_pitch, &self.pitch)
+            || !same_names(&before.pitch, &after.pitch)
+            || !same_names(&before.pitch_disabled, &after.pitch_disabled);
+        let languages_override = (scoped && terms_changed)
+            || before.per_language.len() != after.per_language.len()
+            || before.per_language.iter().any(|(language, names)| {
+                after.per_language.get(language).is_none_or(|current| !same_names(names, current))
+            });
+        if !terms_override && !pitch_override && !languages_override {
+            return;
+        }
+        for state in self.staged_add_before.values_mut() {
+            if let Some(prior) = state.profiles.get_mut(&self.profile_id) {
+                prior.terms_override |= terms_override;
+                prior.pitch_override |= pitch_override;
+                prior.languages_override |= languages_override;
+            } else {
+                state.profiles.insert(self.profile_id.clone(), StagedProfileDictionaryState {
+                    terms_override,
+                    pitch_override,
+                    languages_override,
+                    ..Default::default()
+                });
+            }
+        }
+    }
+
+    fn refresh_baseline(&mut self) -> Result<()> {
+        self.cfg = self.catalog.resolved(Some(&self.profile_id))?;
+        self.baseline_cfg = self.cfg.clone();
+        self.baseline_profile = self.catalog.resolve(&self.profile_id)?;
+        self.baseline_frequency = self.frequency.clone();
+        self.baseline_terms = self.terms.clone();
+        self.baseline_pitch = self.pitch.clone();
+        Ok(())
+    }
+
+    fn load_profile(&mut self, id: &str, dicts: Option<&[DictInfo]>) -> Result<()> {
+        let cfg = self.catalog.resolved(Some(id))?;
+        let settings = self.catalog.resolve(id)?;
+        let (mut terms, frequency, pitch) = rows_for_profile(&cfg, dicts.unwrap_or(&self.dicts));
+        if let Some(library) = &self.library {
+            apply_library_rows(&mut terms, Role::Terms, library);
+            let mut frequency = frequency;
+            apply_library_rows(&mut frequency, Role::Frequency, library);
+            let mut pitch = pitch;
+            apply_library_rows(&mut pitch, Role::Pitch, library);
+            self.frequency = frequency;
+            self.pitch = pitch;
+        } else {
+            self.frequency = frequency;
+            self.pitch = pitch;
+        }
+        for add in &self.staged_adds {
+            let roles = roles_of(&add.source);
+            let enabled = self.staged_add_profiles.get(&add.source)
+                .is_none_or(|owner| owner == id);
+            for role in roles.iter() {
+                let rows = match role {
+                    Role::Terms => &mut terms,
+                    Role::Frequency => &mut self.frequency,
+                    Role::Pitch => &mut self.pitch,
+                };
+                if !rows.iter().any(|row| row.name == add.name) {
+                    let enabled = enabled && (role != Role::Terms
+                        || !cfg.dictionaries.per_language.contains_key(&cfg.ocr.language));
+                    rows.push(DictRow { name: add.name.clone(), enabled });
+                }
+            }
+        }
+        self.cfg = cfg;
+        self.profile_id = id.to_string();
+        self.terms = terms;
+        for file in &self.unreadable {
+            if !self.terms.iter().any(|row| row.name == *file) {
+                self.terms.push(DictRow { name: file.clone(), enabled: false });
+            }
+        }
+        for rows in [&mut self.terms, &mut self.frequency, &mut self.pitch] {
+            rows.retain(|row| !self.staged_removes.contains(&row.name));
+        }
+        self.dict_list_language = self.cfg.ocr.language.clone();
+        self.field_map = Some(self.cfg.anki.field_map.clone());
+        self.baseline_cfg = self.cfg.clone();
+        self.baseline_profile = settings;
+        self.baseline_frequency = self.frequency.clone();
+        self.baseline_terms = self.terms.clone();
+        self.baseline_pitch = self.pitch.clone();
+        self.screenshot_reset_targets = false;
+        Ok(())
     }
 }
 
@@ -202,36 +691,12 @@ pub fn is_scoped(form: &SettingsForm) -> bool {
         && form.cfg.dictionaries.per_language.contains_key(&form.cfg.ocr.language)
 }
 
-/// Merges the form's Dictionary rows with the Library.
-///
-/// The Library is the authority on roles because roles come from archive banks.
-/// A Library name with no role leaves that role's list. An archive with a role
-/// absent from a list goes to that list's bottom, enabled. An unknown name
-/// stays in the config's position. It can name an archive on a disconnected
-/// drive or an archive from a database built outside the app.
-///
-/// The terms list also holds unreadable files so the user can remove them.
-/// This is the only reason the window shows a row with no roles.
+/// Merges installed Dictionary roles into the form's lists.
 pub fn with_library(mut form: SettingsForm, lib: &Library) -> SettingsForm {
-    for role in Role::EVERY {
-        let rows = form.list_mut(role);
-        rows.retain(|row| {
-            lib.entries.iter().find(|e| e.name == row.name).is_none_or(|e| e.roles.has(role))
-        });
-        for entry in lib.entries.iter().filter(|e| e.roles.has(role)) {
-            if !rows.iter().any(|row| row.name == entry.name) {
-                rows.push(DictRow { name: entry.name.clone(), enabled: true });
-            }
-        }
-    }
-    form.unreadable =
-        lib.entries.iter().filter(|e| e.roles.is_empty()).map(|e| e.file.clone()).collect();
-    for file in &form.unreadable {
-        if !form.terms.iter().any(|row| row.name == *file) {
-            form.terms.push(DictRow { name: file.clone(), enabled: false });
-        }
-    }
-    form.library_empty = lib.is_empty();
+    apply_library(&mut form, lib);
+    form.library = Some(lib.clone());
+    form.baseline_terms = form.terms.clone();
+    form.baseline_pitch = form.pitch.clone();
     form
 }
 
@@ -311,263 +776,828 @@ fn mutate(
 /// installed Dictionary remains a row. The row stays in the file, so a
 /// disconnected drive cannot remove it from the list.
 /// `with_library` then corrects the roles.
-fn rows_for(cfg: &Config, role: Role, dicts: &[DictInfo]) -> Vec<DictRow> {
+fn rows_for(cfg: &ResolvedConfig, role: Role) -> Vec<DictRow> {
     cfg.dictionaries
-        .listed(role, dicts)
+        .listed(role)
         .into_iter()
         .map(|(name, enabled)| DictRow { name, enabled })
         .collect()
 }
 
-/// Builds the config's lists and the active language's terms scope.
-pub fn from_config(cfg: &Config, dicts: &[DictInfo]) -> SettingsForm {
-    let mut terms = rows_for(cfg, Role::Terms, dicts);
-    let frequency = rows_for(cfg, Role::Frequency, dicts);
-    let pitch = rows_for(cfg, Role::Pitch, dicts);
-    // A database built outside the app can contain Dictionaries that no list has
-    // named. The Library has no entry for them, so it cannot read their roles.
-    // The popup searches only the terms list, so the code places these
-    // Dictionaries there.
-    // `with_library` moves them when the Library holds the archive.
+fn rows_for_profile(cfg: &ResolvedConfig, dicts: &[DictInfo]) -> (Vec<DictRow>, Vec<DictRow>, Vec<DictRow>) {
+    let mut terms = rows_for(cfg, Role::Terms);
+    let frequency = rows_for(cfg, Role::Frequency);
+    let pitch = rows_for(cfg, Role::Pitch);
     for dict in dicts {
-        let named = [&terms, &frequency, &pitch]
+        if ![&terms, &frequency, &pitch]
             .iter()
-            .any(|rows| rows.iter().any(|row| row.name == dict.name));
-        if !named {
-            terms.push(DictRow { name: dict.name.clone(), enabled: true });
+            .any(|rows| rows.iter().any(|row| row.name == dict.name))
+        {
+            terms.push(DictRow { name: dict.name.clone(), enabled: false });
         }
     }
-    // The active language's list supplies the terms order that this window edits.
-    // Its rows come first and stay checked. Other Dictionaries follow and stay
-    // unchecked.
-    if let Some(scope) = cfg.dictionaries.language_scope(&cfg.ocr.language, dicts) {
-        let mut rows: Vec<DictRow> =
+    if let Some(scope) = cfg.dictionaries.language_scope(&cfg.ocr.language) {
+        let mut scoped: Vec<DictRow> =
             scope.into_iter().map(|name| DictRow { name, enabled: true }).collect();
         for row in terms {
-            if !rows.iter().any(|seen| seen.name == row.name) {
-                rows.push(DictRow { name: row.name, enabled: false });
+            if !scoped.iter().any(|seen| seen.name == row.name) {
+                scoped.push(DictRow { name: row.name, enabled: false });
             }
         }
-        terms = rows;
+        terms = scoped;
     }
+    (terms, frequency, pitch)
+}
 
+fn apply_library_rows(rows: &mut Vec<DictRow>, role: Role, lib: &Library) {
+    rows.retain(|row| {
+        lib.entries.iter().find(|entry| entry.name == row.name)
+            .is_none_or(|entry| entry.roles.has(role))
+    });
+    for entry in lib.entries.iter().filter(|entry| entry.roles.has(role)) {
+        if !rows.iter().any(|row| row.name == entry.name) {
+            rows.push(DictRow { name: entry.name.clone(), enabled: false });
+        }
+    }
+}
+
+fn apply_library(form: &mut SettingsForm, lib: &Library) {
+    apply_library_rows(&mut form.terms, Role::Terms, lib);
+    apply_library_rows(&mut form.frequency, Role::Frequency, lib);
+    apply_library_rows(&mut form.pitch, Role::Pitch, lib);
+    form.unreadable =
+        lib.entries.iter().filter(|entry| entry.roles.is_empty()).map(|entry| entry.file.clone()).collect();
+    for file in &form.unreadable {
+        if !form.terms.iter().any(|row| row.name == *file) {
+            form.terms.push(DictRow { name: file.clone(), enabled: false });
+        }
+    }
+    form.library_empty = lib.is_empty();
+}
+
+/// Builds a form from the saved catalog's default profile.
+pub fn from_config(cfg: &Config, dicts: &[DictInfo]) -> SettingsForm {
+    let retained = crate::config::ProfileCatalog::new(cfg, dicts)
+        .expect("settings require a valid saved profile catalog");
+    let catalog = retained.config.clone();
+    let profile_id = catalog.default_profile.clone();
+    let resolved = catalog.resolved(Some(&profile_id))
+        .expect("the saved default profile must resolve");
+    let settings = catalog.resolve(&profile_id)
+        .expect("the saved default profile must resolve");
+    let (terms, frequency, pitch) = rows_for_profile(&resolved, dicts);
     SettingsForm {
-        cfg: cfg.clone(),
+        cfg: resolved.clone(),
+        catalog: catalog.clone(),
+        profile_id,
+        baseline_catalog: catalog,
+        staged_add_before: BTreeMap::new(),
+        baseline_cfg: resolved.clone(),
+        baseline_profile: settings,
+        baseline_terms: terms.clone(),
+        baseline_pitch: pitch.clone(),
+        screenshot_resets: Default::default(),
+        baseline_frequency: frequency.clone(),
         terms,
         frequency,
         pitch,
-        dict_list_language: cfg.ocr.language.clone(),
+        dict_list_language: resolved.ocr.language.clone(),
         freq_changed: false,
         staged_adds: Vec::new(),
-        staged_removes: Vec::new(),
+        staged_add_profiles: BTreeMap::new(),
         library_empty: false,
         unreadable: Vec::new(),
-        field_map: Some(cfg.anki.field_map.clone()),
+        field_map: Some(resolved.anki.field_map.clone()),
         background_on_close: None,
-        ocr_clipboard_key: cfg
-            .actions
-            .ocr_clipboard
-            .as_ref()
-            .and_then(|action| action.hotkey.clone()),
+        library: None,
+        dicts: dicts.to_vec(),
+        staged_removes: Vec::new(),
         screenshot_reset_targets: false,
     }
 }
 
-/// Returns the Dictionaries that one language searches from the visible rows.
-///
-/// The result contains enabled rows by exact name and screen order. An
-/// unreadable file remains a row for removal, but it is not a Dictionary to
-/// search. The function returns `None` when no searchable name remains,
-/// because an entry with no Dictionary equals no entry. The caller leaves
-/// the saved entry unchanged.
+
+/// Returns enabled names in row order, including an explicit empty list.
 pub fn scoped_entry(rows: &[DictRow], unreadable: &[String]) -> Option<Vec<String>> {
-    let named: Vec<String> = rows
-        .iter()
-        .filter(|row| row.enabled && !unreadable.contains(&row.name))
-        .map(|row| row.name.clone())
-        .collect();
-    (!named.is_empty()).then_some(named)
-}
-
-/// Converts the form back into its source Config.
-pub fn apply_to(form: &SettingsForm, cfg: &Config) -> Config {
-    let mut out = cfg.clone();
-    out.actions.search.hotkey = form.cfg.actions.search.hotkey.clone();
-    out.actions.search.sentence_hotkey = form.cfg.actions.search.sentence_hotkey.clone();
-    out.actions.search.selected_hotkey = form.cfg.actions.search.selected_hotkey.clone();
-    out.actions.search.selected_opens_sentence_search = form.cfg.actions.search.selected_opens_sentence_search;
-    out.trigger = form.cfg.trigger.clone();
-    out.popup = form.cfg.popup.clone();
-    out.ocr = form.cfg.ocr.clone();
-    out.debug = form.cfg.debug.clone();
-    if let Some(background_on_close) = form.background_on_close {
-        out.application.background_on_close = background_on_close;
-    }
-    out.anki = form.cfg.anki.clone();
-    out.plugins.enabled = form.cfg.plugins.enabled.clone();
-    out.actions.screenshot.include_on_add = form.cfg.actions.screenshot.include_on_add;
-    out.actions.screenshot.capture_mode = form.cfg.actions.screenshot.capture_mode;
-    // Fields that no form renders keep the latest saved value. The daemon writes
-    // `anki.static_region` and the screenshot targets while a window is open, and
-    // the Linux overlay (`LinuxFields::apply_over`) owns the `_linux` twins,
-    // `popup.layer`, and `debug.show_lookup_log`.
-    out.trigger.trigger_key_linux = cfg.trigger.trigger_key_linux.clone();
-    out.anki.add_key_linux = cfg.anki.add_key_linux.clone();
-    out.anki.static_region_key_linux = cfg.anki.static_region_key_linux.clone();
-    out.anki.static_region = cfg.anki.static_region;
-    out.popup.layer = cfg.popup.layer;
-    out.debug.show_lookup_log = cfg.debug.show_lookup_log;
-    out.anki.field_map = form.field_map.clone().unwrap_or_else(|| cfg.anki.field_map.clone());
-    if form.screenshot_reset_targets {
-        out.actions.screenshot.fixed_region = None;
-        out.actions.screenshot.fixed_window = None;
-    }
-    // The form renders only the Windows chord, so the Linux chord stays unchanged.
-    // The section stays when either chord has a value. The code can clear one
-    // chord and keep the other.
-    let hotkey_linux = cfg.actions.ocr_clipboard.as_ref().and_then(|a| a.hotkey_linux.clone());
-    let open_sentence_search = form.cfg.actions.ocr_clipboard.as_ref().is_some_and(|a| a.open_sentence_search);
-    out.actions.ocr_clipboard = match (&form.ocr_clipboard_key, &hotkey_linux) {
-        (None, None) if !open_sentence_search => None,
-        (hotkey, hotkey_linux) => Some(OcrClipboardConfig { open_sentence_search,
-            hotkey: hotkey.clone(),
-            hotkey_linux: hotkey_linux.clone(),
-        }),
-    };
-    out.clamp_ranges(None);
-    // Each role list becomes an enabled array and a disabled array. Each array
-    // keeps its rows in screen order. An unreadable file remains a row for
-    // removal, but it is not a Dictionary and reaches neither array.
-    // `display_order` receives no values. The empty field disappears from the
-    // file after an upgrade.
-    for role in Role::EVERY {
-        let named = |enabled: bool| -> Vec<String> {
-            form.list(role)
-                .iter()
-                .filter(|row| row.enabled == enabled)
-                .map(|row| row.name.clone())
-                .filter(|name| !form.unreadable.contains(name))
-                .collect()
-        };
-        out.dictionaries.set_lists(role, named(true), named(false));
-    }
-    out.dictionaries.ranking_strategy = form.cfg.dictionaries.ranking_strategy;
-    out.dictionaries.display_order.clear();
-
-    let mut per_language = form.cfg.dictionaries.per_language.clone();
-    if is_scoped(form) {
-        if let Some(named) = scoped_entry(&form.terms, &form.unreadable) {
-            per_language.insert(form.cfg.ocr.language.clone(), named);
+    let mut names = Vec::new();
+    let mut selected_unreadable = false;
+    for row in rows.iter().filter(|row| row.enabled) {
+        if unreadable.contains(&row.name) {
+            selected_unreadable = true;
+        } else {
+            names.push(row.name.clone());
         }
     }
-    out.dictionaries.per_language = per_language;
-    out
+    if names.is_empty() && selected_unreadable { None } else { Some(names) }
+}
+
+fn role_list(rows: &[DictRow], unreadable: &[String]) -> RoleList {
+    let names = |enabled| {
+        rows.iter()
+            .filter(|row| row.enabled == enabled && !unreadable.contains(&row.name))
+            .map(|row| row.name.clone())
+            .collect()
+    };
+    RoleList { enabled: names(true), disabled: names(false) }
+}
+
+fn reset_screenshot_targets(profile: &mut Profile) {
+    match &mut profile.data {
+        ProfileData::Full { settings } => {
+            settings.actions.screenshot.fixed_region = None;
+            settings.actions.screenshot.fixed_window = None;
+        }
+        ProfileData::Derived { overrides, .. } => {
+            for path in ["actions.screenshot.fixed_region", "actions.screenshot.fixed_window"] {
+                if let Some(value) = overrides.get_mut(path) {
+                    *value = FieldOverride::Clear;
+                } else {
+                    overrides.insert(path.to_string(), FieldOverride::Clear);
+                }
+            }
+        }
+    }
+}
+
+fn profile_settings_from_form(
+    form: &SettingsForm,
+    baseline: &ProfileSettings,
+) -> Result<ProfileSettings> {
+    let mut effective = form.cfg.clone();
+    effective.clamp_ranges(None);
+    let mut settings = ProfileSettings::from_resolved(&effective);
+    if form.terms != form.baseline_terms {
+        if is_scoped(form) {
+            if let Some(names) = scoped_entry(&form.terms, &form.unreadable) {
+                settings.dictionaries.per_language.insert(form.cfg.ocr.language.clone(), names);
+            }
+        } else {
+            settings.dictionaries.terms = role_list(&form.terms, &form.unreadable);
+        }
+    }
+    if form.pitch != form.baseline_pitch {
+        settings.dictionaries.pitch = role_list(&form.pitch, &form.unreadable);
+    }
+    if let Some(field_map) = &form.field_map {
+        settings.anki.field_map = field_map.clone();
+    } else {
+        settings.anki.field_map = baseline.anki.field_map.clone();
+    }
+    for name in &form.staged_removes {
+        remove_profile_dictionary(&mut settings, name);
+    }
+    Ok(settings)
+}
+
+fn remove_profile_dictionary(settings: &mut ProfileSettings, name: &str) {
+    settings.dictionaries.terms.enabled.retain(|entry| entry != name);
+    settings.dictionaries.terms.disabled.retain(|entry| entry != name);
+    settings.dictionaries.pitch.enabled.retain(|entry| entry != name);
+    settings.dictionaries.pitch.disabled.retain(|entry| entry != name);
+    for list in settings.dictionaries.per_language.values_mut() {
+        list.retain(|entry| entry != name);
+    }
 }
 
 
-/// Reports capture-size values that `apply_to` changed.
-pub fn clamp_notice(form: &SettingsForm, applied: &Config) -> Option<String> {
+fn merge_role_list(
+    before: &RoleList,
+    edited: &RoleList,
+    latest: &RoleList,
+    removed: &[String],
+) -> RoleList {
+    let mut merged = edited.clone();
+    for (enabled, source) in [(true, &latest.enabled), (false, &latest.disabled)] {
+        for name in source {
+            if !before.enabled.iter().chain(&before.disabled).any(|entry| entry == name)
+                && !merged.enabled.iter().chain(&merged.disabled).any(|entry| entry == name)
+                && !removed.contains(name)
+            {
+                let target = if enabled { &mut merged.enabled } else { &mut merged.disabled };
+                target.push(name.clone());
+            }
+        }
+    }
+    merged.enabled.retain(|name| !removed.contains(name));
+    merged.disabled.retain(|name| !removed.contains(name));
+    merged
+}
+
+fn merge_language_lists(
+    before: &BTreeMap<String, Vec<String>>,
+    edited: &BTreeMap<String, Vec<String>>,
+    latest: &BTreeMap<String, Vec<String>>,
+    removed: &[String],
+) -> BTreeMap<String, Vec<String>> {
+    let mut merged = latest.clone();
+    for language in before.keys().chain(edited.keys()) {
+        if before.get(language) == edited.get(language) {
+            continue;
+        }
+        match edited.get(language) {
+            Some(names) => {
+                let mut result = names.clone();
+                if let Some(current) = latest.get(language) {
+                    for name in current {
+                        if !before.get(language).is_some_and(|values| values.contains(name))
+                            && !result.contains(name)
+                            && !removed.contains(name)
+                        {
+                            result.push(name.clone());
+                        }
+                    }
+                }
+                result.retain(|name| !removed.contains(name));
+                merged.insert(language.clone(), result);
+            }
+            None => {
+                merged.remove(language);
+            }
+        }
+    }
+    for names in merged.values_mut() {
+        names.retain(|name| !removed.contains(name));
+    }
+    merged
+}
+
+fn merge_profile_edits(
+    before: &ProfileSettings,
+    edited: &ProfileSettings,
+    latest: &mut ProfileSettings,
+    removed: &[String],
+) -> Result<()> {
+    for path in PROFILE_FIELDS {
+        let old = before.field(path)?;
+        let new = edited.field(path)?;
+        if old == new {
+            continue;
+        }
+        let merged = match *path {
+            "dictionaries.terms" => {
+                let base = &before.dictionaries.terms;
+                let desired = &edited.dictionaries.terms;
+                let current = &latest.dictionaries.terms;
+                FieldOverride::from_value(merge_role_list(base, desired, current, removed))?
+            }
+            "dictionaries.pitch" => {
+                let base = &before.dictionaries.pitch;
+                let desired = &edited.dictionaries.pitch;
+                let current = &latest.dictionaries.pitch;
+                FieldOverride::from_value(merge_role_list(base, desired, current, removed))?
+            }
+            "dictionaries.per_language" => FieldOverride::from_value(merge_language_lists(
+                &before.dictionaries.per_language,
+                &edited.dictionaries.per_language,
+                &latest.dictionaries.per_language,
+                removed,
+            ))?,
+            _ => new,
+        };
+        latest.set_field(path, merged)?;
+    }
+    Ok(())
+}
+
+fn merge_shared_form(
+    catalog: &mut Config,
+    baseline: &ResolvedConfig,
+    baseline_frequency: &[DictRow],
+    form: &SettingsForm,
+) {
+    if form.cfg.trigger.mode != form.baseline_cfg.trigger.mode {
+        catalog.live_lookup = form.cfg.trigger.mode == crate::config::TriggerMode::Live;
+    }
+    if form.cfg.plugins.enabled != form.baseline_cfg.plugins.enabled {
+        catalog.plugins.enabled = form.cfg.plugins.enabled.clone();
+    }
+    if form.cfg.debug.show_scan_region != baseline.debug.show_scan_region {
+        catalog.debug.show_scan_region = form.cfg.debug.show_scan_region;
+    }
+    if form.cfg.debug.show_engine_log != baseline.debug.show_engine_log {
+        catalog.debug.show_engine_log = form.cfg.debug.show_engine_log;
+    }
+    if form.cfg.debug.show_adapter_log != baseline.debug.show_adapter_log {
+        catalog.debug.show_adapter_log = form.cfg.debug.show_adapter_log;
+    }
+    if let Some(value) = form.background_on_close {
+        if value != baseline.application.background_on_close {
+            catalog.application.background_on_close = value;
+        }
+    }
+    if form.frequency != baseline_frequency {
+        let before = role_list(baseline_frequency, &[]);
+        let desired = role_list(&form.frequency, &form.unreadable);
+        let current = RoleList {
+            enabled: catalog.dictionaries.frequency.clone(),
+            disabled: catalog.dictionaries.frequency_disabled.clone(),
+        };
+        let merged = merge_role_list(&before, &desired, &current, &form.staged_removes);
+        catalog.dictionaries.frequency = merged.enabled;
+        catalog.dictionaries.frequency_disabled = merged.disabled;
+    }
+    if form.cfg.dictionaries.ranking_strategy != baseline.dictionaries.ranking_strategy {
+        catalog.dictionaries.ranking_strategy = form.cfg.dictionaries.ranking_strategy;
+    }
+}
+
+fn merge_shared_catalog(
+    before: &Config,
+    edited: &Config,
+    latest: &mut Config,
+    removed: &[String],
+) {
+    if before.live_lookup != edited.live_lookup {
+        latest.live_lookup = edited.live_lookup;
+    }
+    if before.application.background_on_close != edited.application.background_on_close {
+        latest.application.background_on_close = edited.application.background_on_close;
+    }
+    if before.plugins.enabled != edited.plugins.enabled {
+        latest.plugins.enabled = edited.plugins.enabled.clone();
+    }
+    if before.debug.show_scan_region != edited.debug.show_scan_region {
+        latest.debug.show_scan_region = edited.debug.show_scan_region;
+    }
+    if before.debug.show_engine_log != edited.debug.show_engine_log {
+        latest.debug.show_engine_log = edited.debug.show_engine_log;
+    }
+    if before.debug.show_adapter_log != edited.debug.show_adapter_log {
+        latest.debug.show_adapter_log = edited.debug.show_adapter_log;
+    }
+    let before_frequency = RoleList {
+        enabled: before.dictionaries.frequency.clone(),
+        disabled: before.dictionaries.frequency_disabled.clone(),
+    };
+    let edited_frequency = RoleList {
+        enabled: edited.dictionaries.frequency.clone(),
+        disabled: edited.dictionaries.frequency_disabled.clone(),
+    };
+    if before_frequency != edited_frequency {
+        let latest_frequency = RoleList {
+            enabled: latest.dictionaries.frequency.clone(),
+            disabled: latest.dictionaries.frequency_disabled.clone(),
+        };
+        let merged = merge_role_list(&before_frequency, &edited_frequency, &latest_frequency, removed);
+        latest.dictionaries.frequency = merged.enabled;
+        latest.dictionaries.frequency_disabled = merged.disabled;
+    }
+    if before.dictionaries.ranking_strategy != edited.dictionaries.ranking_strategy {
+        latest.dictionaries.ranking_strategy = edited.dictionaries.ranking_strategy;
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct AppliedSettings {
+    pub config: Config,
+    pub profile_id: String,
+    remapped: BTreeMap<String, String>,
+}
+
+/// Merges this form's profile edits into the latest saved catalog.
+pub fn apply_to(form: &SettingsForm, cfg: &Config) -> AppliedSettings {
+    let mut draft = form.catalog.clone();
+    let mut current = draft.resolve(&form.profile_id)
+        .expect("the form's selected profile must exist");
+    let edited = profile_settings_from_form(form, &form.baseline_profile)
+        .expect("the form's profile settings must serialize");
+    merge_profile_edits(
+        &form.baseline_profile,
+        &edited,
+        &mut current,
+        &form.staged_removes,
+    )
+    .expect("profile fields must be valid");
+    draft.update_profile(&form.profile_id, &current)
+        .expect("the form's selected profile must update");
+    merge_shared_form(&mut draft, &form.baseline_cfg, &form.baseline_frequency, form);
+    for add in &form.staged_adds {
+        let roles = roles_of(&add.source);
+        if roles.is_empty() {
+            continue;
+        }
+        let owner = form.staged_add_profiles.get(&add.source)
+            .map(String::as_str)
+            .unwrap_or(&form.profile_id);
+        let owner = draft.profiles.iter().any(|profile| profile.id == owner).then_some(owner);
+        let profile_roles = Roles::only(
+            &roles.iter().filter(|role| *role != Role::Frequency).collect::<Vec<_>>(),
+        );
+        if !profile_roles.is_empty() {
+            dictionary_added_to_profile(&mut draft, owner, &add.name, profile_roles, true)
+                .expect("the staged import profile must be valid");
+        }
+    }
+    for name in &form.staged_removes {
+        dictionary_removed_from_profiles(&mut draft, name);
+    }
+    let mut latest = cfg.clone();
+    latest.migrate_dictionary_lists(&form.dicts);
+    let remapped = merge_catalog_changes(
+        &form.baseline_catalog,
+        &draft,
+        &mut latest,
+        &form.staged_removes,
+    );
+    let current_reset = form.screenshot_reset_targets.then_some(form.profile_id.as_str())
+        .filter(|id| !form.screenshot_resets.contains(*id));
+    for id in form.screenshot_resets.iter().map(String::as_str).chain(current_reset) {
+        let id = remapped.get(id).map_or(id, String::as_str);
+        if let Some(profile) = latest.profiles.iter_mut().find(|profile| profile.id == id) {
+            reset_screenshot_targets(profile);
+        }
+    }
+    for name in &form.staged_removes {
+        dictionary_removed_from_profiles(&mut latest, name);
+    }
+    let profile_id = remapped.get(&form.profile_id).unwrap_or(&form.profile_id).clone();
+    AppliedSettings { config: latest, profile_id, remapped }
+}
+
+fn merge_catalog_changes(
+    baseline: &Config,
+    draft: &Config,
+    latest: &mut Config,
+    removed: &[String],
+) -> BTreeMap<String, String> {
+    latest.next_id = latest.next_id.max(draft.next_id);
+    let profile_ids: Vec<String> = draft.profiles.iter()
+        .filter(|profile| !baseline.profiles.iter().any(|old| old.id == profile.id))
+        .map(|profile| profile.id.clone())
+        .collect();
+    let mut remapped = BTreeMap::new();
+    for id in &profile_ids {
+        if latest.profiles.iter().any(|profile| profile.id == *id) {
+            remapped.insert(id.clone(), latest.next_profile_id());
+        }
+    }
+    let bind_ids: Vec<String> = draft.binds.iter()
+        .filter(|bind| !baseline.binds.iter().any(|old| old.id == bind.id))
+        .map(|bind| bind.id.clone())
+        .collect();
+    let mut remapped_binds = BTreeMap::new();
+    for id in bind_ids {
+        if latest.binds.iter().any(|bind| bind.id == id) {
+            remapped_binds.insert(id, latest.next_bind_id());
+        }
+    }
+    let mut draft = draft.clone();
+    rewrite_profile_ids(&mut draft, &remapped);
+    for bind in &mut draft.binds {
+        if let Some(id) = remapped_binds.get(&bind.id) {
+            bind.id = id.clone();
+        }
+        if let Some(id) = bind.profile.as_mut().and_then(|id| remapped.get(id)) {
+            bind.profile = Some(id.clone());
+        }
+    }
+    latest.next_id = latest.next_id.max(draft.next_id);
+
+    merge_shared_catalog(baseline, &draft, latest, removed);
+    merge_bind_changes(baseline, &draft, latest);
+    for profile in &draft.profiles {
+        if !baseline.profiles.iter().any(|old| old.id == profile.id)
+            && !latest.profiles.iter().any(|saved| saved.id == profile.id)
+        {
+            latest.profiles.push(profile.clone());
+        }
+    }
+    if draft.default_profile != baseline.default_profile
+        && latest.profiles.iter().any(|profile| profile.id == draft.default_profile)
+    {
+        latest.default_profile = draft.default_profile.clone();
+    }
+    let profiles: Vec<&Profile> = baseline.profiles.iter()
+        .filter(|profile| matches!(&profile.data, ProfileData::Full { .. }))
+        .chain(baseline.profiles.iter()
+            .filter(|profile| matches!(&profile.data, ProfileData::Derived { .. })))
+        .collect();
+    for old in profiles {
+        let Some(wanted) = draft.profiles.iter().find(|profile| profile.id == old.id) else {
+            continue;
+        };
+        let Some(target_index) = latest.profiles.iter().position(|profile| profile.id == old.id) else {
+            continue;
+        };
+        if wanted.name != old.name {
+            latest.profiles[target_index].name = wanted.name.clone();
+        }
+        match (&old.data, &wanted.data) {
+            (ProfileData::Full { settings: old_settings }, ProfileData::Full { settings: wanted_settings }) => {
+                let mut target = latest.resolve(&old.id).expect("saved profile must resolve");
+                merge_profile_edits(old_settings, wanted_settings, &mut target, removed)
+                    .expect("profile fields must be valid");
+                latest.update_profile(&old.id, &target).expect("saved profile must update");
+            }
+            (ProfileData::Derived { parent: old_parent, overrides: old_overrides },
+             ProfileData::Derived { parent: wanted_parent, overrides: wanted_overrides }) => {
+                if old_parent != wanted_parent {
+                    if let ProfileData::Derived { parent, .. } = &mut latest.profiles[target_index].data {
+                        *parent = wanted_parent.clone();
+                    }
+                }
+                let old_settings = baseline.resolve(&old.id).expect("baseline profile must resolve");
+                let wanted_settings = draft.resolve(&old.id).expect("draft profile must resolve");
+                let latest_settings = latest.resolve(&old.id).expect("saved profile must resolve");
+                let mut updates = Vec::new();
+                for path in PROFILE_FIELDS {
+                    if old_overrides.get(*path) == wanted_overrides.get(*path) {
+                        continue;
+                    }
+                    let value = match wanted_overrides.get(*path) {
+                        Some(value)
+                            if *path == "dictionaries.per_language"
+                                && matches!(value, FieldOverride::Set(_)) =>
+                        {
+                            if old_overrides.contains_key(*path) {
+                                Some(FieldOverride::from_value(merge_language_lists(
+                                    &old_settings.dictionaries.per_language,
+                                    &wanted_settings.dictionaries.per_language,
+                                    &latest_settings.dictionaries.per_language,
+                                    removed,
+                                ))
+                                .expect("language map must serialize"))
+                            } else {
+                                Some(value.clone())
+                            }
+                        }
+                        Some(value) => Some(value.clone()),
+                        None => None,
+                    };
+                    updates.push((*path, value));
+                }
+                if let ProfileData::Derived { overrides, .. } = &mut latest.profiles[target_index].data {
+                    for (path, value) in updates {
+                        if let Some(value) = value {
+                            overrides.insert(path.to_string(), value);
+                        } else {
+                            overrides.remove(path);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut deleted: Vec<&str> = baseline.profiles.iter()
+        .filter(|old| !draft.profiles.iter().any(|profile| profile.id == old.id))
+        .map(|profile| profile.id.as_str())
+        .collect();
+    loop {
+        let before = deleted.len();
+        let mut index = 0;
+        while index < deleted.len() {
+            let id = deleted[index];
+            let referenced = latest.default_profile == id
+                || latest.binds.iter().any(|bind| bind.profile.as_deref() == Some(id))
+                || latest.profiles.iter().any(|profile| {
+                    !deleted.contains(&profile.id.as_str())
+                        && latest.profile_references(profile).contains(&Some(id))
+                });
+            if referenced {
+                deleted.swap_remove(index);
+            } else {
+                index += 1;
+            }
+        }
+        if deleted.len() == before { break; }
+    }
+    latest.profiles.retain(|profile| !deleted.contains(&profile.id.as_str()));
+    remapped
+}
+
+fn rewrite_profile_ids(config: &mut Config, ids: &BTreeMap<String, String>) {
+    for profile in &mut config.profiles {
+        if let Some(id) = ids.get(&profile.id) {
+            profile.id = id.clone();
+        }
+        match &mut profile.data {
+            ProfileData::Full { settings } => {
+                if let Some(id) = settings.nested_profile.as_mut().and_then(|id| ids.get(id)) {
+                    settings.nested_profile = Some(id.clone());
+                }
+            }
+            ProfileData::Derived { parent, overrides } => {
+                if let Some(id) = ids.get(parent) {
+                    *parent = id.clone();
+                }
+                if let Some(FieldOverride::Set(toml::Value::String(id))) = overrides.get_mut("nested_profile") {
+                    if let Some(mapped) = ids.get(id) {
+                        *id = mapped.clone();
+                    }
+                }
+            }
+        }
+    }
+    if let Some(id) = ids.get(&config.default_profile) {
+        config.default_profile = id.clone();
+    }
+}
+
+fn merge_bind_changes(baseline: &Config, draft: &Config, latest: &mut Config) {
+    for old in &baseline.binds {
+        let Some(edited) = draft.binds.iter().find(|bind| bind.id == old.id) else {
+            latest.binds.retain(|bind| bind.id != old.id);
+            continue;
+        };
+        let Some(target) = latest.binds.iter_mut().find(|bind| bind.id == old.id) else {
+            continue;
+        };
+        if edited.action != old.action { target.action = edited.action; }
+        if edited.windows != old.windows { target.windows = edited.windows.clone(); }
+        if edited.linux != old.linux { target.linux = edited.linux.clone(); }
+        if edited.mode != old.mode { target.mode = edited.mode; }
+        if edited.profile != old.profile { target.profile = edited.profile.clone(); }
+        if edited.enabled != old.enabled { target.enabled = edited.enabled; }
+    }
+    for bind in &draft.binds {
+        if !baseline.binds.iter().any(|old| old.id == bind.id)
+            && !latest.binds.iter().any(|saved| saved.id == bind.id)
+        {
+            latest.binds.push(bind.clone());
+        }
+    }
+}
+
+/// Reports capture-size values that Apply changed.
+pub fn clamp_notice(form: &SettingsForm, applied: &ResolvedConfig) -> Option<String> {
     let mut parts = Vec::new();
     if form.cfg.ocr.capture_width != applied.ocr.capture_width {
-        parts.push(axis_notice(
-            "width",
-            form.cfg.ocr.capture_width,
-            applied.ocr.capture_width,
-        ));
+        parts.push(axis_notice("width", form.cfg.ocr.capture_width, applied.ocr.capture_width));
     }
     if form.cfg.ocr.capture_height != applied.ocr.capture_height {
-        parts.push(axis_notice(
-            "height",
-            form.cfg.ocr.capture_height,
-            applied.ocr.capture_height,
-        ));
+        parts.push(axis_notice("height", form.cfg.ocr.capture_height, applied.ocr.capture_height));
     }
-    if parts.is_empty() {
-        None
-    } else {
-        Some(parts.join(" "))
-    }
+    if parts.is_empty() { None } else { Some(parts.join(" ")) }
 }
 
 /// Builds the exact clamp notice sentence.
 fn axis_notice(axis: &str, asked: i32, got: i32) -> String {
-    let (verb, bound) = if got > asked {
-        ("raised", "minimum")
-    } else {
-        ("lowered", "maximum")
-    };
+    let (verb, bound) = if got > asked { ("raised", "minimum") } else { ("lowered", "maximum") };
     format!("Capture {axis} {verb} to the {got}px {bound}.")
 }
 
-/// Returns names that match no installed Dictionary.
-///
-/// A list can preserve a name for an unplugged drive. The settings window
-/// cannot distinguish that name from a renamed archive, so it reports the
-/// name and keeps the entry.
+/// Returns names that match no installed Dictionary in any saved profile.
 pub fn stale_order_entries(cfg: &Config, dicts: &[DictInfo]) -> Vec<String> {
-    let mut stale: Vec<String> = Vec::new();
-    for role in Role::EVERY {
-        let (on, off) = cfg.dictionaries.lists(role);
-        for entry in on.iter().chain(off) {
-            if !dicts.iter().any(|d| d.name == *entry) && !stale.contains(entry) {
-                stale.push(entry.clone());
+    let mut migrated = cfg.clone();
+    migrated.migrate_dictionary_lists(dicts);
+    let mut stale = Vec::new();
+    for profile in &migrated.profiles {
+        let Ok(resolved) = migrated.resolved(Some(&profile.id)) else { continue };
+        for role in Role::EVERY {
+            let (enabled, disabled) = resolved.dictionaries.lists(role);
+            for name in enabled.iter().chain(disabled) {
+                if !dicts.iter().any(|dict| dict.name == *name) && !stale.contains(name) {
+                    stale.push(name.clone());
+                }
             }
         }
     }
     stale
 }
 
-/// Removes a Dictionary from every configuration list.
-///
-/// The function removes the name from all six arrays and every language list.
-/// One archive is one Dictionary, so removal affects every role it held.
-/// The function also removes an empty language list because an entry with no
-/// name has the same state as no entry.
-pub fn dictionary_removed(cfg: &mut Config, name: &str) {
-    for role in Role::EVERY {
-        let (mut on, mut off) = {
-            let (on, off) = cfg.dictionaries.lists(role);
-            (on.to_vec(), off.to_vec())
+/// Removes one Dictionary from every saved profile and shared frequency list.
+pub fn dictionary_removed_from_profiles(cfg: &mut Config, name: &str) {
+    cfg.dictionaries.frequency.retain(|entry| entry != name);
+    cfg.dictionaries.frequency_disabled.retain(|entry| entry != name);
+    let ids: Vec<String> = cfg.profiles.iter().map(|profile| profile.id.clone()).collect();
+    for id in ids {
+        let Some(profile) = cfg.profiles.iter().find(|profile| profile.id == id) else {
+            continue;
         };
-        on.retain(|entry| entry != name);
-        off.retain(|entry| entry != name);
-        cfg.dictionaries.set_lists(role, on, off);
+        let full = matches!(&profile.data, ProfileData::Full { .. });
+        let (terms_explicit, pitch_explicit, languages_explicit) = match &profile.data {
+            ProfileData::Full { .. } => (true, true, true),
+            ProfileData::Derived { overrides, .. } => (
+                overrides.contains_key("dictionaries.terms"),
+                overrides.contains_key("dictionaries.pitch"),
+                overrides.contains_key("dictionaries.per_language"),
+            ),
+        };
+        if !full && !terms_explicit && !pitch_explicit && !languages_explicit {
+            continue;
+        }
+        let Ok(mut settings) = cfg.resolve(&id) else { continue };
+        let mut changed = false;
+        if terms_explicit {
+            let before = settings.dictionaries.terms.clone();
+            remove_role_name(&mut settings.dictionaries.terms, name);
+            changed |= before != settings.dictionaries.terms;
+        }
+        if pitch_explicit {
+            let before = settings.dictionaries.pitch.clone();
+            remove_role_name(&mut settings.dictionaries.pitch, name);
+            changed |= before != settings.dictionaries.pitch;
+        }
+        if languages_explicit {
+            for list in settings.dictionaries.per_language.values_mut() {
+                let before = list.len();
+                list.retain(|entry| entry != name);
+                changed |= list.len() != before;
+            }
+        }
+        if changed {
+            cfg.update_profile(&id, &settings)
+                .expect("a valid catalog must update its profile");
+        }
     }
-    cfg.dictionaries.per_language.retain(|_, list| {
-        list.retain(|entry| entry != name);
-        !list.is_empty()
-    });
 }
 
-/// Adds a Dictionary to its role lists and the active language list.
-///
-/// The function adds it to the bottom of each enabled role array. It does
-/// not reorder prior names. It also adds the name to the active language's
-/// list when that list is present and non-empty. Otherwise, a term Dictionary
-/// that the scope does not name starts disabled.
-pub fn dictionary_added(cfg: &mut Config, name: &str, roles: Roles) {
+/// Adds roles to the selected profile and disables them in other explicit lists.
+/// Set `preserve_existing` to keep the selected profile's saved row state.
+fn dictionary_added_to_profile(
+    cfg: &mut Config,
+    profile_id: Option<&str>,
+    name: &str,
+    roles: Roles,
+    preserve_existing: bool,
+) -> Result<()> {
     if name.trim().is_empty() {
-        return;
+        return Ok(());
     }
-    for role in roles.iter() {
-        let (mut on, off) = {
-            let (on, off) = cfg.dictionaries.lists(role);
-            (on.to_vec(), off.to_vec())
+    if let Some(id) = profile_id {
+        anyhow::ensure!(
+            cfg.profiles.iter().any(|profile| profile.id == id),
+            "Profile {id:?} does not exist."
+        );
+    }
+    if roles.has(Role::Frequency) {
+        if !cfg.dictionaries.frequency.iter().any(|entry| entry == name) {
+            cfg.dictionaries.frequency.push(name.to_string());
+        }
+        cfg.dictionaries.frequency_disabled.retain(|entry| entry != name);
+    }
+    let ids: Vec<String> = cfg.profiles.iter().map(|profile| profile.id.clone()).collect();
+    for id in ids {
+        let profile = cfg.profiles.iter().find(|profile| profile.id == id)
+            .with_context(|| format!("Profile {id:?} does not exist."))?;
+        let is_selected = profile_id == Some(id.as_str());
+        let full = matches!(&profile.data, ProfileData::Full { .. });
+        let (terms_explicit, pitch_explicit) = match &profile.data {
+            ProfileData::Full { .. } => (true, true),
+            ProfileData::Derived { overrides, .. } => (
+                overrides.contains_key("dictionaries.terms"),
+                overrides.contains_key("dictionaries.pitch"),
+            ),
         };
-        if !on.iter().chain(&off).any(|entry| entry == name) {
-            on.push(name.to_string());
+        let mut settings = cfg.resolve(&id)?;
+        let mut changed = false;
+        for (role, explicit) in [(Role::Terms, terms_explicit), (Role::Pitch, pitch_explicit)] {
+            if !roles.has(role) || (!is_selected && !full && !explicit) {
+                continue;
+            }
+            let enabled = !preserve_existing || role != Role::Terms
+                || settings.dictionaries.per_language.get(&settings.ocr.language)
+                    .is_none_or(|names| names.iter().any(|entry| entry == name));
+            let list = match role {
+                Role::Terms => &mut settings.dictionaries.terms,
+                Role::Pitch => &mut settings.dictionaries.pitch,
+                Role::Frequency => continue,
+            };
+            if is_selected {
+                let already_listed = list.enabled.iter().chain(&list.disabled).any(|entry| entry == name);
+                if !preserve_existing || !already_listed {
+                    let (selected, unselected) = if enabled {
+                        (&mut list.enabled, &mut list.disabled)
+                    } else {
+                        (&mut list.disabled, &mut list.enabled)
+                    };
+                    let before = unselected.len();
+                    unselected.retain(|entry| entry != name);
+                    if !selected.iter().any(|entry| entry == name) {
+                        selected.push(name.to_string());
+                        changed = true;
+                    }
+                    changed |= unselected.len() != before;
+                }
+            } else if !list.enabled.iter().chain(&list.disabled).any(|entry| entry == name) {
+                list.disabled.push(name.to_string());
+                changed = true;
+            }
         }
-        cfg.dictionaries.set_lists(role, on, off);
-    }
-    if !roles.has(Role::Terms) {
-        return;
-    }
-    let listed = cfg.dictionaries.per_language.get_mut(&cfg.ocr.language);
-    if let Some(list) = listed.filter(|l| !l.is_empty()) {
-        if !list.iter().any(|entry| entry == name) {
-            list.push(name.to_string());
+        if is_selected && roles.has(Role::Terms) && !preserve_existing {
+            if let Some(list) = settings.dictionaries.per_language.get_mut(&settings.ocr.language) {
+                if !list.iter().any(|entry| entry == name) {
+                    list.push(name.to_string());
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            cfg.update_profile(&id, &settings)?;
         }
     }
+    Ok(())
+}
+
+fn remove_role_name(list: &mut RoleList, name: &str) {
+    list.enabled.retain(|entry| entry != name);
+    list.disabled.retain(|entry| entry != name);
+}
+
+fn ensure_profile_name(name: &str) -> Result<()> {
+    anyhow::ensure!(!name.trim().is_empty(), "A profile name cannot be empty.");
+    Ok(())
 }
 
 /// The work that a Dictionary change needs beyond the file save.
@@ -592,11 +1622,7 @@ pub fn dictionary_work(before: &Config, after: &Config) -> DictionaryWork {
     let changed = before.dictionaries.frequency != after.dictionaries.frequency
         || before.dictionaries.frequency_disabled != after.dictionaries.frequency_disabled
         || before.dictionaries.ranking_strategy != after.dictionaries.ranking_strategy;
-    if changed {
-        DictionaryWork::Reindex
-    } else {
-        DictionaryWork::None
-    }
+    if changed { DictionaryWork::Reindex } else { DictionaryWork::None }
 }
 
 /// The differences between the Library and the source list.
@@ -679,9 +1705,9 @@ pub fn drift_notice(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{
-        LayoutMode, SelectionButtons, SelectionSeparator, SentenceMode, TriggerMode, TripleClick,
-    };
+    use crate::config::
+        TriggerMode
+    ;
     use crate::dict::frequency::RankingStrategy;
 
     fn dicts() -> Vec<DictInfo> {
@@ -692,17 +1718,96 @@ mod tests {
     }
 
     /// A config already written in the role shape.
-    fn cfg_with(terms: &[&str]) -> Config {
-        let mut c = Config::default();
+    fn cfg_with(terms: &[&str]) -> ResolvedConfig {
+        let mut c = ResolvedConfig::default();
         c.dictionaries.terms = terms.iter().map(|s| (*s).to_string()).collect();
         c
     }
 
-    /// A pre-roles config that carries the substrings that the role shape replaced.
+    fn saved_from_resolved(config: &ResolvedConfig) -> Config {
+        let mut saved = Config {
+            live_lookup: config.trigger.mode == TriggerMode::Live,
+            ..Default::default()
+        };
+        saved.dictionaries.frequency = config.dictionaries.frequency.clone();
+        saved.dictionaries.frequency_disabled = config.dictionaries.frequency_disabled.clone();
+        saved.dictionaries.ranking_strategy = config.dictionaries.ranking_strategy;
+        saved.application = config.application.clone();
+        saved.plugins = config.plugins.clone();
+        saved.debug = config.debug.clone();
+        saved.update_profile("default", &ProfileSettings::from_resolved(config)).unwrap();
+        if config.trigger.mode != TriggerMode::Live {
+            if let Some(bind) = saved.binds.iter_mut()
+                .find(|bind| bind.action == crate::config::BindAction::Lookup)
+            {
+                bind.mode = if config.trigger.mode == TriggerMode::HoldShift {
+                    TriggerMode::HoldKey
+                } else {
+                    config.trigger.mode
+                };
+                bind.enabled = true;
+            }
+        }
+        saved
+    }
+
+    fn from_resolved(config: &ResolvedConfig, dicts: &[DictInfo]) -> SettingsForm {
+        super::from_config(&saved_from_resolved(config), dicts)
+    }
+
+    fn apply_resolved(form: &SettingsForm, config: &ResolvedConfig) -> ResolvedConfig {
+        super::apply_to(form, &saved_from_resolved(config)).config
+            .resolved(Some(&form.profile_id))
+            .unwrap()
+    }
+
+    fn stale_order_entries_resolved(config: &ResolvedConfig, dicts: &[DictInfo]) -> Vec<String> {
+        super::stale_order_entries(&saved_from_resolved(config), dicts)
+    }
+
+    fn dictionary_added(config: &mut ResolvedConfig, name: &str, roles: Roles) {
+        let mut saved = saved_from_resolved(config);
+        dictionary_added_to_profile(&mut saved, Some("default"), name, roles, false).unwrap();
+        *config = saved.resolved(Some("default")).unwrap();
+    }
+
+    fn dictionary_removed(config: &mut ResolvedConfig, name: &str) {
+        let mut saved = saved_from_resolved(config);
+        dictionary_removed_from_profiles(&mut saved, name);
+        *config = saved.resolved(Some("default")).unwrap();
+    }
+
+    fn dictionary_work_resolved(before: &ResolvedConfig, after: &ResolvedConfig) -> DictionaryWork {
+        super::dictionary_work(&saved_from_resolved(before), &saved_from_resolved(after))
+    }
+
+    fn from_config(config: &ResolvedConfig, dicts: &[DictInfo]) -> SettingsForm {
+        from_resolved(config, dicts)
+    }
+
+    fn stale_order_entries(config: &ResolvedConfig, dicts: &[DictInfo]) -> Vec<String> {
+        stale_order_entries_resolved(config, dicts)
+    }
+
+    fn dictionary_work(before: &ResolvedConfig, after: &ResolvedConfig) -> DictionaryWork {
+        dictionary_work_resolved(before, after)
+    }
+
+    /// Deserializes legacy TOML so tests exercise the production migration path.
     fn pre_roles(order: &[&str]) -> Config {
-        let mut c = Config::default();
-        c.dictionaries.display_order = order.iter().map(|s| (*s).to_string()).collect();
-        c
+        let mut dictionaries = toml::Table::new();
+        dictionaries.insert(
+            "display_order".into(),
+            toml::Value::Array(
+                order.iter().map(|name| toml::Value::String((*name).to_string())).collect(),
+            ),
+        );
+        let mut legacy = toml::Table::new();
+        legacy.insert("trigger".into(), toml::Value::Table(toml::Table::new()));
+        legacy.insert("popup".into(), toml::Value::Table(toml::Table::new()));
+        legacy.insert("dictionaries".into(), toml::Value::Table(dictionaries));
+        let text = toml::to_string(&toml::Value::Table(legacy)).unwrap();
+        toml::from_str(&text).unwrap()
     }
 
     fn names(rows: &[DictRow]) -> Vec<String> {
@@ -713,17 +1818,781 @@ mod tests {
         rows.iter().filter(|row| row.enabled).map(|row| row.name.clone()).collect()
     }
 
+    fn insert_full(config: &mut Config, id: &str, name: &str, settings: ProfileSettings) {
+        config.profiles.push(Profile {
+            id: id.to_string(),
+            name: name.to_string(),
+            data: ProfileData::Full { settings: Box::new(settings) },
+        });
+    }
+
+    fn insert_derived(
+        config: &mut Config,
+        id: &str,
+        name: &str,
+        parent: &str,
+        overrides: BTreeMap<String, FieldOverride>,
+    ) {
+        config.profiles.push(Profile {
+            id: id.to_string(),
+            name: name.to_string(),
+            data: ProfileData::Derived { parent: parent.to_string(), overrides },
+        });
+    }
+
+    #[test]
+    fn profile_merge_repeated_apply_reuses_saved_identity() {
+        let saved = Config::default();
+        let mut form = super::from_config(&saved, &[]);
+        let id = form.create_profile("Local".into(), None, &[]).unwrap();
+        let original = form.cfg.popup.theme.clone();
+        form.cfg.popup.theme = if original == "dark" { "light" } else { "dark" }.into();
+        form.save_current().unwrap();
+        let first = super::apply_to(&form, &saved);
+        let saved = first.config.clone();
+        form.accept_applied(first, &[]).unwrap();
+        form.cfg.popup.theme = original.clone();
+        form.save_current().unwrap();
+
+        let second = super::apply_to(&form, &saved).config;
+
+        assert_eq!(saved.profiles.len(), second.profiles.len());
+        assert_eq!(original, second.resolve(&id).unwrap().popup.theme);
+    }
+
+    #[test]
+    fn profile_merge_retains_created_selection_after_id_collision() {
+        let saved = Config::default();
+        let mut local = super::from_config(&saved, &[]);
+        let id = local.create_profile("Local".into(), None, &[]).unwrap();
+        local.cfg.popup.theme = "light".into();
+        local.save_current().unwrap();
+        let mut external = super::from_config(&saved, &[]);
+        assert_eq!(id, external.create_profile("External".into(), None, &[]).unwrap());
+        external.cfg.popup.theme = "dark".into();
+        external.save_current().unwrap();
+        let applied = super::apply_to(&local, &external.catalog);
+        local.accept_applied(applied, &[]).unwrap();
+
+        assert_eq!("light", local.cfg.popup.theme);
+        assert_ne!(id, local.profile_id);
+        assert_eq!("dark", local.catalog.resolve(&id).unwrap().popup.theme);
+    }
+
+    #[test]
+    fn ordinary_edit_keeps_an_equal_parent_override_and_reset_reveals_parent() {
+        let mut saved = Config::default();
+        let mut parent = saved.resolve("default").unwrap();
+        parent.popup.theme = "dark".into();
+        saved.update_profile("default", &parent).unwrap();
+        insert_derived(&mut saved, "derived", "Derived", "default", BTreeMap::new());
+
+        let mut form = super::from_config(&saved, &[]);
+        form.select_profile("derived", &[]).unwrap();
+        assert_eq!("dark", form.cfg.popup.theme);
+        form.cfg.popup.theme = "light".into();
+
+        let mut latest = saved.clone();
+        let mut parent = latest.resolve("default").unwrap();
+        parent.popup.theme = "light".into();
+        latest.update_profile("default", &parent).unwrap();
+        let applied = super::apply_to(&form, &latest).config;
+        let profile = applied.profiles.iter().find(|profile| profile.id == "derived").unwrap();
+        let ProfileData::Derived { overrides, .. } = &profile.data else { panic!("derived profile expected") };
+        let expected = FieldOverride::Set(toml::Value::String("light".into()));
+        assert_eq!(Some(&expected), overrides.get("popup.theme"));
+
+        let mut reset = super::from_config(&applied, &[]);
+        reset.select_profile("derived", &[]).unwrap();
+        reset.reset_profile_override("popup.theme", &[]).unwrap();
+        assert_eq!("light", reset.cfg.popup.theme);
+        let ProfileData::Derived { overrides, .. } = &reset.catalog.profiles
+            .iter().find(|profile| profile.id == "derived").unwrap().data else {
+                panic!("derived profile expected")
+            };
+        assert!(!overrides.contains_key("popup.theme"));
+    }
+
+    #[test]
+    fn profile_switches_save_each_edit_and_form_changes_win() {
+        let mut saved = Config::default();
+        let mut other_settings = saved.resolve("default").unwrap();
+        other_settings.popup.theme = "sepia".into();
+        insert_full(&mut saved, "other", "Other", other_settings);
+
+        let mut form = super::from_config(&saved, &[]);
+        form.cfg.popup.theme = "light".into();
+        form.select_profile("other", &[]).unwrap();
+        assert_eq!("sepia", form.cfg.popup.theme);
+        form.cfg.popup.theme = "blue".into();
+        form.select_profile("default", &[]).unwrap();
+        form.set_default_profile("other").unwrap();
+
+        let mut latest = saved.clone();
+        let mut other_settings = latest.resolve("other").unwrap();
+        other_settings.popup.theme = "latest".into();
+        latest.update_profile("other", &other_settings).unwrap();
+        let applied = super::apply_to(&form, &latest).config;
+        assert_eq!("other", applied.default_profile);
+        assert_eq!("light", applied.resolved(Some("default")).unwrap().popup.theme);
+        assert_eq!("blue", applied.resolved(Some("other")).unwrap().popup.theme);
+    }
+
+    #[test]
+    fn apply_preserves_an_untouched_latest_profile_edit() {
+        let mut saved = Config::default();
+        let mut other = saved.resolve("default").unwrap();
+        other.popup.theme = "original".into();
+        insert_full(&mut saved, "other", "Other", other);
+        let mut form = super::from_config(&saved, &[]);
+        form.cfg.popup.theme = "form".into();
+
+        let mut latest = saved.clone();
+        let mut other = latest.resolve("other").unwrap();
+        other.popup.theme = "latest".into();
+        latest.update_profile("other", &other).unwrap();
+        let applied = super::apply_to(&form, &latest).config;
+        assert_eq!("form", applied.resolved(Some("default")).unwrap().popup.theme);
+        assert_eq!("latest", applied.resolved(Some("other")).unwrap().popup.theme);
+    }
+
+    #[test]
+    fn profile_creation_duplication_and_rename_preserve_ids_and_values() {
+        let saved = Config::default();
+        let mut form = super::from_config(&saved, &[]);
+        form.cfg.popup.theme = "edited".into();
+        let copy_id = form.duplicate_profile("Copy".into(), &[]).unwrap();
+        form.rename_profile("Renamed".into()).unwrap();
+        form.set_default_profile(&copy_id).unwrap();
+        let derived_id = form.create_profile("Derived".into(), Some("default"), &[]).unwrap();
+        let full_id = form.create_profile("Fresh".into(), None, &[]).unwrap();
+        assert_eq!(full_id, form.profile_id);
+
+        let applied = super::apply_to(&form, &saved).config;
+        assert_eq!(copy_id, applied.default_profile);
+        assert_eq!("edited", applied.resolved(Some(&copy_id)).unwrap().popup.theme);
+        let copy = applied.profiles.iter().find(|profile| profile.id == copy_id).unwrap();
+        assert_eq!("Renamed", copy.name);
+        assert!(matches!(&copy.data, ProfileData::Full { .. }));
+        let derived = applied.profiles.iter().find(|profile| profile.id == derived_id).unwrap();
+        assert!(matches!(&derived.data, ProfileData::Derived { parent, .. } if parent == "default"));
+        let full = applied.profiles.iter().find(|profile| profile.id == full_id).unwrap();
+        assert!(matches!(&full.data, ProfileData::Full { .. }));
+    }
+
+    #[test]
+    fn profile_deletion_waits_for_default_bind_nested_and_parent_references() {
+        let mut saved = Config::default();
+        insert_full(&mut saved, "target", "Target", ProfileSettings::default());
+        let other = ProfileSettings {
+            nested_profile: Some("target".into()),
+            ..Default::default()
+        };
+        insert_full(&mut saved, "other", "Other", other);
+        saved.default_profile = "target".into();
+        insert_derived(&mut saved, "child", "Child", "target", BTreeMap::new());
+        let mut bind = crate::config::Bind::new("search".into(), crate::config::BindAction::Search);
+        bind.profile = Some("target".into());
+        saved.binds.push(bind);
+
+        let mut form = super::from_config(&saved, &[]);
+        assert!(form.delete_profile("target", &[]).is_err());
+        assert!(form.catalog.profiles.iter().any(|profile| profile.id == "target"));
+
+        form.set_default_profile("other").unwrap();
+        assert!(form.delete_profile("target", &[]).is_err());
+        form.catalog.binds.iter_mut().find(|bind| bind.id == "search").unwrap().profile = None;
+        assert!(form.delete_profile("target", &[]).is_err());
+        let mut other = form.catalog.resolve("other").unwrap();
+        other.nested_profile = None;
+        form.catalog.update_profile("other", &other).unwrap();
+        assert!(form.delete_profile("target", &[]).is_err());
+
+        form.delete_profile("child", &[]).unwrap();
+        form.delete_profile("target", &[]).unwrap();
+        assert_eq!("other", form.profile_id);
+        assert!(!form.catalog.profiles.iter().any(|profile| profile.id == "target"));
+    }
+
+    #[test]
+    fn empty_derived_role_and_language_lists_do_not_inherit_or_fall_back() {
+        let mut saved = Config::default();
+        let mut parent = saved.resolve("default").unwrap();
+        parent.dictionaries.terms.enabled = vec!["Known".into()];
+        parent.dictionaries.per_language.insert("ja".into(), vec!["Known".into()]);
+        saved.update_profile("default", &parent).unwrap();
+        let mut overrides = BTreeMap::new();
+        overrides.insert(
+            "dictionaries.terms".into(),
+            FieldOverride::Set(toml::Value::try_from(RoleList::default()).unwrap()),
+        );
+        overrides.insert(
+            "dictionaries.per_language".into(),
+            FieldOverride::Set(toml::Value::try_from(BTreeMap::from([
+                ("ja".to_string(), Vec::<String>::new()),
+            ])).unwrap()),
+        );
+        insert_derived(&mut saved, "empty", "Empty", "default", overrides);
+
+        let dicts = [DictInfo { dict_id: 1, name: "Known".into() }];
+        let mut form = super::from_config(&saved, &dicts);
+        form.select_profile("empty", &dicts).unwrap();
+        assert!(enabled_names(&form.terms).is_empty());
+        assert!(is_scoped(&form));
+        assert!(form.cfg.dictionaries.per_language["ja"].is_empty());
+
+        let applied = super::apply_to(&form, &saved).config;
+        let empty = applied.resolve("empty").unwrap();
+        assert!(empty.dictionaries.terms.enabled.is_empty());
+        assert!(empty.dictionaries.per_language["ja"].is_empty());
+    }
+
+    #[test]
+    fn a_new_derived_role_override_does_not_inherit_concurrent_parent_names() {
+        let mut saved = Config::default();
+        let mut parent = saved.resolve("default").unwrap();
+        parent.dictionaries.terms.enabled = vec!["A".into()];
+        saved.update_profile("default", &parent).unwrap();
+        insert_derived(&mut saved, "derived", "Derived", "default", BTreeMap::new());
+        let dicts = [DictInfo { dict_id: 1, name: "A".into() }];
+        let mut form = super::from_config(&saved, &dicts);
+        form.select_profile("derived", &dicts).unwrap();
+        form.terms.iter_mut().find(|row| row.name == "A").unwrap().enabled = false;
+
+        let mut latest = saved.clone();
+        let mut latest_parent = latest.resolve("default").unwrap();
+        latest_parent.dictionaries.terms.enabled.push("B".into());
+        latest_parent.popup.theme = "dark".into();
+        latest.update_profile("default", &latest_parent).unwrap();
+        let applied = super::apply_to(&form, &latest).config;
+
+        let child = applied.resolve("derived").unwrap();
+        assert!(child.dictionaries.terms.enabled.is_empty());
+        assert_eq!(vec!["A".to_string()], child.dictionaries.terms.disabled);
+        assert_eq!("dark", child.popup.theme);
+        let parent = applied.resolve("default").unwrap();
+        assert_eq!(vec!["A".to_string(), "B".to_string()], parent.dictionaries.terms.enabled);
+    }
+
+    #[test]
+    fn a_new_derived_language_override_replaces_parent_changes_made_in_the_same_form() {
+        let mut saved = Config::default();
+        let mut parent = saved.resolve("default").unwrap();
+        parent.ocr.language = "ja".into();
+        parent.dictionaries.terms.enabled = vec!["A".into(), "B".into()];
+        parent.dictionaries.per_language.insert("ja".into(), vec!["A".into()]);
+        saved.update_profile("default", &parent).unwrap();
+        insert_derived(&mut saved, "derived", "Derived", "default", BTreeMap::new());
+        let dicts = [
+            DictInfo { dict_id: 1, name: "A".into() },
+            DictInfo { dict_id: 2, name: "B".into() },
+        ];
+
+        let mut form = super::from_config(&saved, &dicts);
+        form.select_profile("derived", &dicts).unwrap();
+        form.terms.iter_mut().find(|row| row.name == "A").unwrap().enabled = false;
+        form.select_profile("default", &dicts).unwrap();
+        form.terms.iter_mut().find(|row| row.name == "B").unwrap().enabled = true;
+        form.select_profile("derived", &dicts).unwrap();
+
+        let applied = super::apply_to(&form, &saved).config;
+
+        assert!(applied.resolve("derived").unwrap().dictionaries.per_language["ja"].is_empty());
+        assert_eq!(
+            vec!["A".to_string(), "B".to_string()],
+            applied.resolve("default").unwrap().dictionaries.per_language["ja"],
+        );
+    }
+
+    #[test]
+    fn an_existing_derived_language_override_keeps_a_concurrent_scope_addition() {
+        let mut saved = Config::default();
+        let mut parent = saved.resolve("default").unwrap();
+        parent.ocr.language = "ja".into();
+        parent.dictionaries.terms.enabled = vec!["A".into(), "B".into()];
+        parent.dictionaries.per_language.insert("ja".into(), vec!["A".into()]);
+        saved.update_profile("default", &parent).unwrap();
+        let mut overrides = BTreeMap::new();
+        overrides.insert(
+            "dictionaries.per_language".into(),
+            FieldOverride::Set(toml::Value::try_from(BTreeMap::from([
+                ("ja".to_string(), vec!["A".to_string()]),
+            ])).unwrap()),
+        );
+        insert_derived(&mut saved, "derived", "Derived", "default", overrides);
+        let dicts = [
+            DictInfo { dict_id: 1, name: "A".into() },
+            DictInfo { dict_id: 2, name: "B".into() },
+        ];
+
+        let mut form = super::from_config(&saved, &dicts);
+        form.select_profile("derived", &dicts).unwrap();
+        form.terms.iter_mut().find(|row| row.name == "A").unwrap().enabled = false;
+
+        let mut latest = saved.clone();
+        let mut latest_derived = latest.resolve("derived").unwrap();
+        latest_derived.dictionaries.per_language.insert("ja".into(), vec!["A".into(), "B".into()]);
+        latest.update_profile("derived", &latest_derived).unwrap();
+
+        let applied = super::apply_to(&form, &latest).config;
+
+        assert_eq!(
+            vec!["B".to_string()],
+            applied.resolve("derived").unwrap().dictionaries.per_language["ja"],
+        );
+    }
+
+    #[test]
+    fn a_mixed_staged_import_keeps_checkbox_state_and_role_order() {
+        let mut saved = Config::default();
+        let mut settings = saved.resolve("default").unwrap();
+        settings.dictionaries.terms.enabled = vec!["Terms A".into(), "Terms B".into()];
+        settings.dictionaries.terms.disabled = vec!["Terms off".into()];
+        settings.dictionaries.pitch.enabled = vec!["Pitch A".into(), "Pitch B".into()];
+        settings.dictionaries.pitch.disabled = vec!["Pitch off".into()];
+        saved.update_profile("default", &settings).unwrap();
+        let mut form = super::from_config(&saved, &[]);
+        form.stage_add(&fixture("both.zip")).unwrap();
+        form.pitch.iter_mut().find(|row| row.name == "FixtureBoth").unwrap().enabled = false;
+
+        let applied = super::apply_to(&form, &saved).config;
+        let profile = applied.resolve("default").unwrap();
+
+        assert_eq!(
+            vec!["Terms A".to_string(), "Terms B".to_string(), "FixtureBoth".to_string()],
+            profile.dictionaries.terms.enabled,
+        );
+        assert_eq!(vec!["Terms off".to_string()], profile.dictionaries.terms.disabled);
+        assert_eq!(vec!["Pitch A".to_string(), "Pitch B".to_string()], profile.dictionaries.pitch.enabled);
+        assert_eq!(
+            vec!["Pitch off".to_string(), "FixtureBoth".to_string()],
+            profile.dictionaries.pitch.disabled,
+        );
+    }
+
+    #[test]
+    fn canceling_an_import_after_a_profile_switch_removes_only_its_draft_rows() {
+        let mut saved = Config::default();
+        let mut a = saved.resolve("default").unwrap();
+        a.dictionaries.terms.enabled = vec!["A first".into(), "A second".into()];
+        a.dictionaries.terms.disabled = vec!["A off".into()];
+        saved.update_profile("default", &a).unwrap();
+        let mut b = ProfileSettings::default();
+        b.dictionaries.terms.enabled = vec!["B first".into(), "B second".into()];
+        b.dictionaries.terms.disabled = vec!["B off".into()];
+        insert_full(&mut saved, "b", "B", b);
+
+        let mut form = super::from_config(&saved, &[]);
+        form.stage_add(&fixture("terms.zip")).unwrap();
+        form.select_profile("b", &[]).unwrap();
+        form.terms.swap(0, 1);
+        form.stage_remove("FixtureTerms");
+        let applied = super::apply_to(&form, &saved).config;
+
+        let a = applied.resolve("default").unwrap();
+        assert_eq!(
+            vec!["A first".to_string(), "A second".to_string()],
+            a.dictionaries.terms.enabled,
+        );
+        assert_eq!(vec!["A off".to_string()], a.dictionaries.terms.disabled);
+        let b = applied.resolve("b").unwrap();
+        assert_eq!(
+            vec!["B second".to_string(), "B first".to_string()],
+            b.dictionaries.terms.enabled,
+        );
+        assert_eq!(vec!["B off".to_string()], b.dictionaries.terms.disabled);
+        assert!(applied.profiles.iter().all(|profile| {
+            let settings = applied.resolve(&profile.id).unwrap();
+            !settings.dictionaries.terms.enabled.iter().any(|name| name == "FixtureTerms")
+                && !settings.dictionaries.terms.disabled.iter().any(|name| name == "FixtureTerms")
+        }));
+    }
+
+    #[test]
+    fn canceling_a_staged_import_preserves_a_preexisting_identity() {
+        let mut saved = Config::default();
+        let mut settings = saved.resolve("default").unwrap();
+        settings.dictionaries.terms.enabled = vec!["Other".into()];
+        settings.dictionaries.terms.disabled = vec!["FixtureTerms".into()];
+        settings.dictionaries.pitch.disabled = vec!["FixtureTerms".into()];
+        saved.update_profile("default", &settings).unwrap();
+        let dicts = [DictInfo { dict_id: 1, name: "FixtureTerms".into() }];
+        let mut form = super::from_config(&saved, &dicts);
+        form.stage_add(&fixture("terms.zip")).unwrap();
+        form.stage_remove("FixtureTerms");
+
+        let applied = super::apply_to(&form, &saved).config;
+        let profile = applied.resolve("default").unwrap();
+        assert_eq!(vec!["Other".to_string()], profile.dictionaries.terms.enabled);
+        assert_eq!(vec!["FixtureTerms".to_string()], profile.dictionaries.terms.disabled);
+        assert_eq!(vec!["FixtureTerms".to_string()], profile.dictionaries.pitch.disabled);
+        assert!(form.staged_removes.is_empty());
+    }
+
+    #[test]
+    fn a_staged_import_enables_its_owner_and_disables_other_explicit_profiles() {
+        let mut saved = Config::default();
+        let mut explicit = ProfileSettings::default();
+        explicit.dictionaries.terms.enabled.push("Existing".into());
+        insert_full(&mut saved, "explicit", "Explicit", explicit);
+        insert_derived(&mut saved, "inherited", "Inherited", "default", BTreeMap::new());
+        let mut overrides = BTreeMap::new();
+        overrides.insert(
+            "dictionaries.terms".into(),
+            FieldOverride::Set(toml::Value::try_from(&RoleList {
+                enabled: vec!["Seed".into()],
+                disabled: Vec::new(),
+            }).unwrap()),
+        );
+        insert_derived(&mut saved, "explicit-derived", "Explicit derived", "default", overrides);
+
+        let mut form = super::from_config(&saved, &[]);
+        form.stage_add(&fixture("terms.zip")).unwrap();
+        assert_eq!(1, form.terms.iter().filter(|row| row.name == "FixtureTerms").count());
+        assert!(form.terms.iter().find(|row| row.name == "FixtureTerms").unwrap().enabled);
+        form.select_profile("explicit", &[]).unwrap();
+        assert!(!form.terms.iter().find(|row| row.name == "FixtureTerms").unwrap().enabled);
+        form.select_profile("default", &[]).unwrap();
+
+        let applied = super::apply_to(&form, &saved).config;
+        let owner = applied.resolve("default").unwrap();
+        assert!(owner.dictionaries.terms.enabled.contains(&"FixtureTerms".into()));
+        let other = applied.resolve("explicit").unwrap();
+        assert!(other.dictionaries.terms.disabled.contains(&"FixtureTerms".into()));
+        let inherited = applied.resolve("inherited").unwrap();
+        assert!(inherited.dictionaries.terms.enabled.contains(&"FixtureTerms".into()));
+        let child = applied.resolve("explicit-derived").unwrap();
+        assert!(child.dictionaries.terms.disabled.contains(&"FixtureTerms".into()));
+    }
+
+    #[test]
+    fn an_unchecked_staged_import_keeps_its_role_and_language_state_after_profile_switches() {
+        let mut saved = Config::default();
+        let mut owner = saved.resolve("default").unwrap();
+        owner.ocr.language = "ja".into();
+        owner.dictionaries.terms.disabled = vec!["FixtureTerms".into()];
+        owner.dictionaries.per_language.insert("ja".into(), vec!["Existing".into()]);
+        saved.update_profile("default", &owner).unwrap();
+        insert_full(&mut saved, "other", "Other", owner);
+        let dicts = [DictInfo { dict_id: 1, name: "FixtureTerms".into() }];
+
+        let mut form = super::from_config(&saved, &dicts);
+        form.stage_add(&fixture("terms.zip")).unwrap();
+        form.terms.iter_mut().find(|row| row.name == "FixtureTerms").unwrap().enabled = false;
+        form.select_profile("other", &dicts).unwrap();
+        form.select_profile("default", &dicts).unwrap();
+
+        assert!(!form.terms.iter().find(|row| row.name == "FixtureTerms").unwrap().enabled);
+        let applied = super::apply_to(&form, &saved).config;
+        let owner = applied.resolve("default").unwrap();
+
+        assert!(owner.dictionaries.terms.enabled.is_empty());
+        assert_eq!(vec!["FixtureTerms".to_string()], owner.dictionaries.terms.disabled);
+        assert_eq!(
+            vec!["Existing".to_string()],
+            owner.dictionaries.per_language["ja"],
+        );
+    }
+
+    #[test]
+    fn a_new_unchecked_scoped_staged_import_stays_unchecked_after_profile_switches() {
+        let mut saved = Config::default();
+        let mut owner = saved.resolve("default").unwrap();
+        owner.ocr.language = "ja".into();
+        owner.dictionaries.terms.enabled = vec!["A".into(), "B".into()];
+        owner.dictionaries.per_language.insert("ja".into(), vec!["A".into(), "B".into()]);
+        saved.update_profile("default", &owner).unwrap();
+        insert_full(&mut saved, "other", "Other", owner);
+        let dicts = [
+            DictInfo { dict_id: 1, name: "A".into() },
+            DictInfo { dict_id: 2, name: "B".into() },
+        ];
+
+        let mut form = super::from_config(&saved, &dicts);
+        form.stage_add(&fixture("terms.zip")).unwrap();
+        form.terms.iter_mut().find(|row| row.name == "FixtureTerms").unwrap().enabled = false;
+        form.select_profile("other", &dicts).unwrap();
+        form.select_profile("default", &dicts).unwrap();
+
+        assert!(!form.terms.iter().find(|row| row.name == "FixtureTerms").unwrap().enabled);
+        form.terms.iter_mut().find(|row| row.name == "A").unwrap().enabled = false;
+        form.save_current().unwrap();
+        let applied = super::apply_to(&form, &saved).config;
+        let owner = applied.resolve("default").unwrap();
+
+        assert!(!owner.dictionaries.terms.enabled.contains(&"FixtureTerms".into()));
+        assert!(owner.dictionaries.terms.disabled.contains(&"FixtureTerms".into()));
+        assert_eq!(vec!["B".to_string()], owner.dictionaries.per_language["ja"]);
+    }
+
+    #[test]
+    fn a_scoped_staged_import_keeps_each_profiles_role_checkboxes() {
+        let mut saved = Config::default();
+        let mut owner = saved.resolve("default").unwrap();
+        owner.ocr.language = "ja".into();
+        owner.dictionaries.terms.enabled = vec!["A".into()];
+        owner.dictionaries.per_language.insert("ja".into(), vec!["A".into()]);
+        saved.update_profile("default", &owner).unwrap();
+        insert_full(&mut saved, "other", "Other", owner);
+        let dicts = [DictInfo { dict_id: 1, name: "A".into() }];
+        let mut form = super::from_config(&saved, &dicts);
+
+        form.stage_add(&fixture("both.zip")).unwrap();
+        form.terms.iter_mut().find(|row| row.name == "FixtureBoth").unwrap().enabled = false;
+        form.select_profile("other", &dicts).unwrap();
+        form.terms.iter_mut().find(|row| row.name == "FixtureBoth").unwrap().enabled = true;
+        form.select_profile("default", &dicts).unwrap();
+
+        assert!(!form.terms.iter().find(|row| row.name == "FixtureBoth").unwrap().enabled);
+        assert!(form.pitch.iter().find(|row| row.name == "FixtureBoth").unwrap().enabled);
+        form.select_profile("other", &dicts).unwrap();
+        assert!(form.terms.iter().find(|row| row.name == "FixtureBoth").unwrap().enabled);
+        assert!(!form.pitch.iter().find(|row| row.name == "FixtureBoth").unwrap().enabled);
+        form.save_current().unwrap();
+
+        let applied = super::apply_to(&form, &saved).config;
+        let owner = applied.resolve("default").unwrap();
+        let other = applied.resolve("other").unwrap();
+        assert_eq!(vec!["A".to_string()], owner.dictionaries.per_language["ja"]);
+        assert_eq!(vec!["FixtureBoth".to_string()], owner.dictionaries.pitch.enabled);
+        assert_eq!(
+            vec!["A".to_string(), "FixtureBoth".to_string()],
+            other.dictionaries.per_language["ja"],
+        );
+        assert!(other.dictionaries.pitch.enabled.is_empty());
+    }
+
+    #[test]
+    fn canceling_a_scoped_import_restores_its_independent_role_and_language_state() {
+        for scoped_enabled in [false, true] {
+            let mut saved = Config::default();
+            let mut settings = saved.resolve("default").unwrap();
+            settings.ocr.language = "ja".into();
+            settings.dictionaries.terms.enabled = vec!["A".into(), "FixtureTerms".into()];
+            let scope = if scoped_enabled {
+                vec!["FixtureTerms".into(), "A".into()]
+            } else {
+                vec!["A".into()]
+            };
+            settings.dictionaries.per_language.insert("ja".into(), scope.clone());
+            settings.dictionaries.per_language.insert("zh".into(), vec!["FixtureTerms".into()]);
+            saved.update_profile("default", &settings).unwrap();
+            let dicts = [
+                DictInfo { dict_id: 1, name: "A".into() },
+                DictInfo { dict_id: 2, name: "FixtureTerms".into() },
+            ];
+            let mut form = super::from_config(&saved, &dicts);
+
+            form.stage_add(&fixture("terms.zip")).unwrap();
+            form.terms.iter_mut().find(|row| row.name == "FixtureTerms").unwrap().enabled = !scoped_enabled;
+            form.save_current().unwrap();
+            form.stage_remove("FixtureTerms");
+            form.save_current().unwrap();
+
+            assert_eq!(
+                scoped_enabled,
+                form.terms.iter().find(|row| row.name == "FixtureTerms").unwrap().enabled,
+            );
+            let applied = super::apply_to(&form, &saved).config;
+            let profile = applied.resolve("default").unwrap();
+            assert_eq!(settings.dictionaries.terms, profile.dictionaries.terms);
+            assert_eq!(scope, profile.dictionaries.per_language["ja"]);
+            assert_eq!(
+                vec!["FixtureTerms".to_string()],
+                profile.dictionaries.per_language["zh"],
+            );
+        }
+    }
+
+    #[test]
+    fn canceling_an_import_keeps_explicit_derived_dictionary_overrides() {
+        for (role, scoped, source, name) in [
+            (Role::Terms, false, "terms.zip", "FixtureTerms"),
+            (Role::Pitch, false, "pitch.zip", "FixturePitch"),
+            (Role::Terms, true, "terms.zip", "FixtureTerms"),
+        ] {
+            let mut saved = Config::default();
+            let mut parent = saved.resolve("default").unwrap();
+            parent.ocr.language = "ja".into();
+            match role {
+                Role::Terms => parent.dictionaries.terms.enabled = vec!["A".into()],
+                Role::Pitch => parent.dictionaries.pitch.enabled = vec!["A".into()],
+                Role::Frequency => unreachable!(),
+            }
+            if scoped {
+                parent.dictionaries.per_language.insert("ja".into(), vec!["A".into()]);
+            }
+            saved.update_profile("default", &parent).unwrap();
+            insert_derived(&mut saved, "derived", "Derived", "default", BTreeMap::new());
+            let dicts = [DictInfo { dict_id: 1, name: "A".into() }];
+            let mut form = super::from_config(&saved, &dicts);
+
+            form.select_profile("derived", &dicts).unwrap();
+            form.stage_add(&fixture(source)).unwrap();
+            form.list_mut(role).iter_mut().find(|row| row.name == "A").unwrap().enabled = false;
+            form.select_profile("default", &dicts).unwrap();
+            form.list_mut(role).iter_mut().find(|row| row.name == "A").unwrap().enabled = false;
+            form.select_profile("derived", &dicts).unwrap();
+            form.stage_remove(name);
+            form.select_profile("default", &dicts).unwrap();
+            form.list_mut(role).iter_mut().find(|row| row.name == "A").unwrap().enabled = true;
+            form.select_profile("derived", &dicts).unwrap();
+            form.save_current().unwrap();
+
+            assert!(!form.list(role).iter().find(|row| row.name == "A").unwrap().enabled);
+            assert!(!form.list(role).iter().any(|row| row.name == name));
+            let applied = super::apply_to(&form, &saved).config;
+            let child = applied.resolve("derived").unwrap();
+            let enabled = match role {
+                Role::Terms if scoped => &child.dictionaries.per_language["ja"],
+                Role::Terms => &child.dictionaries.terms.enabled,
+                Role::Pitch => &child.dictionaries.pitch.enabled,
+                Role::Frequency => unreachable!(),
+            };
+            assert!(enabled.is_empty(), "{role:?}, scoped: {scoped}");
+        }
+    }
+
+    #[test]
+    fn canceling_an_import_without_other_edits_restores_dictionary_inheritance() {
+        for (role, scoped, source, name) in [
+            (Role::Terms, false, "terms.zip", "FixtureTerms"),
+            (Role::Pitch, false, "pitch.zip", "FixturePitch"),
+            (Role::Terms, true, "terms.zip", "FixtureTerms"),
+        ] {
+            let mut saved = Config::default();
+            let mut parent = saved.resolve("default").unwrap();
+            parent.ocr.language = "ja".into();
+            match role {
+                Role::Terms => parent.dictionaries.terms.enabled = vec!["A".into()],
+                Role::Pitch => parent.dictionaries.pitch.enabled = vec!["A".into()],
+                Role::Frequency => unreachable!(),
+            }
+            if scoped {
+                parent.dictionaries.per_language.insert("ja".into(), vec!["A".into()]);
+            }
+            saved.update_profile("default", &parent).unwrap();
+            insert_derived(&mut saved, "derived", "Derived", "default", BTreeMap::new());
+            let dicts = [DictInfo { dict_id: 1, name: "A".into() }];
+            let mut form = super::from_config(&saved, &dicts);
+
+            form.select_profile("derived", &dicts).unwrap();
+            form.stage_add(&fixture(source)).unwrap();
+            form.select_profile("default", &dicts).unwrap();
+            form.list_mut(role).iter_mut().find(|row| row.name == "A").unwrap().enabled = false;
+            form.select_profile("derived", &dicts).unwrap();
+            form.stage_remove(name);
+            form.save_current().unwrap();
+
+            assert!(!form.list(role).iter().find(|row| row.name == "A").unwrap().enabled);
+            assert!(!form.list(role).iter().any(|row| row.name == name));
+            form.select_profile("default", &dicts).unwrap();
+            form.list_mut(role).iter_mut().find(|row| row.name == "A").unwrap().enabled = true;
+            form.select_profile("derived", &dicts).unwrap();
+            let applied = super::apply_to(&form, &saved).config;
+            let child = applied.resolve("derived").unwrap();
+            let enabled = match role {
+                Role::Terms if scoped => &child.dictionaries.per_language["ja"],
+                Role::Terms => &child.dictionaries.terms.enabled,
+                Role::Pitch => &child.dictionaries.pitch.enabled,
+                Role::Frequency => unreachable!(),
+            };
+            assert_eq!(vec!["A".to_string()], *enabled, "{role:?}, scoped: {scoped}");
+        }
+    }
+
+    #[test]
+    fn canceling_multiple_imports_restores_inheritance_in_either_order() {
+        for canceled in [
+            ["FixtureTerms", "FixtureBoth"],
+            ["FixtureBoth", "FixtureTerms"],
+        ] {
+            let mut saved = Config::default();
+            let mut parent = saved.resolve("default").unwrap();
+            parent.dictionaries.terms.enabled = vec!["A".into()];
+            parent.dictionaries.pitch.enabled = vec!["A".into()];
+            saved.update_profile("default", &parent).unwrap();
+            insert_derived(&mut saved, "derived", "Derived", "default", BTreeMap::new());
+            let dicts = [DictInfo { dict_id: 1, name: "A".into() }];
+            let mut form = super::from_config(&saved, &dicts);
+
+            form.select_profile("derived", &dicts).unwrap();
+            form.stage_add(&fixture("terms.zip")).unwrap();
+            form.save_current().unwrap();
+            form.stage_add(&fixture("both.zip")).unwrap();
+            form.select_profile("default", &dicts).unwrap();
+            form.terms.iter_mut().find(|row| row.name == "A").unwrap().enabled = false;
+            form.pitch.iter_mut().find(|row| row.name == "A").unwrap().enabled = false;
+            form.select_profile("derived", &dicts).unwrap();
+            form.stage_remove(canceled[0]);
+            assert!(form.terms.iter().any(|row| row.name == canceled[1]));
+            form.stage_remove(canceled[1]);
+            form.save_current().unwrap();
+
+            assert!(!form.has_staged());
+            assert!(enabled_names(&form.terms).is_empty());
+            assert!(enabled_names(&form.pitch).is_empty());
+            let applied = super::apply_to(&form, &saved).config;
+            let child = applied.resolve("derived").unwrap();
+            assert_eq!(vec!["A".to_string()], child.dictionaries.terms.disabled);
+            assert_eq!(vec!["A".to_string()], child.dictionaries.pitch.disabled);
+        }
+    }
+
+    #[test]
+    fn canceling_an_import_keeps_other_staged_removals() {
+        let mut saved = Config::default();
+        let mut settings = saved.resolve("default").unwrap();
+        settings.dictionaries.terms.enabled = vec!["A".into(), "B".into()];
+        saved.update_profile("default", &settings).unwrap();
+        let dicts = [
+            DictInfo { dict_id: 1, name: "A".into() },
+            DictInfo { dict_id: 2, name: "B".into() },
+        ];
+        let mut form = super::from_config(&saved, &dicts);
+
+        form.stage_remove("A");
+        form.stage_add(&fixture("terms.zip")).unwrap();
+        form.stage_remove("FixtureTerms");
+        form.save_current().unwrap();
+
+        assert_eq!(vec!["B".to_string()], names(&form.terms));
+        assert_eq!(vec!["A".to_string()], form.staged_removes);
+        let applied = super::apply_to(&form, &saved).config;
+        assert_eq!(
+            vec!["B".to_string()],
+            applied.resolve("default").unwrap().dictionaries.terms.enabled,
+        );
+    }
+
+    #[test]
+    fn profile_merge_does_not_reassign_a_deleted_import_owner() {
+        let mut saved = Config::default();
+        insert_full(&mut saved, "importer", "Importer", ProfileSettings::default());
+        let mut form = super::from_config(&saved, &[]);
+        form.select_profile("importer", &[]).unwrap();
+        form.stage_add(&fixture("terms.zip")).unwrap();
+        form.delete_profile("importer", &[]).unwrap();
+
+        let applied = super::apply_to(&form, &saved).config;
+
+        assert!(applied.resolve("importer").is_err());
+        let remaining = applied.resolve("default").unwrap();
+        assert!(!remaining.dictionaries.terms.enabled.contains(&"FixtureTerms".into()));
+        assert!(remaining.dictionaries.terms.disabled.contains(&"FixtureTerms".into()));
+    }
+
     #[test]
     fn the_form_lists_dictionaries_in_the_configured_order() {
         let form =
-            from_config(&cfg_with(&["大辞林　第四版", "Jitendex.org [2026-07-09]"]), &dicts());
+            from_resolved(&cfg_with(&["大辞林　第四版", "Jitendex.org [2026-07-09]"]), &dicts());
         assert_eq!(vec!["大辞林　第四版", "Jitendex.org [2026-07-09]"], names(&form.terms));
         assert!(form.terms.iter().all(|row| row.enabled));
     }
 
     #[test]
     fn an_unlisted_dictionary_is_listed_last() {
-        let form = from_config(&cfg_with(&["大辞林　第四版"]), &dicts());
+        let form = from_resolved(&cfg_with(&["大辞林　第四版"]), &dicts());
         assert_eq!(vec!["大辞林　第四版", "Jitendex.org [2026-07-09]"], names(&form.terms));
     }
 
@@ -733,9 +2602,9 @@ mod tests {
     #[test]
     fn reordering_writes_the_exact_names_in_their_new_order() {
         let cfg = cfg_with(&["大辞林　第四版", "Jitendex.org [2026-07-09]"]);
-        let mut form = from_config(&cfg, &dicts());
+        let mut form = from_resolved(&cfg, &dicts());
         form.terms.reverse();
-        let out = apply_to(&form, &cfg);
+        let out = apply_resolved(&form, &cfg);
         assert_eq!(
             vec!["Jitendex.org [2026-07-09]".to_string(), "大辞林　第四版".to_string()],
             out.dictionaries.terms,
@@ -748,7 +2617,7 @@ mod tests {
     #[test]
     fn a_pre_roles_config_is_written_back_as_exact_names() {
         let cfg = pre_roles(&["大辞林", "Kenkyusha"]);
-        let form = from_config(&cfg, &dicts());
+        let form = super::from_config(&cfg, &dicts());
         assert_eq!(
             vec!["大辞林　第四版", "Jitendex.org [2026-07-09]"],
             names(&form.terms),
@@ -756,74 +2625,175 @@ mod tests {
              dictionary no substring named landed at the bottom",
         );
 
-        let out = apply_to(&form, &cfg);
-
+        let out = super::apply_to(&form, &cfg).config;
+        let resolved = out.resolved(Some(&form.profile_id)).unwrap();
         assert_eq!(
             vec!["大辞林　第四版".to_string(), "Jitendex.org [2026-07-09]".to_string()],
-            out.dictionaries.terms,
+            resolved.dictionaries.terms,
         );
         let text = toml::to_string_pretty(&out).expect("the migrated config serialises");
         assert!(!text.contains("display_order"), "the retired key is gone: {text}");
         assert!(!text.contains("\"大辞林\""), "and so is the substring: {text}");
     }
 
-    /// The Windows Apply pipeline writes its fields and preserves Linux platform fields.
+    /// Apply keeps latest bind chords and target state while it saves profile edits.
     #[test]
-    fn applying_the_form_preserves_the_other_platforms_fields() {
-        let mut cfg = cfg_with(&["大辞林　第四版", "Jitendex.org [2026-07-09]"]);
-        cfg.trigger.trigger_key_linux = "SUPER+J".to_string();
-        cfg.anki.add_key_linux = "SUPER+K".to_string();
-        cfg.anki.static_region_key_linux = "SUPER+R".to_string();
-        cfg.actions.ocr_clipboard = Some(OcrClipboardConfig { open_sentence_search: false,
-            hotkey: Some("f9".into()),
-            hotkey_linux: Some("SUPER+C".into()),
-        });
-        cfg.popup.layer = crate::config::PopupLayer::Top;
-        let mut form = from_config(&cfg, &dicts());
+    fn applying_the_form_preserves_latest_bind_chords_and_targets() {
+        let mut latest = Config::default();
+        let mut form = super::from_config(&latest, &[]);
         form.cfg.popup.theme = "light".to_string();
-        let out = apply_to(&form, &cfg);
-        assert_eq!("SUPER+J", out.trigger.trigger_key_linux);
-        assert_eq!("SUPER+K", out.anki.add_key_linux);
-        assert_eq!("SUPER+R", out.anki.static_region_key_linux);
-        assert_eq!(
-            Some("SUPER+C".to_string()),
-            out.actions.ocr_clipboard.as_ref().and_then(|a| a.hotkey_linux.clone())
-        );
-        assert_eq!(crate::config::PopupLayer::Top, out.popup.layer);
-        assert_eq!("light", out.popup.theme);
+
+        let lookup = latest.binds.iter_mut()
+            .find(|bind| bind.action == crate::config::BindAction::Lookup).unwrap();
+        lookup.windows = "CTRL+J".to_string();
+        lookup.linux = "SUPER+J".to_string();
+        let mut settings = latest.resolve("default").unwrap();
+        settings.actions.screenshot.fixed_region = Some([1, 2, 300, 400]);
+        settings.anki.static_region = Some([10, 20, 30, 40]);
+        latest.update_profile("default", &settings).unwrap();
+
+        let out = super::apply_to(&form, &latest).config;
+        let lookup = out.binds.iter()
+            .find(|bind| bind.action == crate::config::BindAction::Lookup).unwrap();
+        assert_eq!("CTRL+J", lookup.windows);
+        assert_eq!("SUPER+J", lookup.linux);
+        let applied = out.resolved(Some("default")).unwrap();
+        assert_eq!(Some([1, 2, 300, 400]), applied.actions.screenshot.fixed_region);
+        assert_eq!(Some([10, 20, 30, 40]), applied.anki.static_region);
+        assert_eq!("light", applied.popup.theme);
     }
 
-    /// The written name includes the Dictionary's edition and date. The old key
-    /// derivation cut text at the first bracket, so two editions became one entry.
     #[test]
-    fn a_never_listed_dictionary_is_written_under_its_whole_name() {
-        let cfg = cfg_with(&[]);
-        let form = from_config(&cfg, &dicts());
-        let out = apply_to(&form, &cfg);
-        assert_eq!(
-            vec!["Jitendex.org [2026-07-09]".to_string(), "大辞林　第四版".to_string()],
-            out.dictionaries.terms,
-        );
+    fn profile_merge_deletes_dependents_before_parent() {
+        let mut saved = Config::default();
+        let parent = saved.resolve("default").unwrap();
+        insert_full(&mut saved, "parent", "Parent", parent);
+        insert_derived(&mut saved, "child", "Child", "parent", BTreeMap::new());
+        let mut form = super::from_config(&saved, &[]);
+        form.delete_profile("child", &[]).unwrap();
+        form.delete_profile("parent", &[]).unwrap();
+
+        let applied = super::apply_to(&form, &saved).config;
+
+        assert_eq!(vec!["default"], applied.profiles.iter().map(|profile| profile.id.as_str()).collect::<Vec<_>>());
+        applied.validate().unwrap();
     }
 
-    /// An unchecked row goes to the disabled list. It keeps its position there
-    /// and does not affect searches.
+    #[test]
+    fn profile_merge_resets_only_edited_profile() {
+        let mut saved = Config::default();
+        let mut first = saved.resolve("default").unwrap();
+        first.actions.screenshot.fixed_region = Some([10, 20, 300, 200]);
+        saved.update_profile("default", &first).unwrap();
+        let mut second = first;
+        second.actions.screenshot.fixed_region = Some([50, 60, 700, 400]);
+        insert_full(&mut saved, "other", "Other", second);
+        let mut form = super::from_config(&saved, &[]);
+        form.screenshot_reset_targets = true;
+        form.select_profile("other", &[]).unwrap();
+
+        let applied = super::apply_to(&form, &saved).config;
+
+        assert_eq!(None, applied.resolve("default").unwrap().actions.screenshot.fixed_region);
+        assert_eq!(Some([50, 60, 700, 400]), applied.resolve("other").unwrap().actions.screenshot.fixed_region);
+    }
+
+    #[test]
+    fn profile_merge_applies_explicit_reset_to_latest_targets() {
+        let mut latest = Config::default();
+        let mut form = super::from_config(&latest, &[]);
+        form.screenshot_reset_targets = true;
+        let mut profile = latest.resolve("default").unwrap();
+        profile.actions.screenshot.fixed_region = Some([10, 20, 300, 200]);
+        profile.actions.screenshot.fixed_window = Some(crate::config::ScreenshotWindow {
+            app_id: "reader".into(), title: "日本語".into(),
+        });
+        profile.actions.screenshot.capture_mode = crate::config::ScreenshotMode::FixedWindow;
+        latest.update_profile("default", &profile).unwrap();
+
+        let applied = super::apply_to(&form, &latest).config.resolve("default").unwrap();
+
+        assert_eq!(None, applied.actions.screenshot.fixed_region);
+        assert_eq!(None, applied.actions.screenshot.fixed_window);
+        assert_eq!(crate::config::ScreenshotMode::FixedWindow, applied.actions.screenshot.capture_mode);
+    }
+
+    #[test]
+    fn profile_merge_keeps_untouched_language_scoped_inheritance() {
+        let mut saved = Config::default();
+        let mut parent = saved.resolve("default").unwrap();
+        parent.popup.theme = "dark".into();
+        parent.ocr.language = "ja".into();
+        parent.dictionaries.terms.enabled = vec!["A".into(), "B".into()];
+        parent.dictionaries.per_language.insert("ja".into(), vec!["A".into()]);
+        insert_full(&mut saved, "parent", "Parent", parent.clone());
+        insert_derived(&mut saved, "child", "Child", "parent", BTreeMap::new());
+        let dicts = [
+            DictInfo { dict_id: 1, name: "A".into() },
+            DictInfo { dict_id: 2, name: "B".into() },
+        ];
+        let mut form = super::from_config(&saved, &dicts);
+        form.select_profile("child", &dicts).unwrap();
+        form.cfg.popup.theme = "light".into();
+
+        let mut applied = super::apply_to(&form, &saved).config;
+
+        assert_eq!(vec!["A", "B"], applied.resolve("child").unwrap().dictionaries.terms.enabled);
+        parent.dictionaries.terms.enabled.push("C".into());
+        applied.update_profile("parent", &parent).unwrap();
+        let child = applied.resolve("child").unwrap();
+        assert_eq!(vec!["A", "B", "C"], child.dictionaries.terms.enabled);
+        assert_eq!("light", child.popup.theme);
+    }
+
+    #[test]
+    fn profile_merge_removes_dictionary_from_latest_catalog() {
+        let mut latest = Config::default();
+        let mut parent = latest.resolve("default").unwrap();
+        parent.dictionaries.terms.enabled = vec!["Gone".into()];
+        latest.update_profile("default", &parent).unwrap();
+        insert_derived(&mut latest, "child", "Child", "default", BTreeMap::new());
+        let mut form = super::from_config(&latest, &[]);
+        form.stage_remove("Gone");
+
+        let mut child = latest.resolve("child").unwrap();
+        child.dictionaries.terms.enabled.push("Extra".into());
+        latest.update_profile("child", &child).unwrap();
+        parent.dictionaries.pitch.enabled = vec!["Gone".into()];
+        parent.dictionaries.per_language.insert("ja".into(), vec!["Gone".into()]);
+        insert_full(&mut latest, "later", "Later", parent);
+        latest.dictionaries.frequency = vec!["Gone".into()];
+
+        let applied = super::apply_to(&form, &latest).config;
+
+        assert!(applied.resolve("default").unwrap().dictionaries.terms.enabled.is_empty());
+        assert_eq!(vec!["Extra"], applied.resolve("child").unwrap().dictionaries.terms.enabled);
+        let later = applied.resolve("later").unwrap();
+        assert!(later.dictionaries.terms.enabled.is_empty());
+        assert!(later.dictionaries.pitch.enabled.is_empty());
+        assert!(later.dictionaries.per_language["ja"].is_empty());
+        assert!(applied.dictionaries.frequency.is_empty());
+    }
+
+    /// Installed dictionaries stay disabled when the profile has no terms list.
+    #[test]
+    fn an_empty_role_list_does_not_enable_installed_dictionaries() {
+        let cfg = cfg_with(&[]);
+        let form = from_resolved(&cfg, &dicts());
+        let out = apply_resolved(&form, &cfg);
+        assert!(out.dictionaries.terms.is_empty());
+    }
+
+    /// An unchecked enabled row moves to the disabled list.
     #[test]
     fn an_unchecked_row_lands_in_the_disabled_twin() {
-        let cfg = cfg_with(&[]);
-        let mut form = from_config(&cfg, &dicts());
+        let cfg = cfg_with(&["大辞林　第四版", "Jitendex.org [2026-07-09]"]);
+        let mut form = from_resolved(&cfg, &dicts());
         form.terms[0].enabled = false;
-        let out = apply_to(&form, &cfg);
-        assert_eq!(vec!["大辞林　第四版".to_string()], out.dictionaries.terms);
-        assert_eq!(
-            vec!["Jitendex.org [2026-07-09]".to_string()],
-            out.dictionaries.terms_disabled,
-        );
-        assert_eq!(
-            vec!["大辞林　第四版".to_string()],
-            out.present_config(&dicts()).terms,
-            "and the popup searches only what is checked",
-        );
+        let out = apply_resolved(&form, &cfg);
+        assert_eq!(vec!["Jitendex.org [2026-07-09]".to_string()], out.dictionaries.terms);
+        assert_eq!(vec!["大辞林　第四版".to_string()], out.dictionaries.terms_disabled);
+        assert_eq!(vec!["Jitendex.org [2026-07-09]".to_string()], out.present_config().terms);
     }
 
     /// Exact names let one edition stay disabled while another stays enabled.
@@ -833,13 +2803,13 @@ mod tests {
             DictInfo { dict_id: 1, name: "大辞林　第三版".into() },
             DictInfo { dict_id: 2, name: "大辞林　第四版".into() },
         ];
-        let cfg = Config::default();
-        let mut form = from_config(&cfg, &editions);
+        let cfg = cfg_with(&["大辞林　第三版", "大辞林　第四版"]);
+        let mut form = from_resolved(&cfg, &editions);
         form.terms[0].enabled = false;
-        let out = apply_to(&form, &cfg);
+        let out = apply_resolved(&form, &cfg);
         assert_eq!(vec!["大辞林　第四版".to_string()], out.dictionaries.terms);
         assert_eq!(vec!["大辞林　第三版".to_string()], out.dictionaries.terms_disabled);
-        assert_eq!(vec!["大辞林　第四版".to_string()], out.present_config(&editions).terms);
+        assert_eq!(vec!["大辞林　第四版".to_string()], out.present_config().terms);
     }
 
     /// A Config name with no Dictionary match must appear in the stale-name report.
@@ -859,7 +2829,7 @@ mod tests {
     /// names with the same exact rule.
     #[test]
     fn a_stale_entry_is_reported_whichever_list_holds_it() {
-        let mut cfg = Config::default();
+        let mut cfg = ResolvedConfig::default();
         cfg.dictionaries.frequency = vec!["Gone".to_string()];
         cfg.dictionaries.pitch_disabled = vec!["Also gone".to_string()];
         assert_eq!(
@@ -868,155 +2838,28 @@ mod tests {
         );
     }
 
-    /// An unchanged form must produce an equal Config.
-    #[test]
-    fn an_untouched_form_round_trips_to_an_equal_config() {
-        let cfg = cfg_with(&["大辞林　第四版", "Jitendex.org [2026-07-09]"]);
-        let form = from_config(&cfg, &dicts());
-        assert_eq!(cfg, apply_to(&form, &cfg));
-    }
 
     #[test]
-    fn every_setting_survives_the_round_trip() {
-        let mut cfg = cfg_with(&["大辞林　第四版", "Jitendex.org [2026-07-09]"]);
-        cfg.trigger.mode = TriggerMode::HoldKey;
-        cfg.popup.theme = "light".into();
-        cfg.popup.font = "Noto Sans JP".into();
-        cfg.popup.max_width_percent = 35;
-        cfg.popup.max_height_percent = 70;
-        cfg.popup.summary_chars = 25;
-        cfg.popup.highlight_match = false;
-        cfg.popup.scroll_popup = false;
-        cfg.popup.edge_autoscroll = false;
-        cfg.popup.side_panel = true;
-        cfg.popup.exclude_from_capture = true;
-        cfg.popup.layout_mode = LayoutMode::Compact;
-        cfg.popup.dictionary_styling = false;
-        cfg.popup.show_examples = false;
-        cfg.popup.show_attributions = false;
-        cfg.popup.show_images = false;
-        cfg.popup.show_part_of_speech = true;
-        cfg.ocr.max_ocr_passes = 3;
-        cfg.ocr.prefer_vertical = true;
-        cfg.ocr.capture_width = 640;
-        cfg.ocr.capture_height = 180;
-        cfg.ocr.scan_alphanumeric = false;
-        cfg.debug.show_scan_region = true;
-        cfg.debug.show_engine_log = true;
-        cfg.debug.show_adapter_log = true;
-        cfg.anki.enabled = true;
-        cfg.anki.url = "http://localhost:9999".into();
-        cfg.anki.deck = "Mining".into();
-        cfg.anki.model = "Custom".into();
-        cfg.anki.add_key = "f2".into();
-        cfg.anki.notify_on_add = false;
-        cfg.anki.selection_buttons = SelectionButtons::PrimaryReplacing;
-        cfg.anki.selection_separator = SelectionSeparator::ListItems;
-        cfg.anki.triple_click = TripleClick::Line;
-        let form = from_config(&cfg, &dicts());
-        assert_eq!(cfg, apply_to(&form, &cfg));
+    fn selected_text_bind_edits_preserve_latest_linux_chord() {
+        let mut latest = Config::default();
+        latest.binds.push(crate::config::Bind::new(
+            "selected-text".into(), crate::config::BindAction::SelectedText,
+        ));
+        let mut form = super::from_config(&latest, &[]);
+        let edited = form.catalog.binds.iter_mut()
+            .find(|bind| bind.action == crate::config::BindAction::SelectedText).unwrap();
+        edited.windows = "ALT+L".into();
+        latest.binds.iter_mut()
+            .find(|bind| bind.action == crate::config::BindAction::SelectedText).unwrap()
+            .linux = "SUPER+K".into();
+
+        let out = super::apply_to(&form, &latest).config;
+        let saved = out.binds.iter()
+            .find(|bind| bind.action == crate::config::BindAction::SelectedText).unwrap();
+        assert_eq!("ALT+L", saved.windows);
+        assert_eq!("SUPER+K", saved.linux);
     }
 
-    /// This test checks each render field in both directions, one field at a time.
-    ///
-    /// A field can reach the form through `from_config` but fail to return through
-    /// `apply_to`. Separate cases show which field fails. They keep failures separate.
-    #[test]
-    fn every_render_knob_round_trips_through_the_form() {
-        type Edit = fn(&mut Config);
-        type Read = fn(&SettingsForm) -> bool;
-        type Back = fn(&Config) -> bool;
-        let cases: [(&str, Edit, Read, Back); 6] = [
-            (
-                "layout_mode",
-                |c| c.popup.layout_mode = LayoutMode::Compact,
-                |f| f.cfg.popup.layout_mode == LayoutMode::Compact,
-                |c| c.popup.layout_mode == LayoutMode::Compact,
-            ),
-            (
-                "dictionary_styling",
-                |c| c.popup.dictionary_styling = false,
-                |f| !f.cfg.popup.dictionary_styling,
-                |c| !c.popup.dictionary_styling,
-            ),
-            (
-                "show_examples",
-                |c| c.popup.show_examples = false,
-                |f| !f.cfg.popup.show_examples,
-                |c| !c.popup.show_examples,
-            ),
-            (
-                "show_attributions",
-                |c| c.popup.show_attributions = false,
-                |f| !f.cfg.popup.show_attributions,
-                |c| !c.popup.show_attributions,
-            ),
-            (
-                "show_images",
-                |c| c.popup.show_images = false,
-                |f| !f.cfg.popup.show_images,
-                |c| !c.popup.show_images,
-            ),
-            (
-                "show_part_of_speech",
-                |c| c.popup.show_part_of_speech = true,
-                |f| f.cfg.popup.show_part_of_speech,
-                |c| c.popup.show_part_of_speech,
-            ),
-        ];
-        for (field, edit, read, back) in cases {
-            let mut cfg = cfg_with(&["大辞林"]);
-            edit(&mut cfg);
-            let form = from_config(&cfg, &dicts());
-            assert!(read(&form), "{field} did not reach the form");
-            assert!(back(&apply_to(&form, &cfg)), "{field} did not come back from the form");
-        }
-    }
-
-    #[test]
-    fn anki_add_key_round_trips_through_the_form() {
-        let mut cfg = cfg_with(&["大辞林", "Jitendex"]);
-        cfg.anki.add_key = "f2".into();
-        let form = from_config(&cfg, &dicts());
-        assert_eq!("f2", form.cfg.anki.add_key);
-        assert_eq!("f2", apply_to(&form, &cfg).anki.add_key);
-    }
-
-    #[test]
-    fn selected_text_hotkey_applies_and_preserves_the_linux_twin() {
-        let mut saved = cfg_with(&["大辞林", "Jitendex"]);
-        saved.actions.search.selected_hotkey = Some("ctrl+shift+l".into());
-        saved.actions.search.selected_hotkey_linux = Some("SUPER+L".into());
-        let mut form = from_config(&saved, &dicts());
-        form.cfg.actions.search.selected_hotkey = Some("alt+l".into());
-        saved.actions.search.selected_hotkey_linux = Some("SUPER+K".into());
-        let applied = apply_to(&form, &saved);
-        assert_eq!(Some("alt+l"), applied.actions.search.selected_hotkey.as_deref());
-        assert_eq!(
-            Some("SUPER+K"),
-            applied.actions.search.selected_hotkey_linux.as_deref()
-        );
-    }
-
-    #[test]
-    fn field_map_round_trips_through_the_form() {
-        let mut cfg = cfg_with(&["大辞林", "Jitendex"]);
-        cfg.anki.field_map = vec![FieldMapping {
-            anki_field: "Front".into(),
-            source: "expression".into(),
-        }];
-        let form = from_config(&cfg, &dicts());
-        assert_eq!(Some(cfg.anki.field_map.clone()), form.field_map);
-        assert_eq!(cfg.anki.field_map, apply_to(&form, &cfg).anki.field_map);
-    }
-
-    /// An untouched field map must remain unchanged.
-    #[test]
-    fn an_untouched_field_map_survives_apply() {
-        let cfg = cfg_with(&[]);
-        let form = from_config(&cfg, &dicts());
-        assert_eq!(cfg.anki.field_map, apply_to(&form, &cfg).anki.field_map);
-    }
 
     /// An empty field map is an explicit user answer that Apply must save.
     #[test]
@@ -1024,10 +2867,10 @@ mod tests {
         let mut cfg = cfg_with(&[]);
         cfg.anki.field_map =
             vec![FieldMapping { anki_field: "Front".into(), source: "expression".into() }];
-        let mut form = from_config(&cfg, &dicts());
+        let mut form = from_resolved(&cfg, &dicts());
         form.field_map = Some(Vec::new());
         assert!(
-            apply_to(&form, &cfg).anki.field_map.is_empty(),
+            apply_resolved(&form, &cfg).anki.field_map.is_empty(),
             "the user emptied the map; Apply must save that"
         );
     }
@@ -1039,11 +2882,11 @@ mod tests {
         let mut cfg = cfg_with(&[]);
         cfg.anki.field_map =
             vec![FieldMapping { anki_field: "Front".into(), source: "expression".into() }];
-        let mut form = from_config(&cfg, &dicts());
+        let mut form = from_resolved(&cfg, &dicts());
         form.field_map = None;
         assert_eq!(
             cfg.anki.field_map,
-            apply_to(&form, &cfg).anki.field_map,
+            apply_resolved(&form, &cfg).anki.field_map,
             "Anki was unreachable; Apply must leave the saved map alone"
         );
     }
@@ -1051,14 +2894,14 @@ mod tests {
     #[test]
     fn an_open_settings_form_preserves_a_newly_saved_screenshot_target() {
         let mut cfg = cfg_with(&[]);
-        let mut form = from_config(&cfg, &dicts());
+        let mut form = from_resolved(&cfg, &dicts());
         cfg.actions.screenshot.fixed_region = Some([-300, 40, 200, 100]);
         cfg.actions.screenshot.fixed_window = Some(crate::config::ScreenshotWindow {
             app_id: "reader".into(),
             title: "日本語".into(),
         });
         form.cfg.actions.screenshot.capture_mode = crate::config::ScreenshotMode::FixedWindow;
-        let out = apply_to(&form, &cfg);
+        let out = apply_resolved(&form, &cfg);
         assert_eq!(cfg.actions.screenshot.fixed_region, out.actions.screenshot.fixed_region);
         assert_eq!(cfg.actions.screenshot.fixed_window, out.actions.screenshot.fixed_window);
     }
@@ -1072,165 +2915,24 @@ mod tests {
             title: "日本語".into(),
         });
         cfg.actions.screenshot.capture_mode = crate::config::ScreenshotMode::FixedWindow;
-        let mut form = from_config(&cfg, &dicts());
+        let mut form = from_resolved(&cfg, &dicts());
         form.screenshot_reset_targets = true;
-        let out = apply_to(&form, &cfg);
+        let out = apply_resolved(&form, &cfg);
         assert_eq!(None, out.actions.screenshot.fixed_region);
         assert_eq!(None, out.actions.screenshot.fixed_window);
         assert_eq!(cfg.actions.screenshot.capture_mode, out.actions.screenshot.capture_mode);
     }
 
-    #[test]
-    fn ocr_clipboard_key_round_trips_through_the_form() {
-        let mut cfg = cfg_with(&[]);
-        cfg.actions.ocr_clipboard = Some(OcrClipboardConfig { open_sentence_search: false,
-            hotkey: Some("f9".into()),
-            hotkey_linux: None,
-        });
-
-        let form = from_config(&cfg, &dicts());
-        assert_eq!(Some("f9".to_string()), form.ocr_clipboard_key);
-
-        let out = apply_to(&form, &cfg);
-        assert_eq!(
-            Some("f9".to_string()),
-            out.actions.ocr_clipboard.and_then(|a| a.hotkey)
-        );
-    }
-
-    /// An absent OCR clipboard section and key must remain `None` without a sentinel.
-    #[test]
-    fn an_absent_ocr_clipboard_action_reads_as_none() {
-        let cfg = cfg_with(&[]);
-        assert_eq!(None, cfg.actions.ocr_clipboard);
-
-        let form = from_config(&cfg, &dicts());
-        assert_eq!(None, form.ocr_clipboard_key);
-        assert_eq!(None, apply_to(&form, &cfg).actions.ocr_clipboard);
-    }
-
-    #[test]
-    fn an_unset_ocr_clipboard_key_disables_the_action() {
-        let mut cfg = cfg_with(&[]);
-        cfg.actions.ocr_clipboard = Some(OcrClipboardConfig { open_sentence_search: false,
-            hotkey: Some("f9".into()),
-            hotkey_linux: None,
-        });
-        let mut form = from_config(&cfg, &dicts());
-        form.ocr_clipboard_key = None;
-
-        assert_eq!(None, apply_to(&form, &cfg).actions.ocr_clipboard);
-    }
-
-    /// The Windows chord can be clear while the Linux chord remains.
-    #[test]
-    fn an_unset_ocr_clipboard_key_keeps_the_linux_twin() {
-        let mut cfg = cfg_with(&[]);
-        cfg.actions.ocr_clipboard = Some(OcrClipboardConfig { open_sentence_search: false,
-            hotkey: Some("f9".into()),
-            hotkey_linux: Some("SUPER+C".into()),
-        });
-        let mut form = from_config(&cfg, &dicts());
-        form.ocr_clipboard_key = None;
-
-        assert_eq!(
-            Some(OcrClipboardConfig { open_sentence_search: false, hotkey: None, hotkey_linux: Some("SUPER+C".into()) }),
-            apply_to(&form, &cfg).actions.ocr_clipboard
-        );
-    }
-
-    #[test]
-    fn include_dictionary_name_round_trips() {
-        let mut cfg = cfg_with(&[]);
-        cfg.anki.include_dictionary_name = false;
-        let form = from_config(&cfg, &dicts());
-        assert!(!form.cfg.anki.include_dictionary_name);
-        let out = apply_to(&form, &cfg);
-        assert!(!out.anki.include_dictionary_name);
-    }
-
-    #[test]
-    fn first_dict_only_defaults_to_false() {
-        let cfg = Config::default();
-        let form = from_config(&cfg, &dicts());
-        assert!(!form.cfg.anki.first_dict_only);
-    }
-
-    #[test]
-    fn first_dict_only_round_trips() {
-        let mut cfg = cfg_with(&[]);
-        cfg.anki.first_dict_only = true;
-        let form = from_config(&cfg, &dicts());
-        assert!(form.cfg.anki.first_dict_only);
-        let out = apply_to(&form, &cfg);
-        assert!(out.anki.first_dict_only);
-    }
-
-    #[test]
-    fn overwrite_duplicates_round_trips_through_the_settings_form() {
-        let mut cfg = cfg_with(&[]);
-        cfg.anki.overwrite_duplicates = true;
-        let form = from_config(&cfg, &dicts());
-        assert!(form.cfg.anki.overwrite_duplicates);
-        assert!(apply_to(&form, &cfg).anki.overwrite_duplicates);
-    }
-
-    #[test]
-    fn sentence_mode_round_trips() {
-        let mut cfg = cfg_with(&[]);
-        cfg.anki.sentence_mode = SentenceMode::All;
-        let form = from_config(&cfg, &dicts());
-        assert_eq!(SentenceMode::All, form.cfg.anki.sentence_mode);
-        let out = apply_to(&form, &cfg);
-        assert_eq!(SentenceMode::All, out.anki.sentence_mode);
-    }
-
-    #[test]
-    fn sentence_mode_defaults_to_sentence_in_the_form() {
-        let cfg = Config::default();
-        let form = from_config(&cfg, &dicts());
-        assert_eq!(SentenceMode::Sentence, form.cfg.anki.sentence_mode);
-    }
-
-    #[test]
-    fn static_region_key_round_trips_through_the_form() {
-        let mut cfg = cfg_with(&[]);
-        cfg.anki.static_region_key = "alt+r".to_string();
-        let form = from_config(&cfg, &dicts());
-        assert_eq!("alt+r", form.cfg.anki.static_region_key);
-        let out = apply_to(&form, &cfg);
-        assert_eq!("alt+r", out.anki.static_region_key);
-    }
-
-    #[test]
-    fn sentence_mode_static_round_trips() {
-        let mut cfg = cfg_with(&[]);
-        cfg.anki.sentence_mode = SentenceMode::Static;
-        let form = from_config(&cfg, &dicts());
-        assert_eq!(SentenceMode::Static, form.cfg.anki.sentence_mode);
-        let out = apply_to(&form, &cfg);
-        assert_eq!(SentenceMode::Static, out.anki.sentence_mode);
-    }
-
-    #[test]
-    fn sentence_mode_sentence_round_trips() {
-        let mut cfg = cfg_with(&[]);
-        cfg.anki.sentence_mode = SentenceMode::Sentence;
-        let form = from_config(&cfg, &dicts());
-        assert_eq!(SentenceMode::Sentence, form.cfg.anki.sentence_mode);
-        let out = apply_to(&form, &cfg);
-        assert_eq!(SentenceMode::Sentence, out.anki.sentence_mode);
-    }
 
     #[test]
     fn out_of_range_numbers_are_clamped_not_rejected() {
         let cfg = cfg_with(&[]);
-        let mut form = from_config(&cfg, &dicts());
+        let mut form = from_resolved(&cfg, &dicts());
         form.cfg.popup.max_width_percent = 250;
         form.cfg.popup.max_height_percent = 250;
         form.cfg.popup.summary_chars = 1;
         form.cfg.ocr.max_ocr_passes = 99;
-        let out = apply_to(&form, &cfg);
+        let out = apply_resolved(&form, &cfg);
         assert_eq!(MAX_WIDTH_RANGE.1, out.popup.max_width_percent);
         assert_eq!(MAX_HEIGHT_RANGE.1, out.popup.max_height_percent);
         assert_eq!(SUMMARY_RANGE.0, out.popup.summary_chars);
@@ -1239,229 +2941,90 @@ mod tests {
 
     #[test]
     fn apply_to_clamps_the_capture_size() {
-        let cfg = Config::default();
-        let mut form = from_config(&cfg, &dicts());
+        let cfg = ResolvedConfig::default();
+        let mut form = from_resolved(&cfg, &dicts());
         form.cfg.ocr.capture_width = 99_999;
         form.cfg.ocr.capture_height = 1;
-        let out = apply_to(&form, &cfg);
+        let out = apply_resolved(&form, &cfg);
         assert_eq!(CAPTURE_W_RANGE.1, out.ocr.capture_width);
         assert_eq!(CAPTURE_H_RANGE.0, out.ocr.capture_height);
     }
 
-    #[test]
-    fn a_clamped_height_is_named_in_the_notice() {
-        let cfg = Config::default();
-        let mut form = from_config(&cfg, &dicts());
-        form.cfg.ocr.capture_height = 1;
-        let out = apply_to(&form, &cfg);
-        assert_eq!(
-            Some("Capture height raised to the 80px minimum.".to_string()),
-            clamp_notice(&form, &out)
-        );
-    }
-
-    #[test]
-    fn a_clamped_width_is_named_with_its_ceiling() {
-        let cfg = Config::default();
-        let mut form = from_config(&cfg, &dicts());
-        form.cfg.ocr.capture_width = 99_999;
-        let out = apply_to(&form, &cfg);
-        assert_eq!(
-            Some("Capture width lowered to the 1600px maximum.".to_string()),
-            clamp_notice(&form, &out)
-        );
-    }
-
-    #[test]
-    fn both_clamped_axes_are_both_reported() {
-        let cfg = Config::default();
-        let mut form = from_config(&cfg, &dicts());
-        form.cfg.ocr.capture_width = 1;
-        form.cfg.ocr.capture_height = 9_999;
-        let notice = clamp_notice(&form, &apply_to(&form, &cfg)).expect("both were clamped");
-        assert!(notice.contains("Capture width raised to the 100px minimum."), "{notice}");
-        assert!(notice.contains("Capture height lowered to the 600px maximum."), "{notice}");
-    }
 
     #[test]
     fn in_range_capture_values_produce_no_notice() {
-        let cfg = Config::default();
-        let mut form = from_config(&cfg, &dicts());
+        let cfg = ResolvedConfig::default();
+        let mut form = from_resolved(&cfg, &dicts());
         form.cfg.ocr.capture_width = 500;
         form.cfg.ocr.capture_height = 220;
-        assert_eq!(None, clamp_notice(&form, &apply_to(&form, &cfg)));
+        assert_eq!(None, clamp_notice(&form, &apply_resolved(&form, &cfg)));
     }
 
-    #[test]
-    fn apply_to_carries_scan_alphanumeric() {
-        let cfg = Config::default();
-        let mut form = from_config(&cfg, &dicts());
-        form.cfg.ocr.scan_alphanumeric = false;
-        assert!(!apply_to(&form, &cfg).ocr.scan_alphanumeric);
-    }
-
-    #[test]
-    fn discard_furigana_round_trips_through_the_form() {
-        let mut config = Config::default();
-        config.ocr.discard_furigana = false;
-        let form = from_config(&config, &dicts());
-        assert!(!form.cfg.ocr.discard_furigana);
-        assert!(!apply_to(&form, &config).ocr.discard_furigana);
-    }
-
-    #[test]
-    fn apply_to_carries_per_character_lookup() {
-        let cfg = Config::default();
-        let mut form = from_config(&cfg, &dicts());
-        form.cfg.trigger.per_character_lookup = true;
-        assert!(apply_to(&form, &cfg).trigger.per_character_lookup);
-    }
-
-    #[test]
-    fn apply_to_carries_the_ocr_language() {
-        let cfg = Config::default();
-        let mut form = from_config(&cfg, &dicts());
-        form.cfg.ocr.language = "zh-Hans".to_string();
-        assert_eq!("zh-Hans", apply_to(&form, &cfg).ocr.language);
-    }
-
-    /// Checks that from_config copies per-character lookup into the form.
-    #[test]
-    fn from_config_seeds_per_character_lookup() {
-        let mut cfg = Config::default();
-        cfg.trigger.per_character_lookup = true;
-        assert!(from_config(&cfg, &dicts()).cfg.trigger.per_character_lookup);
-        assert!(
-            !from_config(&Config::default(), &dicts()).cfg.trigger.per_character_lookup,
-            "must default off"
-        );
-    }
-
-    /// Checks that from_config copies the OCR language into the form.
-    #[test]
-    fn from_config_seeds_the_ocr_language() {
-        let mut cfg = Config::default();
-        cfg.ocr.language = "zh-Hans".to_string();
-        assert_eq!("zh-Hans", from_config(&cfg, &dicts()).cfg.ocr.language);
-        assert_eq!("ja", from_config(&Config::default(), &dicts()).cfg.ocr.language);
-    }
 
     #[test]
     fn an_unrendered_application_preference_is_preserved() {
-        let mut saved: toml::Value =
-            toml::from_str(&toml::to_string(&Config::default()).unwrap()).unwrap();
-        let application = saved
-            .as_table_mut()
-            .unwrap()
-            .entry("application")
-            .or_insert_with(|| toml::Value::Table(Default::default()));
-        application
-            .as_table_mut()
-            .unwrap()
-            .insert("background-on-close".to_string(), toml::Value::Boolean(true));
-        let loaded: Config = toml::from_str(&toml::to_string(&saved).unwrap()).unwrap();
-        let form = from_config(&loaded, &dicts());
-        let applied = apply_to(&form, &loaded);
-        let saved: toml::Value = toml::from_str(&toml::to_string(&applied).unwrap()).unwrap();
+        let mut saved = Config::default();
+        saved.application.background_on_close = false;
+        let mut form = super::from_config(&saved, &dicts());
+        form.cfg.popup.theme = "light".to_string();
+        saved.application.background_on_close = true;
 
-        assert_eq!(
-            Some(true),
-            saved
-                .get("application")
-                .and_then(|application| application.get("background-on-close"))
-                .and_then(toml::Value::as_bool),
-        );
+        let applied = super::apply_to(&form, &saved).config;
+
+        assert!(applied.application.background_on_close);
+        assert_eq!("light", applied.resolve(&applied.default_profile).unwrap().popup.theme);
     }
 
     #[test]
     fn a_windows_application_preference_answer_is_applied() {
-        let cfg = Config::default();
-        let mut form = from_config(&cfg, &dicts());
+        let cfg = ResolvedConfig::default();
+        let mut form = from_resolved(&cfg, &dicts());
         assert_eq!(None, form.background_on_close);
         form.background_on_close = Some(true);
 
-        let applied = apply_to(&form, &cfg);
+        let applied = apply_resolved(&form, &cfg);
 
         assert!(applied.application.background_on_close);
     }
 
-    #[test]
-    fn apply_to_carries_the_engine() {
-        let cfg = Config::default();
-        let mut form = from_config(&cfg, &dicts());
-        form.cfg.ocr.engine = "meikiocr".to_string();
-        assert_eq!("meikiocr", apply_to(&form, &cfg).ocr.engine);
-    }
-
-    /// Checks that from_config copies the engine name into the form.
-    #[test]
-    fn from_config_seeds_the_engine() {
-        let mut cfg = Config::default();
-        cfg.ocr.engine = "meikiocr".to_string();
-        assert_eq!("meikiocr", from_config(&cfg, &dicts()).cfg.ocr.engine);
-        assert_eq!("builtin", from_config(&Config::default(), &dicts()).cfg.ocr.engine);
-    }
-
-    #[test]
-    fn apply_to_carries_enabled_plugins() {
-        let cfg = Config::default();
-        let mut form = from_config(&cfg, &dicts());
-        form.cfg.plugins.enabled = vec!["meikiocr".to_string()];
-        assert_eq!(
-            vec!["meikiocr".to_string()],
-            apply_to(&form, &cfg).plugins.enabled
-        );
-    }
-
-    /// Checks that from_config copies enabled plugin names into the form.
-    #[test]
-    fn from_config_seeds_enabled_plugins() {
-        let mut cfg = Config::default();
-        cfg.plugins.enabled = vec!["meikiocr".to_string()];
-        assert_eq!(
-            vec!["meikiocr".to_string()],
-            from_config(&cfg, &dicts()).cfg.plugins.enabled
-        );
-        assert!(from_config(&Config::default(), &dicts()).cfg.plugins.enabled.is_empty());
-    }
 
     #[test]
     fn from_config_puts_the_languages_own_terms_first_and_unchecks_the_rest() {
-        let mut cfg = Config::default();
+        let mut cfg = ResolvedConfig::default();
         cfg.ocr.language = "ja".to_string();
         cfg.dictionaries
             .per_language
             .insert("ja".to_string(), vec!["大辞林　第四版".to_string()]);
-        let form = from_config(&cfg, &dicts());
+        let form = from_resolved(&cfg, &dicts());
         assert_eq!(vec!["大辞林　第四版".to_string()], enabled_names(&form.terms));
         assert!(form.terms.iter().any(|row| row.name.contains("Jitendex") && !row.enabled));
     }
 
     #[test]
     fn apply_to_writes_the_checked_rows_into_their_language() {
-        let mut cfg = Config::default();
+        let mut cfg = ResolvedConfig::default();
         cfg.ocr.language = "ja".to_string();
         cfg.dictionaries
             .per_language
             .insert("ja".to_string(), vec!["大辞林　第四版".to_string()]);
-        let mut form = from_config(&cfg, &dicts());
+        let mut form = from_resolved(&cfg, &dicts());
         form.terms = vec![
             DictRow { name: "大辞林　第四版".to_string(), enabled: true },
             DictRow { name: "Jitendex.org [2026-07-09]".to_string(), enabled: false },
         ];
-        let out = apply_to(&form, &cfg);
+        let out = apply_resolved(&form, &cfg);
         assert_eq!(vec!["大辞林　第四版".to_string()], out.dictionaries.per_language["ja"]);
     }
 
     /// Other language lists must remain unchanged.
     #[test]
     fn apply_to_preserves_other_languages() {
-        let mut cfg = Config::default();
+        let mut cfg = ResolvedConfig::default();
         cfg.ocr.language = "ja".to_string();
-        let mut form = from_config(&cfg, &dicts());
+        let mut form = from_resolved(&cfg, &dicts());
         form.cfg.dictionaries.per_language.insert("zh-Hans-CN".to_string(), vec!["中日大辞典".to_string()]);
         form.terms = vec![DictRow { name: "大辞林　第四版".to_string(), enabled: true }];
-        let out = apply_to(&form, &cfg);
+        let out = apply_resolved(&form, &cfg);
         assert_eq!(
             vec!["中日大辞典".to_string()],
             out.dictionaries.per_language["zh-Hans-CN"],
@@ -1473,22 +3036,22 @@ mod tests {
     /// that the second form contains.
     #[test]
     fn a_second_apply_rewrites_the_key_the_first_one_wrote() {
-        let mut cfg = Config::default();
+        let mut cfg = ResolvedConfig::default();
         cfg.ocr.language = "ja".to_string();
         cfg.dictionaries
             .per_language
             .insert("ja".to_string(), vec!["大辞林　第四版".to_string()]);
-        let mut form = from_config(&cfg, &dicts());
+        let mut form = from_resolved(&cfg, &dicts());
         form.terms = vec![
             DictRow { name: "大辞林　第四版".to_string(), enabled: true },
             DictRow { name: "Jitendex.org [2026-07-09]".to_string(), enabled: false },
         ];
-        let first = apply_to(&form, &cfg);
+        let first = apply_resolved(&form, &cfg);
         assert_eq!(vec!["大辞林　第四版".to_string()], first.dictionaries.per_language["ja"]);
 
         form.reseed_per_language(&first.dictionaries.per_language);
         form.terms[1].enabled = true;
-        let second = apply_to(&form, &first);
+        let second = apply_resolved(&form, &first);
         assert_eq!(
             vec!["大辞林　第四版".to_string(), "Jitendex.org [2026-07-09]".to_string()],
             second.dictionaries.per_language["ja"],
@@ -1499,12 +3062,12 @@ mod tests {
     /// The Library merge must preserve a language's scope.
     #[test]
     fn with_library_keeps_the_exclusion_scoped() {
-        let mut cfg = Config::default();
+        let mut cfg = ResolvedConfig::default();
         cfg.ocr.language = "ja".to_string();
         cfg.dictionaries
             .per_language
             .insert("ja".to_string(), vec!["大辞林　第四版".to_string()]);
-        let form = with_library(from_config(&cfg, &dicts()), &library());
+        let form = with_library(from_resolved(&cfg, &dicts()), &library());
         assert!(!enabled_names(&form.terms).iter().any(|n| n.contains("Jitendex")));
         assert!(form.terms.iter().any(|row| row.name.contains("Jitendex") && !row.enabled));
     }
@@ -1512,13 +3075,13 @@ mod tests {
     /// A stale `dict_list_language` value must not replace the real language list.
     #[test]
     fn apply_to_does_not_write_a_stale_dict_list_language() {
-        let mut cfg = Config::default();
+        let mut cfg = ResolvedConfig::default();
         cfg.dictionaries
             .per_language
             .insert("zh-Hans-CN".to_string(), vec!["中日大辞典".to_string()]);
-        let mut form = from_config(&cfg, &dicts());
+        let mut form = from_resolved(&cfg, &dicts());
         form.cfg.ocr.language = "zh-Hans-CN".to_string();
-        let out = apply_to(&form, &cfg);
+        let out = apply_resolved(&form, &cfg);
         assert_eq!(
             vec!["中日大辞典".to_string()],
             out.dictionaries.per_language["zh-Hans-CN"],
@@ -1526,61 +3089,38 @@ mod tests {
         );
     }
 
-    /// The same function defines the no-name result for both write paths.
     #[test]
-    fn a_scoped_entry_naming_nothing_is_never_written() {
-        let unreadable = ["bad.zip".to_string()];
-        assert_eq!(None, scoped_entry(&[], &[]));
-        assert_eq!(
-            None,
-            scoped_entry(&[DictRow { name: "bad.zip".into(), enabled: true }], &unreadable),
-        );
-        assert_eq!(
-            None,
-            scoped_entry(&[DictRow { name: "大辞林　第四版".into(), enabled: false }], &[]),
-            "an unchecked row is not a dictionary this language searches",
-        );
-        assert_eq!(
-            Some(vec!["大辞林　第四版".to_string()]),
-            scoped_entry(&[DictRow { name: "大辞林　第四版".into(), enabled: true }], &[]),
-        );
-    }
-
-    /// I2-a: No searchable row remains, so Apply must preserve the current entry.
-    #[test]
-    fn apply_to_will_not_erase_a_list_when_nothing_is_searched() {
-        let mut cfg = Config::default();
+    fn clearing_language_rows_saves_an_explicit_empty_scope() {
+        let mut cfg = ResolvedConfig::default();
         cfg.ocr.language = "ja".to_string();
+        cfg.dictionaries.terms = vec!["大辞林　第四版".to_string()];
         cfg.dictionaries
             .per_language
             .insert("ja".to_string(), vec!["大辞林　第四版".to_string()]);
-        let mut form = from_config(&cfg, &dicts());
+        let mut form = from_resolved(&cfg, &dicts());
         for row in &mut form.terms {
             row.enabled = false;
         }
-        let out = apply_to(&form, &cfg);
-        assert_eq!(
-            vec!["大辞林　第四版".to_string()],
-            out.dictionaries.per_language["ja"],
-            "an empty split must leave the entry alone",
-        );
+        let out = apply_resolved(&form, &cfg);
+        assert!(out.dictionaries.per_language["ja"].is_empty());
+        assert_eq!(vec!["大辞林　第四版".to_string()], out.dictionaries.terms);
     }
 
     /// I2-b: Only unreadable rows remain, so Apply must preserve the current entry.
     #[test]
     fn apply_to_will_not_erase_a_list_for_an_unreadable_row() {
-        let mut cfg = Config::default();
+        let mut cfg = ResolvedConfig::default();
         cfg.ocr.language = "ja".to_string();
         cfg.dictionaries
             .per_language
             .insert("ja".to_string(), vec!["大辞林　第四版".to_string()]);
-        let mut form = from_config(&cfg, &dicts());
+        let mut form = from_resolved(&cfg, &dicts());
         form.terms = vec![
             DictRow { name: "bad.zip".to_string(), enabled: true },
             DictRow { name: "Jitendex.org [2026-07-09]".to_string(), enabled: false },
         ];
         form.unreadable = vec!["bad.zip".to_string()];
-        let out = apply_to(&form, &cfg);
+        let out = apply_resolved(&form, &cfg);
         assert_eq!(
             vec!["大辞林　第四版".to_string()],
             out.dictionaries.per_language["ja"],
@@ -1593,10 +3133,10 @@ mod tests {
     /// substring matches. Exact names prevent that false match.
     #[test]
     fn from_config_keeps_a_language_list_naming_nothing_installed() {
-        let mut cfg = Config::default();
+        let mut cfg = ResolvedConfig::default();
         cfg.ocr.language = "ja".to_string();
         cfg.dictionaries.per_language.insert("ja".to_string(), vec!["Daijirin".to_string()]);
-        let form = from_config(&cfg, &dicts());
+        let form = from_resolved(&cfg, &dicts());
         assert_eq!(vec!["Daijirin".to_string()], enabled_names(&form.terms));
         assert!(
             form.terms.iter().filter(|row| !row.enabled).count() == 2,
@@ -1607,12 +3147,12 @@ mod tests {
 
     #[test]
     fn from_config_still_splits_a_list_that_matches_one() {
-        let mut cfg = Config::default();
+        let mut cfg = ResolvedConfig::default();
         cfg.ocr.language = "ja".to_string();
         cfg.dictionaries
             .per_language
             .insert("ja".to_string(), vec!["大辞林　第四版".to_string()]);
-        let form = from_config(&cfg, &dicts());
+        let form = from_resolved(&cfg, &dicts());
         assert_eq!(vec!["大辞林　第四版".to_string()], enabled_names(&form.terms));
         assert_eq!(
             vec!["Jitendex.org [2026-07-09]".to_string()],
@@ -1621,7 +3161,7 @@ mod tests {
     }
 
     fn staged_form() -> SettingsForm {
-        from_config(&cfg_with(&["大辞林　第四版", "Jitendex.org [2026-07-09]"]), &dicts())
+        from_resolved(&cfg_with(&["大辞林　第四版", "Jitendex.org [2026-07-09]"]), &dicts())
     }
 
     #[test]
@@ -1655,9 +3195,9 @@ mod tests {
 
     #[test]
     fn a_staged_add_keeps_the_position_the_user_gave_it() {
-        let cfg = Config::default();
+        let cfg = ResolvedConfig::default();
         let installed = vec![DictInfo { dict_id: 1, name: "Jitendex.org [2026]".into() }];
-        let mut form = from_config(&cfg, &installed);
+        let mut form = from_resolved(&cfg, &installed);
         form.stage_add(&fixture("terms.zip")).expect("a real archive stages");
 
         // Move the staged row to the top.
@@ -1665,13 +3205,27 @@ mod tests {
         form.terms.retain(|row| row.name != name);
         form.terms.insert(0, DictRow { name: name.clone(), enabled: true });
 
-        let out = apply_to(&form, &cfg);
+        let out = apply_resolved(&form, &cfg);
 
         assert_eq!(
             Some(&name),
             out.dictionaries.terms.first(),
             "the position the user chose must survive Apply",
         );
+    }
+
+    #[test]
+    fn staging_import_enables_an_existing_disabled_row_once() {
+        let mut cfg = ResolvedConfig::default();
+        cfg.dictionaries.terms_disabled = vec!["FixtureTerms".into()];
+        let mut form = from_resolved(&cfg, &[]);
+        form.stage_add(&fixture("terms.zip")).unwrap();
+        assert_eq!(1, form.terms.iter().filter(|row| row.name == "FixtureTerms").count());
+        assert!(form.terms.iter().find(|row| row.name == "FixtureTerms").unwrap().enabled);
+
+        let out = apply_resolved(&form, &cfg);
+        assert_eq!(vec!["FixtureTerms".to_string()], out.dictionaries.terms);
+        assert!(out.dictionaries.terms_disabled.is_empty());
     }
 
     /// An import goes to the bottom of each role list, enabled. It does not move
@@ -1884,11 +3438,11 @@ mod tests {
     #[test]
     fn a_removed_dictionary_loses_its_place_in_every_array() {
         let cfg = cfg_with(&["大辞林　第四版", "Jitendex.org [2026-07-09]"]);
-        let mut form = from_config(&cfg, &dicts());
+        let mut form = from_resolved(&cfg, &dicts());
         form.stage_remove("大辞林　第四版");
         assert_eq!(
             vec!["Jitendex.org [2026-07-09]".to_string()],
-            apply_to(&form, &cfg).dictionaries.terms,
+            apply_resolved(&form, &cfg).dictionaries.terms,
         );
     }
 
@@ -1896,12 +3450,12 @@ mod tests {
     #[test]
     fn a_staged_add_is_ordered_by_its_title_not_its_filename() {
         let cfg = cfg_with(&["大辞林　第四版", "Jitendex.org [2026-07-09]"]);
-        let mut form = from_config(&cfg, &dicts());
+        let mut form = from_resolved(&cfg, &dicts());
         assert_eq!(
             Some(Roles::only(&[Role::Terms])),
             form.stage_add(&fixture("terms.zip")),
         );
-        let out = apply_to(&form, &cfg);
+        let out = apply_resolved(&form, &cfg);
         assert!(
             !out.dictionaries.terms.iter().any(|e| e.contains(".zip")),
             "a filename must never reach a Dictionary list",
@@ -1957,7 +3511,7 @@ mod tests {
                 roles: Roles::only(&[Role::Terms, Role::Frequency]),
             }],
         };
-        let form = with_library(from_config(&Config::default(), &[]), &lib);
+        let form = with_library(from_resolved(&ResolvedConfig::default(), &[]), &lib);
         assert_eq!(vec!["Mixed".to_string()], names(&form.terms));
         assert_eq!(vec!["Mixed".to_string()], names(&form.frequency));
         assert!(form.pitch.is_empty());
@@ -1968,10 +3522,10 @@ mod tests {
     /// config position, so a disconnected drive keeps its name.
     #[test]
     fn the_library_corrects_a_role_and_leaves_a_name_it_does_not_know() {
-        let mut cfg = Config::default();
+        let mut cfg = ResolvedConfig::default();
         cfg.dictionaries.pitch = vec!["jiten_freq_global".to_string()];
         cfg.dictionaries.terms = vec!["On the USB stick".to_string()];
-        let form = with_library(from_config(&cfg, &[]), &library());
+        let form = with_library(from_resolved(&cfg, &[]), &library());
         assert!(form.pitch.is_empty(), "the archive supplies no pitch: {:?}", form.pitch);
         assert_eq!(
             vec![
@@ -2050,7 +3604,7 @@ mod tests {
     fn a_stale_entry_survives_an_apply_that_never_saw_its_dictionary() {
         let cfg = cfg_with(&["Kenkyusha", "大辞林　第四版"]);
         assert_eq!(vec!["Kenkyusha".to_string()], stale_order_entries(&cfg, &dicts()));
-        let out = apply_to(&from_config(&cfg, &dicts()), &cfg);
+        let out = apply_resolved(&from_resolved(&cfg, &dicts()), &cfg);
         assert!(out.dictionaries.terms.contains(&"Kenkyusha".to_string()));
         assert_eq!(vec!["Kenkyusha".to_string()], stale_order_entries(&out, &dicts()));
         assert!(
@@ -2102,7 +3656,7 @@ mod tests {
     }
 
     fn form_for(dir: &Path) -> SettingsForm {
-        let form = from_config(&Config::default(), &[]);
+        let form = from_resolved(&ResolvedConfig::default(), &[]);
         match Library::load(dir) {
             Ok(lib) => with_library(form, &lib),
             Err(_) => form,
@@ -2246,9 +3800,9 @@ mod tests {
         let (dir, _guard) = stocked("unreadable_order");
         std::fs::write(dir.join("broken.zip"), b"not a zip at all").unwrap();
         let cfg = cfg_with(&[]);
-        let form = with_library(from_config(&cfg, &dicts()), &Library::load(&dir).unwrap());
+        let form = with_library(from_resolved(&cfg, &dicts()), &Library::load(&dir).unwrap());
 
-        let out = apply_to(&form, &cfg);
+        let out = apply_resolved(&form, &cfg);
 
         for role in Role::EVERY {
             let (on, off) = out.dictionaries.lists(role);
@@ -2357,7 +3911,7 @@ mod tests {
                 roles: Roles::only(&[Role::Terms]),
             }],
         };
-        let form = with_library(from_config(&Config::default(), &[]), &lib);
+        let form = with_library(from_resolved(&ResolvedConfig::default(), &[]), &lib);
         assert!(names(&form.terms).contains(&"DroppedIn".to_string()), "{form:?}");
     }
 
@@ -2367,7 +3921,7 @@ mod tests {
         items.iter().map(|s| (*s).to_string()).collect()
     }
 
-    fn with_list(mut cfg: Config, lang: &str, list: &[&str]) -> Config {
+    fn with_list(mut cfg: ResolvedConfig, lang: &str, list: &[&str]) -> ResolvedConfig {
         cfg.dictionaries.per_language.insert(lang.to_string(), strs(list));
         cfg
     }
@@ -2399,31 +3953,62 @@ mod tests {
         assert_eq!(strs(&["中日大辞典"]), cfg.dictionaries.per_language["zh-Hans-CN"]);
     }
 
-    /// When the last name is removed, the empty language entry is removed.
     #[test]
-    fn a_language_list_left_empty_loses_its_key() {
+    fn dictionary_removal_updates_all_explicit_profiles_and_keeps_empty_scopes() {
+        let mut saved = Config::default();
+        let mut parent = saved.resolve("default").unwrap();
+        parent.dictionaries.terms.enabled = vec!["Gone".into()];
+        parent.dictionaries.pitch.disabled = vec!["Gone".into()];
+        parent.dictionaries.per_language.insert("ja".into(), vec!["Gone".into()]);
+        saved.update_profile("default", &parent).unwrap();
+        saved.dictionaries.frequency_disabled = vec!["Gone".into()];
+
+        let mut other = ProfileSettings::default();
+        other.dictionaries.terms.disabled = vec!["Gone".into()];
+        other.dictionaries.per_language.insert("zh".into(), vec!["Gone".into()]);
+        insert_full(&mut saved, "other", "Other", other);
+        insert_derived(&mut saved, "inherited", "Inherited", "default", BTreeMap::new());
+        let mut overrides = BTreeMap::new();
+        overrides.insert(
+            "dictionaries.terms".into(),
+            FieldOverride::Set(toml::Value::try_from(&RoleList {
+                enabled: Vec::new(),
+                disabled: vec!["Gone".into()],
+            }).unwrap()),
+        );
+        insert_derived(&mut saved, "explicit", "Explicit", "default", overrides);
+
+        dictionary_removed_from_profiles(&mut saved, "Gone");
+        assert!(saved.dictionaries.frequency_disabled.is_empty());
+        for id in ["default", "other", "inherited", "explicit"] {
+            let settings = saved.resolve(id).unwrap();
+            assert!(!settings.dictionaries.terms.enabled.contains(&"Gone".into()));
+            assert!(!settings.dictionaries.terms.disabled.contains(&"Gone".into()));
+        }
+        assert!(saved.resolve("default").unwrap().dictionaries.per_language["ja"].is_empty());
+        assert!(saved.resolve("other").unwrap().dictionaries.per_language["zh"].is_empty());
+    }
+
+    /// Removing the last name keeps an explicit empty language scope.
+    #[test]
+    fn a_language_list_left_empty_keeps_its_key() {
         let mut cfg =
             with_list(cfg_with(&["大辞林　第四版", "Jitendex.org"]), "ja", &["大辞林　第四版"]);
         dictionary_removed(&mut cfg, "大辞林　第四版");
-        assert!(
-            !cfg.dictionaries.per_language.contains_key("ja"),
-            "an emptied entry must be removed, not written as []: {:?}",
-            cfg.dictionaries.per_language
-        );
+        assert_eq!(strs(&[]), cfg.dictionaries.per_language["ja"]);
     }
 
-    /// An empty list still scopes the language, so dictionary_removed must delete its key.
+    /// An explicit empty language list enables no dictionaries and stays scoped.
     #[test]
-    fn an_empty_list_left_behind_would_scope_the_language() {
-        let mut cfg = with_list(cfg_with(&["Jitendex.org"]), "ja", &["大辞林　第四版"]);
-        dictionary_removed(&mut cfg, "大辞林　第四版");
-        assert!(!is_scoped(&from_config(&cfg, &[])), "the language must be unscoped again");
-
+    fn an_empty_language_list_never_falls_back_to_global_terms() {
         let blanked = with_list(cfg_with(&["Jitendex.org"]), "ja", &[]);
-        assert!(
-            is_scoped(&from_config(&blanked, &[])),
-            "[] keeps the language scoped and pins it at the next Apply",
-        );
+        let form = from_config(&blanked, &[]);
+        assert!(is_scoped(&form));
+        assert!(enabled_names(&form.terms).is_empty());
+        assert_eq!(strs(&["Jitendex.org"]), names(&form.terms));
+        let out = apply_resolved(&form, &blanked);
+        assert!(is_scoped(&from_config(&out, &[])));
+        assert!(out.dictionaries.per_language["ja"].is_empty());
     }
 
     /// Exact names limit removal to the named edition. The other edition remains.
@@ -2444,10 +4029,10 @@ mod tests {
     }
 
     #[test]
-    fn a_list_that_was_already_empty_is_removed_too() {
+    fn removing_another_name_keeps_an_existing_empty_language_scope() {
         let mut cfg = with_list(cfg_with(&["Jitendex.org"]), "zh-Hans-CN", &[]);
         dictionary_removed(&mut cfg, "大辞林　第四版");
-        assert!(cfg.dictionaries.per_language.is_empty());
+        assert!(cfg.dictionaries.per_language["zh-Hans-CN"].is_empty());
     }
 
     /// An added Dictionary goes to the bottom of every role list that its roles provide.
@@ -2498,14 +4083,14 @@ mod tests {
         );
     }
 
-    /// An empty language list remains empty after an added Dictionary.
+    /// An import adds its terms Dictionary to an explicit empty language list.
     #[test]
-    fn an_added_dictionary_never_fills_an_empty_language_list() {
+    fn an_added_dictionary_fills_an_empty_language_list() {
         let mut cfg = with_list(cfg_with(&["大辞林　第四版"]), "ja", &[]);
         dictionary_added(&mut cfg, "Jitendex.org [2026-07-09]", Roles::only(&[Role::Terms]));
-        assert!(
-            cfg.dictionaries.per_language["ja"].is_empty(),
-            "filling [] would scope ja to the new dictionary alone",
+        assert_eq!(
+            strs(&["Jitendex.org [2026-07-09]"]),
+            cfg.dictionaries.per_language["ja"],
         );
     }
 
@@ -2531,7 +4116,8 @@ mod tests {
             Roles::only(&[Role::Terms, Role::Pitch]),
         );
         assert_eq!(strs(&["Jitendex.org"]), cfg.dictionaries.terms);
-        assert!(cfg.dictionaries.pitch.is_empty(), "an unchecked row stays unchecked");
+        assert_eq!(strs(&["Jitendex.org"]), cfg.dictionaries.pitch);
+        assert!(cfg.dictionaries.pitch_disabled.is_empty());
         assert_eq!(strs(&["Jitendex.org"]), cfg.dictionaries.per_language["ja"]);
     }
 
@@ -2548,9 +4134,9 @@ mod tests {
     fn an_incremental_removal_agrees_with_a_full_apply() {
         let cfg = cfg_with(&["大辞林　第四版", "Jitendex.org [2026-07-09]"]);
         let kept = vec![DictInfo { dict_id: 1, name: "Jitendex.org [2026-07-09]".into() }];
-        let mut form = from_config(&cfg, &kept);
+        let mut form = from_resolved(&cfg, &kept);
         form.stage_remove("大辞林　第四版");
-        let full = apply_to(&form, &cfg);
+        let full = apply_resolved(&form, &cfg);
         let mut incremental = cfg.clone();
         dictionary_removed(&mut incremental, "大辞林　第四版");
         assert_eq!(full.dictionaries, incremental.dictionaries);
@@ -2562,7 +4148,7 @@ mod tests {
     /// None of them needs a rebuild.
     #[test]
     fn reordering_the_frequency_list_costs_a_reindex() {
-        let before = Config::default();
+        let before = ResolvedConfig::default();
         let mut after = before.clone();
         after.dictionaries.frequency = strs(&["B", "A"]);
         assert_eq!(DictionaryWork::Reindex, dictionary_work(&before, &after));
@@ -2570,7 +4156,7 @@ mod tests {
 
     #[test]
     fn toggling_a_frequency_checkbox_costs_a_reindex() {
-        let mut before = Config::default();
+        let mut before = ResolvedConfig::default();
         before.dictionaries.frequency = strs(&["A"]);
         let mut after = before.clone();
         after.dictionaries.frequency = Vec::new();
@@ -2580,7 +4166,7 @@ mod tests {
 
     #[test]
     fn selecting_a_ranking_strategy_costs_a_reindex() {
-        let before = Config::default();
+        let before = ResolvedConfig::default();
         let mut after = before.clone();
         after.dictionaries.ranking_strategy = RankingStrategy::Median;
         assert_eq!(DictionaryWork::Reindex, dictionary_work(&before, &after));
@@ -2588,7 +4174,7 @@ mod tests {
 
     #[test]
     fn reordering_or_toggling_terms_and_pitch_costs_nothing_extra() {
-        let before = Config::default();
+        let before = ResolvedConfig::default();
         let mut after = before.clone();
         after.dictionaries.terms = strs(&["B", "A"]);
         after.dictionaries.terms_disabled = strs(&["C"]);
@@ -2598,19 +4184,6 @@ mod tests {
         assert_eq!(DictionaryWork::None, dictionary_work(&before, &after));
     }
 
-    /// The incremental addition and full Apply must produce the same result.
-    #[test]
-    fn an_incremental_addition_agrees_with_a_full_apply() {
-        let cfg = cfg_with(&["大辞林　第四版"]);
-        let full = apply_to(&from_config(&cfg, &dicts()), &cfg);
-        let mut incremental = cfg.clone();
-        dictionary_added(
-            &mut incremental,
-            "Jitendex.org [2026-07-09]",
-            Roles::only(&[Role::Terms]),
-        );
-        assert_eq!(full.dictionaries, incremental.dictionaries);
-    }
 
     // ---- drift ----
 
@@ -2784,16 +4357,26 @@ mod search_settings_tests {
     use super::*;
 
     #[test]
-    fn search_form_updates_windows_and_preserves_linux() {
-        let mut config = Config::default();
-        config.actions.search.hotkey = Some("F8".into());
-        config.actions.search.hotkey_linux = Some("SUPER+F8".into());
-        let mut form = from_config(&config, &[]);
-        form.cfg.actions.search.hotkey = Some("Ctrl+F7".into());
-        let saved = apply_to(&form, &config);
-        assert_eq!(saved.actions.search.hotkey.as_deref(), Some("Ctrl+F7"));
-        assert_eq!(saved.actions.search.hotkey_linux, config.actions.search.hotkey_linux);
-        form.cfg.actions.search.hotkey = None;
-        assert_eq!(apply_to(&form, &config).actions.search.hotkey, None);
+    fn search_bind_can_clear_windows_chord_and_preserve_latest_linux_chord() {
+        let mut latest = Config::default();
+        let mut search = crate::config::Bind::new(
+            "search".into(), crate::config::BindAction::Search,
+        );
+        search.windows = "F8".into();
+        search.linux = "SUPER+F8".into();
+        latest.binds.push(search);
+        let mut form = super::from_config(&latest, &[]);
+        form.catalog.binds.iter_mut()
+            .find(|bind| bind.action == crate::config::BindAction::Search).unwrap()
+            .windows.clear();
+        latest.binds.iter_mut()
+            .find(|bind| bind.action == crate::config::BindAction::Search).unwrap()
+            .linux = "SUPER+F7".into();
+
+        let saved = super::apply_to(&form, &latest).config;
+        let search = saved.binds.iter()
+            .find(|bind| bind.action == crate::config::BindAction::Search).unwrap();
+        assert!(search.windows.is_empty());
+        assert_eq!("SUPER+F7", search.linux);
     }
 }

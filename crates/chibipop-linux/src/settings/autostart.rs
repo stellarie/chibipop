@@ -403,35 +403,4 @@ mod tests {
         assert!(text.contains("\nPartOf=graphical-session.target\n"), "{text}");
     }
 
-    /// Hyprland bind lines must match the lines from the settings window for
-    /// default chords. Two spellings for one bind would create support problems.
-    /// The shipped file targets an *installed* chibipop, so the bare command
-    /// name is correct there. A dev checkout gets its own path from
-    /// `paths::exec_name` at runtime. The shipped file has the add-card bind
-    /// as a comment, but it keeps the line verbatim.
-    #[test]
-    fn the_shipped_hyprland_snippet_matches_the_window_snippet() {
-        let text = extras("hyprland.conf");
-        assert!(text.contains("\nexec-once = chibipop run\n"), "{text}");
-
-        let cfg = chibipop::config::Config::default();
-        let hyprland = super::super::snippets::Compositor::Hyprland;
-        let both = [
-            super::super::snippets::bind_snippet(
-                hyprland,
-                &cfg.trigger.trigger_key_linux,
-                Path::new(paths::COMMAND),
-                super::super::snippets::Bind::Hold,
-            ),
-            super::super::snippets::bind_snippet(
-                hyprland,
-                &cfg.anki.add_key_linux,
-                Path::new(paths::COMMAND),
-                super::super::snippets::Bind::Press(crate::control::Verb::AnkiAdd),
-            ),
-        ];
-        for line in both.iter().flat_map(|snippet| snippet.lines()) {
-            assert!(text.contains(line), "extras/hyprland.conf is missing {line:?}");
-        }
-    }
 }

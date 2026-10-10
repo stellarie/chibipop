@@ -65,15 +65,18 @@ The two binaries do not share a command line. Windows first, then Linux.
 `chibipop search` opens Dictionary search. Candidates update while you type.
 Select a candidate to open its definition in the normal popup layout.
 The search interface follows the popup theme, font, and spacing.
+A passive Search hover does not cancel an explicit definition click.
+Windows Search uses its initial monitor DPI when it opens.
 
-Search uses the configured dictionary database, enabled dictionaries, and
-dictionary order. It accepts dictionary forms and conjugated Japanese text.
+Search uses the Profile session's configured Dictionary database,
+enabled Dictionaries, and order.
+It accepts dictionary forms and conjugated Japanese text.
 Empty input and missing entries clear previous results.
 
-Open either search mode from **Settings > Dictionaries**. The tray also opens
-Dictionary search. In **Settings > Shortcuts**, select a search shortcut
-button, then press a key or key combination. Escape cancels capture; Clear
-removes the shortcut.
+Open either search mode from **Settings > Dictionaries**.
+The tray also opens Dictionary search.
+In **Settings > Shortcuts**, edit a Search, SentenceSearch, or SelectedText
+Bind. Set its platform chord and optional profile override.
 
 Sentence search opens with `chibipop search --sentence` on Windows or
 `chibipop sentence-search` on Linux. Paste text, then click a word in the
@@ -89,31 +92,33 @@ compositor bindings. Both search commands accept explicit `--text` input.
 Linux also accepts `--read-stdin` or `--stdin`, limited to 65,536 UTF-8 bytes.
 OCR handoff uses stdin so captured text does not appear in process arguments.
 
-The optional search shortcuts live under `[actions.search]`:
+Search uses configured `Bind` records. Do not add shortcut keys under
+`[actions.search]`. In Settings, create or edit a `Search`,
+`SentenceSearch`, or `SelectedText` Bind, then set its platform chord and
+optional profile override.
 
-```toml
-[actions.search]
-hotkey = "Ctrl+Shift+F"
-hotkey_linux = "CTRL+SHIFT+F"
-sentence_hotkey = "Ctrl+Shift+G"
-sentence_hotkey_linux = "CTRL+SHIFT+G"
-selected_hotkey = "Ctrl+Shift+D"
-selected_hotkey_linux = "CTRL+SHIFT+D"
-selected_opens_sentence_search = false
+Linux native compositor bindings use a configured Bind ID:
+
+```bash
+chibipop ctl bind-down -- search-bilingual
+chibipop ctl bind-up -- search-bilingual
+chibipop ctl bind-down -- -lookup
 ```
 
-All search shortcuts default to unset. Configure them in **Settings > Shortcuts**.
-Shortcut validation rejects conflicts before Apply. On Linux, native compositor
-bindings can run `chibipop ctl search` when portal shortcuts are unavailable.
-Windows applies shortcut changes immediately. Linux Apply requests changed portal
-bindings without a daemon restart. The desktop can ask for approval or keep its
-previous key. The **Current key** line shows the confirmed binding.
-Native compositor bindings remain under the compositor's control.
+Use `bind-up` for lookup Hold mode. Use `bind-down` for Press, Toggle, and
+one-shot actions. The daemon rejects IDs that are absent or disabled.
+
+Search identity is its mode and Profile ID. A reused Search keeps its
+original settings. Two profiles can stay open in separate Search windows.
+Linux sends captured Search text through bounded stdin, not process arguments.
+
+Linux does not provide a Search profile picker. Use separate Search Binds with
+profile overrides when you need Search for more than one profile.
 
 **Look up selected text** reads an application's selection and opens the usual
-dictionary popup. Select a word in an editor or browser, then press the configured
-shortcut. Browser selections need no extension. This action bypasses OCR and
-leaves clipboard contents unchanged. The shortcut defaults to unset.
+dictionary popup. Select a word in an editor or browser, then activate the
+configured SelectedText Bind. Browser selections need no extension.
+This action bypasses OCR and leaves clipboard contents unchanged.
 
 The checkbox below **Look up selected text** chooses the result. When unchecked,
 Windows places the popup above or below the visible selection and limits its
@@ -173,13 +178,13 @@ settings process, control-socket verbs, and three diagnostics.
 
 `--config PATH` is global on Linux and skips config discovery entirely.
 
-**The `ctl` verb set is fixed**
+**The fixed `ctl` verbs remain supported**
 ([`ARCHITECTURE.md`](../ARCHITECTURE.md#input-ladders)): `reload`,
 `trigger-down`, `trigger-up`, `toggle`, `lookup`, `anki-add`,
-`ocr-clipboard`, `static-region`, `search`, `sentence-search`, `selected-text`.
-One verb per global action, never a
-scripting API. Compositor binds on the **Shortcuts** tab name the running
-binary's full path. See [Linux settings](LINUX.md#settings-window) for tab navigation.
+`ocr-clipboard`, `static-region`, `search`, `sentence-search`, and
+`selected-text`. They provide one compatibility verb for each global action.
+Configured Binds use `bind-down -- ID` and `bind-up -- ID` when they need a
+profile override or a stable action ID.
 
 The three diagnostics are lock-free and socket-free, so all three are safe to
 run beside a live daemon. [`LINUX.md`](LINUX.md#command-line) carries the
@@ -308,10 +313,12 @@ Escape retains its independent live-settings hide behavior.
 
 **Debug > Clear lookup cache** applies to the running Windows daemon. Confirmation names cached
 OCR pixels and text, parsed definitions, dictionary styles, frequencies, and decoded dictionary
-images. The action closes the current popup, reopens the read-only dictionary connection, and
-leaves the database, library, settings, role cache, and logs unchanged. The next lookup recaptures
-text and rereads dictionary data. A separate Search window clears its current results; a future
-query opens a fresh SearchService. The standalone settings process reports that no daemon is running.
+images. A successful clear dismisses the current popup and pending lookup or sentence work.
+It reopens the read-only dictionary connection and leaves the database, library, settings, role cache,
+and logs unchanged.
+The next lookup recaptures text and rereads dictionary data.
+A separate Search window clears its current results.
+A future query opens a fresh `SearchService`. The standalone settings process reports that no daemon is running.
 
 The embedded `crates/chibipop-windows/assets/settings-layout.toml` controls organization
 and labels. Developers can reorder entries or move them between sections and tabs, then rebuild.
@@ -423,118 +430,216 @@ hand to bring it level with a fresh install.
 
 ---
 
+## Profiles and binds
+
+`Config` is the saved profile catalog. It stores `version`,
+`default_profile`, `live_lookup`, `profiles`, `binds`, shared frequency
+settings, and shared application settings.
+Configured Binds, plugins, diagnostics, and installed resources are shared.
+
+Every profile has a stable `id` and a display `name`.
+Names can change without changing IDs.
+
+A Full profile stores all profile-owned fields:
+
+- `popup`
+- `ocr`
+- `per_character_lookup`
+- `dictionaries.terms`
+- `dictionaries.pitch`
+- `dictionaries.per_language`
+- `anki`
+- `actions`
+- `nested_profile`
+
+A Derived profile names one Full `parent` and stores independent `overrides`.
+Each ordinary field can override its parent separately.
+An override remains explicit when its value equals the parent value.
+`Clear` is valid only for optional fields.
+
+Use **Settings > Profiles** to create, duplicate, rename, or delete profiles.
+The same page and the tray menu select the default profile.
+
+To restore an inherited field:
+
+1. Select the Derived profile in **Settings > Profiles**.
+2. On Windows, select the reset button beside the field.
+3. On Linux, select **Reset** for the field under **Profiles > Profile fields**.
+4. Select **Apply** or **Apply & Restart** to save the change.
+
+Dictionary role lists have ordered `enabled` and `disabled` arrays.
+An explicit empty list means no Dictionary for that role.
+It does not inherit the parent list or enable every installed Dictionary.
+Each profile owns its terms, pitch, and per-language lists.
+
+Frequency arrays and `ranking_strategy` are shared by all profiles.
+Reindex reads local SQL rows and never reads Dictionary archives.
+An import enables detected Dictionary roles in the edited profile.
+Other explicit lists receive the imported Dictionary as disabled.
+Profile switches and Apply preserve each staged Dictionary's enabled or disabled state and language membership.
+
+The application blocks profile deletion while the profile is the default,
+belongs to a Bind, is a nested choice, or is a Derived parent.
+Existing sessions can finish after deletion.
+
+Each Bind has an `id`, `action`, Windows and Linux chords, `mode`,
+optional `profile`, and `enabled` state.
+The stable ID is the command target on Linux.
+
+Supported actions are `lookup`, `selected-text`, `search`,
+`sentence-search`, `ocr-clipboard`, `anki-add`, and `static-region`.
+Only `lookup` accepts `hold-key` or `toggle`.
+Other actions use `press`.
+Profile overrides are valid for the first five actions.
+`anki-add` and `static-region` use the displayed profile. A dismissed popup does not own
+`static-region`.
+
+The `ProfileCatalog` keeps one saved catalog for each session.
+Popups and Search windows retain their Profile session until they close.
+New sessions use later saved settings.
+Nested routing selects a profile for hover links and clicked dictionary links.
+It is separate from inheritance.
+Screen lookup retains its root Profile session after nested routing.
+Back restores the parent profile, content, scroll, selections, and missing Japanese analysis.
+Same-headword suppression includes Profile ID.
+
+Live lookup pauses while a configured lookup Bind owns a popup chain.
+A new lookup Bind replaces the chain root.
+The daemon ignores a release from a displaced Bind.
+Search identity is Search mode plus Profile ID.
+Linux has no Search profile picker.
+
 ## Configuration file
 
-Windows Settings covers its options below, and is the expected way in. Linux Settings
-preserves the Windows-only background-on-close value without rendering it. The file remains
-hand-editable.
+Windows Settings covers its options below. Linux Settings preserves Windows-only
+values without rendering them. The file remains hand-editable.
 
-Malformed TOML is a **hard error naming the file**, never a silent fallback —
-that is how a typo quietly erases someone's settings. A value that parses but
-is out of range is **clamped on load and named on stderr**.
+Malformed TOML is a hard error that names the file.
+Out-of-range values load as clamped values and name the field on stderr.
 
-This is the whole file, at its defaults, as `Config::default()` serializes it
-on 2026-09-25. Both platforms read the same schema
-([`ARCHITECTURE.md`](../ARCHITECTURE.md#settings-and-config)); the keys that
-end in `_linux` are the Linux twin of the key above them, and Windows ignores
-them. Linux also preserves the Windows-only `application.background-on-close` value.
+The root uses the new profile schema.
+The old global trigger and action chord keys are not part of this schema.
+Use `[[binds]]` records for all configurable chords.
+Use `chibipop ctl bind-down -- ID` and `chibipop ctl bind-up -- ID` for Linux binds.
+The fixed socket verbs remain supported for compatibility.
+
+This example shows one Full profile, one Derived profile, and profile Binds.
+The source codecs are `src/config/profiles.rs` and
+`src/config/migration.rs`.
 
 ```toml
-[trigger]
-mode = "live"               # "live" | "hold-key" | "toggle" | "press" | "hold-shift" (legacy)
-trigger_key = "shift"       # Windows: the key for hold-key, toggle, and press mode
-trigger_key_linux = "ALT+F" # Linux: the chord, in portal syntax
+version = 1
+next_id = 1
+default_profile = "bilingual"
+live_lookup = true
+
+[[profiles]]
+id = "bilingual"
+name = "Bilingual"
+kind = "full"
+
+[profiles.settings]
 per_character_lookup = false
 
-[popup]
-theme = "dark"              # "dark" | "light"
-exclude_from_capture = false
-max_width_percent = 25      # 10-90; cap as a percentage of the monitor's width
-max_height_percent = 45     # 10-90; and of its height
-summary_chars = 40          # 10-200; collapsed-row summary length
-font = "Yu Gothic UI"
-highlight_match = true      # box the characters the popup is defining
-scroll_popup = true         # let the wheel scroll a popup that overflows
-edge_autoscroll = true      # auto-scroll while a selection drag reaches the edge
-side_panel = false
-layer = "overlay"           # Linux: "overlay" | "top" (below fullscreen clients)
-layout_mode = "roomy"       # "roomy" | "compact"; how much room an entry gets
-dictionary_styling = true   # apply a dictionary's own fonts, colours and boxes
-show_examples = true        # example sentences
-show_attributions = true    # attributions and footnotes, independent of examples
-show_images = true          # a dictionary's images; off leaves their alt text
-show_part_of_speech = false # part-of-speech labels inside the entry
+[profiles.settings.popup]
+theme = "dark"
 
-[dictionaries]
-display_order = ["大辞林", "Jitendex"]   # case-insensitive substrings, in priority order
+[profiles.settings.ocr]
+language = "ja"
+engine = "builtin"
 
-[dictionaries.per_language]              # optional; keyed by OCR recognizer tag
-"ja"         = ["大辞林", "Jitendex"]    # these, in this order, and nothing else
-"zh-Hans-CN" = ["中日大辞典"]
+[profiles.settings.dictionaries.terms]
+enabled = ["Bilingual"]
+disabled = ["Monolingual"]
 
-[application]
-background-on-close = false # Windows: hide live Settings on X
+[profiles.settings.dictionaries.pitch]
+enabled = []
+disabled = []
 
-[plugins]
-enabled = []                # Windows only; discovery never changes this list
+[profiles.settings.dictionaries.per_language]
 
-[ocr]
-max_ocr_passes = 1          # 1-5; 1 = no forward tiling (the default)
-prefer_vertical = false     # swap capture_width and capture_height
-capture_width = 500         # 100-1600 px, centred on the cursor
-capture_height = 100        # 80-600 px
-scan_alphanumeric = true
-discard_furigana = true     # remove geometric ruby from every OCR output
-language = "ja"             # Windows recogniser tag; Linux always reads ja
-engine = "builtin"          # Windows: "builtin", or a discovered plugin name
+[profiles.settings.anki]
+enabled = true
+deck = "Bilingual deck"
 
-# A plugin must also appear in plugins.enabled. A disabled or failed selection
-# uses Windows OCR and does not start the plugin process.
-
-[debug]
-show_scan_region = false    # outline what each hover captured
-show_lookup_log = false     # a console printing each resolved hover
-show_engine_log = false     # name the active OCR engine in the status bar
-show_adapter_log = false    # stream the plugin adapter's stderr
-
-[anki]
-enabled = false
-url = "http://localhost:8765"
-deck = "Default"
-model = "Lapis"
-add_key = "a"               # Windows
-add_key_linux = "ALT+A"     # Linux, portal syntax
-notify_on_add = true
-sentence_mode = "sentence"  # "sentence" | "line" | "all" | "static"
-static_region_key = ""      # Windows; empty leaves it unbound
-static_region_key_linux = ""    # Linux, portal syntax; empty leaves it unbound
-show_static_overlay = true
-include_dictionary_name = true
-first_dict_only = false
-selection_buttons = "primary-additive"  # "primary-additive" | "primary-replacing"
-selection_separator = "ellipsis"       # "ellipsis" | "space" | "line-break" | "list-items"
-triple_click = "sense-with-examples"   # "sense" | "sense-with-examples" | "line"
-
-[[anki.field_map]]          # one block per Anki field
-anki_field = "Expression"
-source = "expression"       # see the field-map table in the README
-
-[actions]
+[profiles.settings.actions]
 enabled = true
 
-[actions.screenshot]
-save_dir = "screenshots"
-include_on_add = false
-capture_mode = "region"     # "region" | "window" | "fixed-region" | "fixed-window"
-# fixed_region = [100, 200, 800, 600]  # optional; x, y, width, height in physical pixels
-# [actions.screenshot.fixed_window]   # optional saved window target
-# app_id = "org.example.Reader"
-# title = "Japanese text"
+[profiles.settings.actions.search]
+selected_opens_sentence_search = false
 
-# [actions.ocr_clipboard]   # absent by default; both keys optional
-# hotkey = "ctrl+shift+c"       # Windows
-# hotkey_linux = "ALT+C"        # Linux
+[[profiles]]
+id = "monolingual"
+name = "Monolingual"
+kind = "derived"
+parent = "bilingual"
+
+[profiles.overrides."anki.deck"]
+state = "set"
+value = "Monolingual deck"
+
+[profiles.overrides."dictionaries.terms"]
+state = "set"
+
+[profiles.overrides."dictionaries.terms".value]
+enabled = ["Monolingual"]
+disabled = ["Bilingual"]
+
+[profiles.overrides."popup.theme"]
+state = "set"
+value = "light"
+
+[[binds]]
+id = "bilingual"
+action = "lookup"
+windows = "F2"
+linux = "ALT+F2"
+mode = "press"
+profile = "bilingual"
+enabled = true
+
+[[binds]]
+id = "monolingual"
+action = "lookup"
+windows = "F3"
+linux = "ALT+F3"
+mode = "press"
+profile = "monolingual"
+enabled = true
+
+[[binds]]
+id = "search-monolingual"
+action = "search"
+windows = "F6"
+linux = "ALT+F6"
+mode = "press"
+profile = "monolingual"
+enabled = true
+
+[dictionaries]
+frequency = []
+frequency_disabled = []
+ranking_strategy = "best-rank"
+
+[application]
+background-on-close = false
+
+[plugins]
+enabled = []
+
+[debug]
+show_scan_region = false
+show_lookup_log = false
+show_engine_log = false
+show_adapter_log = false
 ```
+
+Legacy TOML without `profiles` loads through the migration codec.
+Migration creates the default Full profile and Bind records.
+After installed Dictionary identities are available, the catalog resolves
+legacy substring lists into exact names.
+Unknown Dictionary names remain in the saved lists.
+
 
 ## OCR resource measurements
 
@@ -572,6 +677,7 @@ select the other target type for one capture, but it does not save that target i
 wrong fixed-target field.
 After a first fixed-mode selection, chibipop saves the target in the config. Later
 captures bypass interactive selection until you reset the target.
+An existing Windows session does not overwrite a newer target change or reset.
 
 `fixed_region` stores `[x, y, width, height]` in global physical pixels. The width and
 height must be positive. The saved rectangle remains unchanged until you reset it.
@@ -602,8 +708,10 @@ below the hovered word across the output. It cuts the sentence at `。！？`; a
 heading, ends the sentence. A paragraph gap also ends the sentence. The probe
 uses one or more tiles along the output's reading axis. It uses one OCR pass
 for each tile. The tile count follows the output span, and each tile's band
-follows the text thickness. The sentence probe runs no OCR pass on hover. A
-held `hold-key` trigger reads the frozen grab without hiding the popup. Windows
+follows the text thickness. The sentence probe runs no OCR pass on hover.
+A dictionary-only hover child does not OCR-probe its popup placement for an Anki sentence.
+A clicked-link probe keeps valid source geometry for popup placement.
+A held `hold-key` trigger reads the frozen grab without hiding the popup. Windows
 ignores the hide flag because it excludes the popup from its own captures at the
 OS level. When the probe fails, the sentence falls back to the hover-time
 sentence.
@@ -851,106 +959,41 @@ where it put them.
 Changing any of these applies on reload — the settings window's Apply — and
 lands on a popup already on screen. No restart.
 
-### `display_order`
+### Dictionary lists in profiles
 
-**As of v0.7.1 this is the fallback**, used for any OCR language that has no
-entry under `per_language`. With no `per_language` at all — the shipped state
-— it is still what orders every lookup, exactly as before.
+Each profile stores independent `terms`, `pitch`, and `per_language` lists.
+Each role list has ordered `enabled` and `disabled` arrays.
+Array order sets priority.
+The list stores exact Dictionary names.
+Unknown names remain in the file.
 
-Matched by **name substring**, and the settings window says so. The TOML
-stores case-insensitive substrings rather than full names, because a rebuilt
-Jitendex changes its own name — the release date is part of it.
+An explicit empty list means no Dictionary for that role.
+It does not mean that the list is absent.
+It does not enable every installed Dictionary.
+An absent per-language list searches every enabled terms Dictionary.
 
-The window preserves whatever substring you already have, so reordering never
-rewrites your entries. If one stops matching any installed dictionary it tells
-you which, because the visible symptom otherwise is that dictionary quietly
-sorting last.
+Derived profiles inherit the complete parent list when they have no override.
+An override replaces the complete ordered enabled and disabled lists.
+A `per_language` override replaces the complete language map.
+It replaces inherited values even when a language scope is empty.
 
-Blank entries are ignored: an empty string is a substring of every name, so
-one would silently pin the whole order.
+Frequency lists are not profile fields.
+`frequency`, `frequency_disabled`, and `ranking_strategy` are shared.
+Reindex recalculates `term.freq` from local SQL rows.
+It never reads an archive.
 
-**One consequence worth knowing before it surprises you.** Pressing Apply
-while a language that *has* a list is on screen rewrites `display_order` from
-that language's split, because the settings window shows one split of your
-library — *Searched* then *Not searched* — and writes both the language's list
-and `display_order` from it. So the popup ordering of a language with **no**
-list can change
-because of which language happened to be selected when you pressed Apply. It
-is only an ordering, never a filter — nothing stops being searched — but if
-you care about the fallback order, set it with an unscoped language selected.
+When an import reports a Dictionary role, the settings form enables that role
+in the edited profile.
+The form adds the Dictionary to other explicit profile lists as disabled.
+It preserves unknown Dictionary names.
 
-### `per_language`
+Settings merges edits into the latest saved catalog.
+It keeps hidden platform values and changes in other profiles.
+`SettingsForm::accept_applied` advances the baseline after save success.
 
-Each OCR recognizer language gets its own ordered dictionary list. A language
-**with** an entry searches only those dictionaries, in that order; a language
-with **no** entry searches everything by `display_order`, which is v0.7.0's
-behaviour and still the default. Entries are matched by name substring,
-exactly as `display_order` is.
-
-Set this in the settings window — the **Dictionaries** tab is scoped to the
-**Text language** selected on **Text recognition**, and shows that language's list in a
-**Searched** box with the rest in a **Not searched** box below it. Changing the
-language re-scopes the tab immediately, before Apply.
-
-**Move up** and **Move down** do both jobs: inside a box they set search
-priority, and at the boundary they move a dictionary between the boxes — down
-from the bottom of *Searched* stops it being searched, up from the top of *Not
-searched* starts it again. There is no separate include/exclude control, and no
-divider row; both were replaced by the two boxes in v0.7.2.
-
-**The keys must match the recognizer tag exactly.** `ocr.language` itself is
-matched loosely — `zh-Hans` selects an installed `zh-Hans-CN` — but these keys
-are looked up by exact string equality, so `"zh-Hans"` here does **not** cover
-a running `zh-Hans-CN` and its list is silently unused. The app always
-*writes* the canonical tag, so this only bites a hand-edit. Configure the list
-in the UI, or copy the tag the app wrote into the file.
-
-**A list naming nothing installed is ignored, and everything is searched.**
-A typo, or a dictionary you have not imported yet, therefore never silently
-kills lookups — the fallback is "search everything", not "search nothing". The
-Dictionaries tab shows the same thing the runtime does in that state (every
-dictionary in *Searched*, *Not searched* empty), and that agreement is
-deliberate: in that state the tab must not claim a scoping the lookups are not
-applying. It holds however you arrive there, including switching the OCR
-language to one whose list has gone stale. The same rule is why **excluding
-everything is not representable**: an empty list means the same as no entry, so
-a language whose list ends up matching nothing gets every dictionary back
-rather than none.
-
-**A list is applied only while its own recognizer is the one running.** If the
-selected language's pack is not installed, chibipop goes on OCRing with a
-different recognizer — at startup the fallback, which it names on stderr; on
-Apply whichever language was already running, which it also reports — and the
-list is then not applied at all: everything is searched by `display_order`,
-exactly as for a language with no entry. Otherwise the popup would filter the fallback's hits through a
-list written for a language that is not reading the screen, and come back empty
-with no error at all. This is the one state where the Dictionaries tab does not
-match the runtime, and deliberately: the tab keeps showing the list you
-configured, because that is what you are editing, and the **Text language** dropdown
-already labels the tag `(not installed)`.
-
-**A hand-written entry naming a not-yet-installed dictionary is replaced on
-the next Apply.** Write `"ja" = ["Daijirin"]` before importing Daijirin, open
-Settings, press Apply *for any reason at all*, and the entry becomes the
-current library's list — the name you typed is gone. **Configure the list
-after importing the dictionary.** Known limitation as of v0.7.1, and note that
-`stale_order_entries` — which warns about a `display_order` entry matching
-nothing — does not look at `per_language`, so nothing reports this to you.
-
-**A language's list cannot be cleared from the settings window.** Once a
-language has an entry, the window never removes the key: emptying *Not
-searched* writes a full explicit list instead. That covers an entry an earlier
-Apply in the same session wrote, not just one that was already in the file when
-the window opened — after each Apply the window takes back what was written, so
-the next Apply rewrites the key rather than dropping it. It behaves
-identically for your current library, but differs later — an explicit list
-will not pick up a dictionary imported after it was written, where no entry
-would have. To return a language to "no entry", delete the key from the file
-by hand with chibipop stopped.
-
-**A dictionary moved back into *Searched* lands last.** It arrives at the
-bottom of the box, and does not recover its former priority; carry on pressing
-**Move up** to put it back.
+Legacy global dictionary lists migrate into the default Full profile.
+Legacy substring entries resolve to exact installed names when the catalog
+receives installed Dictionary identities.
 
 ### `show_scan_region`
 

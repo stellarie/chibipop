@@ -5,6 +5,7 @@ pub mod screenshot;
 pub mod selected_text;
 pub mod selection;
 
+use crate::config::ProfileSession;
 use crate::geom::PhysRect;
 use crate::present::Presentation;
 use crate::text::layout::OcrLine;
@@ -34,7 +35,7 @@ pub struct AppState<'a> {
 /// Resources that an action can use while it runs.
 pub struct ActionContext<'a> {
     pub selection: &'a mut selection::RegionSelection,
-    pub config: &'a crate::config::ActionsConfig,
+    pub session: ProfileSession,
     /// This value owns two channel senders. The pump clones it for each dispatch.
     pub ocr_jobs: OcrJobs,
 }
@@ -44,6 +45,7 @@ pub struct OcrRequest {
     pub bgra_buf: Vec<u8>,
     pub width: i32,
     pub height: i32,
+    pub session: ProfileSession,
     pub result_tx: mpsc::Sender<std::result::Result<Vec<OcrLine>, String>>,
 }
 
@@ -72,19 +74,22 @@ impl OcrJobs {
     }
 }
 
+
 impl ActionContext<'_> {
     /// Return a minimal context for tests.
     #[cfg(test)]
-    pub fn empty() -> ActionContext<'static> {
+    pub fn empty<'a>(
+        selection: &'a mut selection::RegionSelection,
+        session: ProfileSession,
+    ) -> ActionContext<'a> {
         ActionContext {
-            selection: Box::leak(Box::new(selection::RegionSelection::dummy())),
-            config: Box::leak(Box::new(crate::config::ActionsConfig::default())),
+            selection,
+            session,
             // No Worker reads this queue. Tests can use this context without a Worker.
             ocr_jobs: OcrJobs::new(mpsc::channel().0, ServeNudge::disconnected()),
         }
     }
 }
-
 /// The result of one action run.
 #[derive(Debug)]
 pub enum ActionOutcome {
@@ -160,10 +165,10 @@ impl ScreenshotResult {
     }
 }
 
-/// Store actions by their hotkey index.
+/// Store one action for each configured bind action.
 #[derive(Default)]
 pub struct ActionRegistry {
-    actions: Vec<Option<Box<dyn Action>>>,
+    actions: Vec<(crate::config::BindAction, Box<dyn Action>)>,
 }
 
 impl ActionRegistry {
@@ -171,28 +176,24 @@ impl ActionRegistry {
         Self::default()
     }
 
-    /// Append an action after the current last slot.
-    pub fn register(&mut self, action: Box<dyn Action>) {
-        self.actions.push(Some(action));
-    }
-
-    /// Place an action at a hotkey index.
-    pub fn register_at(&mut self, index: usize, action: Box<dyn Action>) {
-        if self.actions.len() <= index {
-            self.actions.resize_with(index + 1, || None);
+    /// Register an action for its configured bind type.
+    pub fn register(&mut self, kind: crate::config::BindAction, action: Box<dyn Action>) {
+        if let Some((_, current)) = self.actions.iter_mut().find(|(registered, _)| *registered == kind) {
+            *current = action;
+        } else {
+            self.actions.push((kind, action));
         }
-        self.actions[index] = Some(action);
     }
 
-    /// Return `None` when the slot has no action or the action cannot run.
+    /// Return `None` when no action is registered or the action cannot run.
     /// Return an `ActionOutcome` when the action runs. Use `Failed` for an error.
     pub fn dispatch(
         &mut self,
-        index: usize,
+        kind: crate::config::BindAction,
         state: &AppState,
         ctx: &mut ActionContext,
     ) -> Option<ActionOutcome> {
-        let action = self.actions.get_mut(index)?.as_mut()?;
+        let (_, action) = self.actions.iter_mut().find(|(registered, _)| *registered == kind)?;
         if !action.is_available(state) {
             return None;
         }
@@ -209,7 +210,6 @@ mod tests {
 
     struct StubAction {
         available: bool,
-        called: bool,
     }
 
     impl Action for StubAction {
@@ -222,7 +222,6 @@ mod tests {
         }
 
         fn execute(&mut self, _ctx: &mut ActionContext) -> Result<ActionOutcome> {
-            self.called = true;
             Ok(ActionOutcome::Completed)
         }
     }
@@ -236,55 +235,54 @@ mod tests {
         }
     }
 
-    #[test]
-    fn dispatch_fires_when_available() {
-        let mut reg = ActionRegistry::new();
-        reg.register(Box::new(StubAction {
-            available: true,
-            called: false,
-        }));
-        let mut ctx = ActionContext::empty();
-        let outcome = reg.dispatch(0, &empty_state(), &mut ctx);
-        assert!(matches!(outcome, Some(ActionOutcome::Completed)));
+    fn test_session() -> ProfileSession {
+        crate::config::ProfileCatalog::new(&crate::config::Config::default(), &[])
+            .unwrap()
+            .session(None)
+            .unwrap()
     }
 
     #[test]
-    fn dispatch_skips_when_unavailable() {
-        let mut reg = ActionRegistry::new();
-        reg.register(Box::new(StubAction {
-            available: false,
-            called: false,
-        }));
-        let mut ctx = ActionContext::empty();
-        let outcome = reg.dispatch(0, &empty_state(), &mut ctx);
-        assert!(outcome.is_none());
-    }
+    fn dispatch_uses_the_configured_action_type() {
+        let mut registry = ActionRegistry::new();
+        registry.register(crate::config::BindAction::OcrClipboard, Box::new(StubAction { available: true }));
+        let mut selection = selection::RegionSelection::dummy();
+        let mut ctx = ActionContext::empty(&mut selection, test_session());
 
-    #[test]
-    fn dispatch_out_of_bounds_returns_none() {
-        let mut reg = ActionRegistry::new();
-        let mut ctx = ActionContext::empty();
-        let outcome = reg.dispatch(5, &empty_state(), &mut ctx);
-        assert!(outcome.is_none());
-    }
-
-    #[test]
-    fn register_at_preserves_unregistered_slots() {
-        let mut reg = ActionRegistry::new();
-        reg.register_at(
-            2,
-            Box::new(StubAction {
-                available: true,
-                called: false,
-            }),
-        );
-        let mut ctx = ActionContext::empty();
-        assert!(reg.dispatch(1, &empty_state(), &mut ctx).is_none());
         assert!(matches!(
-            reg.dispatch(2, &empty_state(), &mut ctx),
-            Some(ActionOutcome::Completed)
+            registry.dispatch(crate::config::BindAction::OcrClipboard, &empty_state(), &mut ctx),
+            Some(ActionOutcome::Completed),
         ));
     }
+
+    #[test]
+    fn dispatch_does_not_route_one_bind_type_to_another() {
+        let mut registry = ActionRegistry::new();
+        registry.register(crate::config::BindAction::Search, Box::new(StubAction { available: true }));
+        let mut selection = selection::RegionSelection::dummy();
+        let mut ctx = ActionContext::empty(&mut selection, test_session());
+
+        assert!(registry
+            .dispatch(crate::config::BindAction::OcrClipboard, &empty_state(), &mut ctx)
+            .is_none());
+    }
+
+    #[test]
+    fn dispatch_skips_an_unavailable_configured_action() {
+        let mut registry = ActionRegistry::new();
+        registry.register(crate::config::BindAction::OcrClipboard, Box::new(StubAction { available: false }));
+        let mut selection = selection::RegionSelection::dummy();
+        let mut ctx = ActionContext::empty(&mut selection, test_session());
+
+        assert!(registry
+            .dispatch(crate::config::BindAction::OcrClipboard, &empty_state(), &mut ctx)
+            .is_none());
+    }
+}
+
+#[cfg(test)]
+mod screenshot_result_tests {
+    use super::*;
 
     fn shot_result(
         expr: &str,

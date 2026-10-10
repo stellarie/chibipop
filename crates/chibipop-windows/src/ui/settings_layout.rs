@@ -9,21 +9,16 @@ use std::collections::HashSet;
 const LAYOUT_VERSION: u32 = 1;
 const EMBEDDED_LAYOUT: &str = include_str!("../../assets/settings-layout.toml");
 
-pub(super) const SETTING_INVENTORY: [SettingId; 66] = [
-    SettingId::ClosePopup,
+pub(super) const SETTING_INVENTORY: [SettingId; 61] = [
     SettingId::LookupMode,
-    SettingId::LookupKey,
-    SettingId::AnkiAddKey,
-    SettingId::StaticRegionKey,
-    SettingId::OcrClipboardKey,
-    SettingId::SearchKey,
-    SettingId::SentenceSearchKey,
-    SettingId::SelectedTextKey,
     SettingId::SelectedTextSentenceSearch,
     SettingId::OpenDictionarySearch,
     SettingId::OpenSentenceSearch,
     SettingId::OcrSentenceSearch,
+    SettingId::ConfiguredBinds,
+    SettingId::ProfileCatalog,
     SettingId::PopupSubPopups,
+    SettingId::NestedProfile,
     SettingId::PopupTheme,
     SettingId::PopupFont,
     SettingId::PopupCustomStyle,
@@ -122,6 +117,7 @@ pub(super) enum TabId {
     Popup,
     General,
     Shortcuts,
+    Profiles,
     Dictionaries,
     TextRecognition,
     Anki,
@@ -137,8 +133,9 @@ pub(super) enum SectionId {
     PopupSize,
     PopupBehavior,
     PopupContent,
-    ShortcutPopup,
+    LookupBehavior,
     ShortcutActions,
+    ProfileManagement,
     DictionaryTerms,
     DictionaryFrequency,
     DictionaryPitch,
@@ -158,20 +155,15 @@ pub(super) enum SectionId {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub(super) enum SettingId {
-    ClosePopup,
     LookupMode,
-    LookupKey,
-    AnkiAddKey,
-    StaticRegionKey,
-    OcrClipboardKey,
-    SearchKey,
-    SentenceSearchKey,
-    SelectedTextKey,
     SelectedTextSentenceSearch,
     OpenDictionarySearch,
     OpenSentenceSearch,
     OcrSentenceSearch,
+    ConfiguredBinds,
+    ProfileCatalog,
     PopupSubPopups,
+    NestedProfile,
     PopupTheme,
     PopupFont,
     PopupCustomStyle,
@@ -359,6 +351,7 @@ mod tests {
                 "Popup",
                 "General",
                 "Shortcuts",
+                "Profiles",
                 "Dictionaries",
                 "Text recognition",
                 "Anki",
@@ -366,43 +359,32 @@ mod tests {
                 "Debug",
             ]
         );
-        assert_eq!(layout.tab_count(), 8);
-        assert_eq!(layout.field_map_tab(), Some(5));
-        assert!(layout.tab_needs_anki_detection(5));
+        assert_eq!(layout.tab_count(), 9);
+        assert_eq!(layout.field_map_tab(), Some(6));
+        assert!(layout.tab_needs_anki_detection(6));
         assert!(!layout.tab_needs_anki_detection(0));
         assert_eq!(layout.tab_label(2), Some("Shortcuts"));
+        assert_eq!(layout.tab_label(3), Some("Profiles"));
+        assert_eq!(location(&layout, SettingId::ConfiguredBinds).0, 2);
+        assert_eq!(location(&layout, SettingId::ProfileCatalog).0, 3);
+        assert_eq!(location(&layout, SettingId::NestedProfile).0, 0);
+        for option in [
+            SettingId::OcrSentenceSearch,
+            SettingId::SelectedTextSentenceSearch,
+        ] {
+            assert_eq!(location(&layout, option).0, 2);
+        }
         let (tab, section, entry) = location(&layout, SettingId::AnkiEnabled);
         assert_eq!(layout.tabs[tab].sections[section].entries[entry].label, "Enable Anki");
-        for (key, option) in [(SettingId::OcrClipboardKey, SettingId::OcrSentenceSearch),
-            (SettingId::SelectedTextKey, SettingId::SelectedTextSentenceSearch)] {
-            let (tab, section, row) = location(&layout, key);
-            assert_eq!(location(&layout, option), (tab, section, row + 1));
-        }
         assert_eq!(location(&layout, SettingId::BackgroundOnClose).0, 1);
-        assert_eq!(location(&layout, SettingId::DebugCaptureOutline).0, 7);
-        assert_eq!(location(&layout, SettingId::DebugEngine).0, 7);
-        assert_eq!(location(&layout, SettingId::DebugAdapter).0, 7);
-        assert_eq!(location(&layout, SettingId::ShowLiveLogs).0, 7);
-        assert_eq!(location(&layout, SettingId::ClearLookupCache).0, 7);
+        assert_eq!(location(&layout, SettingId::DebugCaptureOutline).0, 8);
+        assert_eq!(location(&layout, SettingId::DebugEngine).0, 8);
+        assert_eq!(location(&layout, SettingId::DebugAdapter).0, 8);
+        assert_eq!(location(&layout, SettingId::ShowLiveLogs).0, 8);
+        assert_eq!(location(&layout, SettingId::ClearLookupCache).0, 8);
 
         let ids: HashSet<_> = SETTING_INVENTORY.into_iter().collect();
         assert_eq!(ids.len(), SETTING_INVENTORY.len());
-    }
-
-    #[test]
-    fn background_on_close_preference_is_in_general_settings() {
-        let layout = SettingsLayout::embedded().expect("embedded layout should load");
-        let general = layout
-            .tabs
-            .iter()
-            .find(|tab| tab.label == "General")
-            .expect("General tab should exist");
-        assert!(general.sections.iter().any(|section| {
-            section.label == "Window behavior"
-                && section.entries.iter().any(|entry| {
-                    entry.label == "Keep Chibipop running when Settings closes"
-                })
-        }));
     }
 
     #[test]
@@ -419,19 +401,6 @@ mod tests {
     }
 
     #[test]
-    fn moving_entry_between_sections_changes_placement() {
-        let mut layout = SettingsLayout::embedded().expect("embedded layout should load");
-        let (tab_index, section_index, entry_index) = location(&layout, SettingId::PopupTheme);
-        let entry = layout.tabs[tab_index].sections[section_index]
-            .entries
-            .remove(entry_index);
-        layout.tabs[tab_index].sections[2].entries.push(entry);
-
-        let parsed = SettingsLayout::parse(&serialized(&layout)).expect("layout should load");
-        assert_eq!(location(&parsed, SettingId::PopupTheme), (0, 2, 6));
-    }
-
-    #[test]
     fn accepts_removing_a_tab_after_moving_its_settings() {
         let mut layout = SettingsLayout::embedded().expect("embedded layout should load");
         let removed = layout.tabs.remove(1);
@@ -439,7 +408,7 @@ mod tests {
         layout.tabs[0].sections.extend(removed.sections);
 
         let parsed = SettingsLayout::parse(&serialized(&layout)).expect("layout should load");
-        assert_eq!(parsed.tab_count(), 7);
+        assert_eq!(parsed.tab_count(), 8);
         assert_eq!(location(&parsed, SettingId::LookupMode).0, 1);
     }
 

@@ -363,6 +363,93 @@ A setting that only one platform renders and honors. Other platforms preserve th
 untouched so that a configuration file round-trips.
 _Avoid_: windows-only setting, linux extension
 
+### Profiles and bindings
+
+**Profile catalog**:
+The saved set of profiles, binds, shared frequency settings, and application settings.
+
+**Full profile**:
+A profile that stores every profile-owned setting.
+
+**Derived profile**:
+A profile that inherits one Full profile and stores independent field overrides.
+
+**Profile ID**:
+A stable identifier for one profile. Names can change without changing this identifier.
+
+**Bind**:
+A configured action with a stable Bind ID, platform chords, mode, enabled state, and optional profile override.
+
+**Bind ID**:
+A stable identifier that a Linux configured bind command sends to the daemon.
+
+**Profile override**:
+A field value that a Derived profile stores instead of its parent value. A role-list override replaces the complete ordered list.
+
+**Profile session**:
+The immutable profile view that one popup or Search window retains until it closes.
+
+**Nested profile**:
+The profile that hover links and dictionary links open. Inheritance does not select this profile.
+
+**Live pause**:
+The pause of Live lookup while a configured lookup bind owns an active popup chain.
+
+**Search identity**:
+The pair of Search mode and Profile ID. Two searches with different pairs stay separate.
+
+**Back**:
+The command that restores the parent profile, content, scroll, and selections.
+
+**Source codec**:
+The code that reads or writes a configuration format.
+
+---
+
+## Dictionary profile rules
+
+Each profile has independent terms, pitch, and per-language lists.
+Each role list has ordered `enabled` and `disabled` arrays.
+An explicit empty list means that the profile uses no Dictionary for that role.
+It does not inherit a list or enable every installed Dictionary.
+
+Frequency arrays and the Ranking strategy are shared by all profiles.
+Reindex reads local SQL rows and does not read Dictionary archives.
+An import enables detected roles in the edited profile.
+Other explicit profile lists receive the imported Dictionary as disabled.
+
+The application blocks profile deletion while a default, bind, nested profile, or derived profile refers to it.
+Existing Profile sessions can finish after a deletion.
+
+---
+
+## Bind rules
+
+Lookup binds support Press, Hold, and Toggle modes.
+Other Bind actions run once per activation.
+Lookup, SelectedText, Search, SentenceSearch, and OcrClipboard can select a profile.
+AnkiAdd and StaticRegion use the displayed profile.
+
+A new lookup bind replaces the root of the active chain.
+Live lookup pauses until that chain ends.
+The daemon ignores a release from a displaced bind.
+
+The catalog is immutable for each Profile session.
+Existing popups and Search windows keep their catalog and settings.
+New sessions use later saved settings.
+
+---
+
+## Search and nested routing
+
+The Controller routes hover links and clicked dictionary links through the nested profile.
+Back restores the saved parent state and retires its descendants.
+Same-headword suppression includes the Profile ID.
+Linux Search text stays bounded stdin when a bind sends captured text.
+Linux has no Search profile picker.
+
+---
+
 ### Verification
 
 **Geometry snapshot**:

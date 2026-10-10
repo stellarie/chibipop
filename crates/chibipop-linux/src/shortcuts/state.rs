@@ -52,8 +52,8 @@ impl Published {
     /// This is separate from [`description`]: a portal can confirm an id with
     /// no trigger description, so `None` must not make the settings row fall
     /// back to an unrelated binding.
-    pub fn contains(&self, id: ShortcutId) -> bool {
-        self.bindings.iter().any(|binding| binding.id == id)
+    pub fn contains(&self, id: &str) -> bool {
+        self.bindings.iter().any(|binding| binding.id.as_str() == id)
     }
 
     /// Return the key that the settings window shows for one action.
@@ -62,10 +62,10 @@ impl Published {
     /// `None` means that no key was reported. This covers the native rung, a
     /// portal that bound the id without a key, and an id that the portal did not
     /// return. The row must not name a key in any of these cases.
-    pub fn description(&self, id: ShortcutId) -> Option<String> {
+    pub fn description(&self, id: &str) -> Option<String> {
         self.bindings
             .iter()
-            .find(|binding| binding.id == id)
+            .find(|binding| binding.id.as_str() == id)
             .and_then(|binding| binding.trigger.clone())
     }
 
@@ -152,69 +152,60 @@ mod tests {
         dir
     }
 
-    /// This test checks the full contract. The settings window reads every
-    /// binding that the daemon publishes.
     #[test]
-    fn a_portal_binding_round_trips_to_the_settings_window() {
+    fn a_configured_portal_binding_round_trips_with_its_id() {
         let dir = scratch("portal");
         let published = Published::portal(vec![
-            Binding { id: ShortcutId::Trigger, trigger: Some("Alt+F".into()) },
-            Binding { id: ShortcutId::AnkiAdd, trigger: None },
+            Binding { id: ShortcutId::parse("bind-1").unwrap(), trigger: Some("Alt+F".into()) },
+            Binding { id: ShortcutId::parse("bind-2").unwrap(), trigger: None },
         ]);
         publish(&dir, &published).unwrap();
 
         let read_back = read(&dir).expect("published");
         assert_eq!(published, read_back);
-        assert!(read_back.contains(ShortcutId::Trigger));
-        assert!(read_back.contains(ShortcutId::AnkiAdd));
-        assert_eq!(Some("Alt+F".to_string()), read_back.description(ShortcutId::Trigger));
+        assert!(read_back.contains("bind-1"));
+        assert!(read_back.contains("bind-2"));
+        assert_eq!(Some("Alt+F".to_string()), read_back.description("bind-1"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Each id returns its own description. An id that the portal did not name
-    /// returns `None` instead of another id's key.
     #[test]
-    fn each_id_gets_its_own_description_and_an_unbound_id_gets_none() {
+    fn each_bind_id_gets_its_own_description() {
         let published = Published::portal(vec![
-            Binding { id: ShortcutId::Trigger, trigger: Some("Alt+F".into()) },
-            Binding { id: ShortcutId::AnkiAdd, trigger: Some("Alt+A".into()) },
+            Binding { id: ShortcutId::parse("bind-1").unwrap(), trigger: Some("Alt+F".into()) },
+            Binding { id: ShortcutId::parse("bind-2").unwrap(), trigger: Some("Alt+A".into()) },
         ]);
-        assert_eq!(Some("Alt+F".to_string()), published.description(ShortcutId::Trigger));
-        assert_eq!(Some("Alt+A".to_string()), published.description(ShortcutId::AnkiAdd));
-
-        // A bound id can have no key, and the portal can omit an id.
-        // Both cases return `None`.
-        let partial = Published::portal(vec![Binding {
-            id: ShortcutId::Trigger,
-            trigger: Some("Alt+F".into()),
-        }]);
-        assert_eq!(None, partial.description(ShortcutId::AnkiAdd));
-        let unnamed =
-            Published::portal(vec![Binding { id: ShortcutId::AnkiAdd, trigger: None }]);
-        assert_eq!(None, unnamed.description(ShortcutId::AnkiAdd));
+        assert_eq!(Some("Alt+F".to_string()), published.description("bind-1"));
+        assert_eq!(Some("Alt+A".to_string()), published.description("bind-2"));
+        assert_eq!(None, published.description("bind-3"));
+        assert_eq!(
+            None,
+            Published::portal(vec![Binding {
+                id: ShortcutId::parse("bind-1").unwrap(),
+                trigger: None,
+            }])
+            .description("bind-1")
+        );
     }
 
-    /// Preserve a key that contains spaces. KDE uses this spelling for chords.
     #[test]
     fn a_multi_word_key_survives_the_round_trip() {
         let dir = scratch("spaces");
         publish(
             &dir,
             &Published::portal(vec![Binding {
-                id: ShortcutId::Trigger,
+                id: ShortcutId::parse("bind-1").unwrap(),
                 trigger: Some("Meta + Shift + F".into()),
             }]),
         )
         .unwrap();
         assert_eq!(
             Some("Meta + Shift + F".to_string()),
-            read(&dir).unwrap().description(ShortcutId::Trigger)
+            read(&dir).unwrap().description("bind-1")
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The native rung publishes native state. The settings window shows a
-    /// snippet instead of a portal binding.
     #[test]
     fn the_native_rung_publishes_no_binding() {
         let dir = scratch("native");
@@ -222,19 +213,17 @@ mod tests {
         let read_back = read(&dir).expect("published");
         assert!(!read_back.portal);
         assert!(read_back.bindings.is_empty());
-        assert_eq!(None, read_back.description(ShortcutId::Trigger));
+        assert_eq!(None, read_back.description("bind-1"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A later publish replaces the previous state. A daemon that loses the
-    /// portal rung must not leave the old binding on screen.
     #[test]
-    fn publishing_again_replaces_the_previous_answer() {
+    fn publishing_native_state_replaces_the_previous_portal_answer() {
         let dir = scratch("replace");
         publish(
             &dir,
             &Published::portal(vec![Binding {
-                id: ShortcutId::Trigger,
+                id: ShortcutId::parse("bind-1").unwrap(),
                 trigger: Some("Alt+F".into()),
             }]),
         )
@@ -244,8 +233,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// An absent file means that no daemon has published state. The settings
-    /// window uses the native fallback.
     #[test]
     fn an_absent_file_is_no_answer_at_all() {
         let dir = scratch("absent");
@@ -253,21 +240,22 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Unknown lines and ids do not stop parsing. The channel line controls
-    /// whether bindings remain.
     #[test]
-    fn unknown_lines_and_ids_are_skipped() {
+    fn malformed_ids_and_unknown_lines_are_skipped() {
         let parsed = Published::parse(concat!(
             "channel portal\n",
-            "bind trigger ALT+F\n",
-            "bind future-thing CTRL+Z\n",
+            "bind bind-1 ALT+F\n",
+            "bind bad/id CTRL+Z\n",
             "gibberish\n",
             "\n",
             "flavour vanilla\n",
         ));
         assert!(parsed.portal);
         assert_eq!(
-            vec![Binding { id: ShortcutId::Trigger, trigger: Some("ALT+F".into()) }],
+            vec![Binding {
+                id: ShortcutId::parse("bind-1").unwrap(),
+                trigger: Some("ALT+F".into()),
+            }],
             parsed.bindings
         );
     }

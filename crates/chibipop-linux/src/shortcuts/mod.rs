@@ -42,88 +42,42 @@
 pub mod portal;
 pub mod state;
 
-use crate::control::Verb;
-use chibipop::config::TriggerMode;
+use chibipop::config::Config;
 use std::path::Path;
 
-/// Every configured global action has one stable portal identifier. The
-/// registration list is filtered from this set by [`preferred`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ShortcutId {
-    /// Hold this shortcut to read text. A press freezes a grab and starts a
-    /// lookup. A release retracts the popup. The portal sends both
-    /// `Activated`/`Deactivated` events, so the daemon needs no keyboard
-    /// access.
-    Trigger,
-    /// Start the Anki add action with this shortcut. The popup never takes
-    /// focus, so this action needs a global shortcut on Wayland.
-    AnkiAdd,
-    /// Open dictionary search.
-    Search,
-    /// Open sentence search.
-    SentenceSearch,
-    /// Read the application's PRIMARY selection.
-    SelectedText,
-    /// OCR a selected region onto the clipboard.
-    OcrClipboard,
-    /// Select the static sentence region.
-    StaticRegion,
-}
+/// A configured bind ID used by the portal and control socket.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ShortcutId(String);
 
 impl ShortcutId {
-    /// The complete set in the order that the daemon registers it. The
-    /// fixed-size array makes the identifier set part of the application.
-    pub const ALL: [ShortcutId; 7] = [
-        ShortcutId::Trigger,
-        ShortcutId::AnkiAdd,
-        ShortcutId::Search,
-        ShortcutId::SentenceSearch,
-        ShortcutId::SelectedText,
-        ShortcutId::OcrClipboard,
-        ShortcutId::StaticRegion,
-    ];
-
-    /// This function returns the stable identifier on the wire. Hyprland prefixes
-    /// this value with the portal app ID. The ID can depend on the process that
-    /// starts the daemon. A rename breaks portal registrations without an error.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            ShortcutId::Trigger => "trigger",
-            ShortcutId::AnkiAdd => "anki-add",
-            ShortcutId::Search => "search",
-            ShortcutId::SentenceSearch => "sentence-search",
-            ShortcutId::SelectedText => "selected-text",
-            ShortcutId::OcrClipboard => "ocr-clipboard",
-            ShortcutId::StaticRegion => "static-region",
-        }
+    /// Parse an ID from a portal signal or saved bind.
+    pub fn parse(id: &str) -> Option<Self> {
+        Self::is_valid(id).then(|| Self(id.to_string()))
     }
 
-    /// Parse a known identifier. Return `None` for a foreign portal session
-    /// or a stale binding.
-    pub fn parse(id: &str) -> Option<ShortcutId> {
-        ShortcutId::ALL.into_iter().find(|known| known.as_str() == id)
+    pub(crate) fn is_valid(id: &str) -> bool {
+        !id.is_empty() && id.len() <= 64 && id.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')
+        })
     }
 
-    /// Return the `description` that the portal shows to the user. The text
-    /// explains the key action because it describes a system-wide key grab.
-    pub fn description(self) -> &'static str {
-        match self {
-            ShortcutId::Trigger => "Hold to look up the Japanese text under the cursor",
-            ShortcutId::AnkiAdd => "Add the word shown in the popup to Anki",
-            ShortcutId::Search => "Open dictionary search",
-            ShortcutId::SentenceSearch => "Open sentence search",
-            ShortcutId::SelectedText => "Look up selected application text",
-            ShortcutId::OcrClipboard => "Copy OCR text from a selected region",
-            ShortcutId::StaticRegion => "Select the static sentence region",
-        }
+    pub fn as_str(&self) -> &str {
+        &self.0
     }
+}
+
+/// One enabled configured bind offered to the GlobalShortcuts portal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShortcutSpec {
+    pub id: ShortcutId,
+    pub trigger: String,
+    pub description: String,
 }
 
 /// One shortcut binding reported by the portal.
 ///
-/// `trigger` can be absent when the portal confirms an id but does not return
-/// a human-readable key. Keep the id so settings can distinguish that case
-/// from an unregistered action.
+/// `trigger` can be absent when the portal confirms an ID but does not return
+/// a human-readable key.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Binding {
     pub id: ShortcutId,
@@ -131,9 +85,6 @@ pub struct Binding {
 }
 
 impl Binding {
-    /// Format one binding for a status row. Show the reported key or state
-    /// that the portal did not report it, so a row without a key does not
-    /// look like a missing registration.
     pub fn describe(&self) -> String {
         match &self.trigger {
             Some(trigger) => format!("{} {trigger}", self.id.as_str()),
@@ -323,8 +274,9 @@ impl Selection {
                 portal::SHORTCUTS_INTERFACE
             ),
             Selection::Native(NativeReason::NoPortal) => format!(
-                "trigger: control socket only (ladder rung 2) - no {} on the session bus; bind `{} ctl trigger-down|trigger-up` in your compositor",
+                "trigger: control socket only (ladder rung 2) - no {} on the session bus; use `{} ctl bind-down <id>` and `{} ctl bind-up <id>` in compositor binds",
                 portal::SHORTCUTS_INTERFACE,
+                crate::paths::shell_quote(exe),
                 crate::paths::shell_quote(exe)
             ),
             Selection::Native(NativeReason::Forced) => format!(
@@ -337,7 +289,7 @@ impl Selection {
                 portal::SHORTCUTS_INTERFACE
             ),
             Selection::Native(NativeReason::Hyprland) => format!(
-                "trigger: control socket only - automatic Hyprland mode uses native keybinds; add `bind = <KEY>, exec, {} ctl <verb>` in hyprland.conf",
+                "trigger: control socket only - automatic Hyprland mode uses native keybinds; use `{} ctl bind-down <id>` in hyprland.conf",
                 crate::paths::shell_quote(exe)
             ),
         }
@@ -359,44 +311,24 @@ pub fn select(portal: bool, ov: ChannelOverride, hyprland: bool) -> Selection {
     }
 }
 
-/// Build every configured shortcut whose action is enabled and whose chord is
-/// non-empty. Each chord uses the form that the shortcuts spec defines.
-pub fn preferred(config: &chibipop::config::Config) -> Vec<(ShortcutId, String)> {
-    let mut shortcuts = Vec::new();
-    let push = |shortcuts: &mut Vec<(ShortcutId, String)>, id, key: &str| {
-        if key.trim().is_empty() {
-            return;
-        }
-        let chord = normalize_trigger(key);
-        if !chord.is_empty() {
-            shortcuts.push((id, chord));
-        }
-    };
-
-    push(&mut shortcuts, ShortcutId::Trigger, &config.trigger.trigger_key_linux);
-    if config.anki.enabled {
-        push(&mut shortcuts, ShortcutId::AnkiAdd, &config.anki.add_key_linux);
-    }
-    if config.actions.enabled {
-        if let Some(key) = config.actions.search.hotkey_linux.as_deref() {
-            push(&mut shortcuts, ShortcutId::Search, key);
-        }
-        if let Some(key) = config.actions.search.sentence_hotkey_linux.as_deref() {
-            push(&mut shortcuts, ShortcutId::SentenceSearch, key);
-        }
-        if let Some(key) = config.actions.search.selected_hotkey_linux.as_deref() {
-            push(&mut shortcuts, ShortcutId::SelectedText, key);
-        }
-        if let Some(ocr) = config.actions.ocr_clipboard.as_ref() {
-            if let Some(key) = ocr.hotkey_linux.as_deref() {
-                push(&mut shortcuts, ShortcutId::OcrClipboard, key);
+/// Build enabled configured binds that have a Linux chord.
+pub fn preferred(config: &Config) -> Vec<ShortcutSpec> {
+    config
+        .binds
+        .iter()
+        .filter(|bind| bind.enabled)
+        .filter_map(|bind| {
+            let chord = normalize_trigger(&bind.linux);
+            if chord.is_empty() {
+                return None;
             }
-        }
-        if config.anki.sentence_mode == chibipop::config::SentenceMode::Static {
-            push(&mut shortcuts, ShortcutId::StaticRegion, &config.anki.static_region_key_linux);
-        }
-    }
-    shortcuts
+            Some(ShortcutSpec {
+                id: ShortcutId::parse(&bind.id)?,
+                trigger: chord,
+                description: format!("{} ({})", bind.action.name(), bind.id),
+            })
+        })
+        .collect()
 }
 
 
@@ -441,78 +373,24 @@ fn spec_modifier(name: &str) -> String {
     }
 }
 
-/// The action that one portal signal causes in the daemon.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Action {
-    /// Run the same control socket verb as every other rung. One code path
-    /// prevents differences between a portal shortcut and
-    /// `chibipop ctl <verb>`. Every global action has a verb. A portal signal
-    /// therefore produces a verb or no action.
-    Verb(Verb),
-    /// No action is necessary.
-    Nothing,
-}
-
-/// Select the verb for one portal signal.
-///
-/// The mode selects the verb that the trigger key sends. This keeps a portal
-/// press and a native bind on one `App::apply_verb` path
-/// (ARCHITECTURE.md#input-ladders). Toggle mode uses the existing `toggle`
-/// verb, so the daemon's latch logic in `trigger.rs` remains the single owner
-/// of the hold. Press mode sends one `lookup` verb per press and ignores the
-/// release.
-pub fn action(id: ShortcutId, activated: bool, mode: TriggerMode) -> Action {
-    match (id, activated, mode) {
-        (ShortcutId::Trigger, true, TriggerMode::Toggle) => Action::Verb(Verb::Toggle),
-        // A release cannot reverse a toggle latch.
-        (ShortcutId::Trigger, false, TriggerMode::Toggle) => Action::Nothing,
-        (ShortcutId::Trigger, true, TriggerMode::Press) => Action::Verb(Verb::Lookup),
-        // Press mode performs one lookup and ignores the release.
-        (ShortcutId::Trigger, false, TriggerMode::Press) => Action::Nothing,
-        // Every other trigger mode needs both events.
-        (ShortcutId::Trigger, true, _) => Action::Verb(Verb::TriggerDown),
-        (ShortcutId::Trigger, false, _) => Action::Verb(Verb::TriggerUp),
-        (ShortcutId::AnkiAdd, true, _) => Action::Verb(Verb::AnkiAdd),
-        // A release cannot reverse an Anki add action.
-        (ShortcutId::AnkiAdd, false, _) => Action::Nothing,
-        (ShortcutId::Search, true, _) => Action::Verb(Verb::Search),
-        (ShortcutId::Search, false, _) => Action::Nothing,
-        (ShortcutId::SentenceSearch, true, _) => Action::Verb(Verb::SentenceSearch),
-        (ShortcutId::SentenceSearch, false, _) => Action::Nothing,
-        (ShortcutId::SelectedText, true, _) => Action::Verb(Verb::SelectedText),
-        (ShortcutId::SelectedText, false, _) => Action::Nothing,
-        (ShortcutId::OcrClipboard, true, _) => Action::Verb(Verb::OcrClipboard),
-        (ShortcutId::OcrClipboard, false, _) => Action::Nothing,
-        (ShortcutId::StaticRegion, true, _) => Action::Verb(Verb::StaticRegion),
-        (ShortcutId::StaticRegion, false, _) => Action::Nothing,
-    }
-}
-
-/// Return the trigger detail while the portal has not answered the
-/// binding request. On KDE, the user reads the dialog during this period.
+/// Return the trigger detail while the portal has not answered.
 pub fn pending_detail() -> String {
     "GlobalShortcuts portal - binding requested; control socket serving meanwhile".to_string()
 }
 
-/// Return the trigger detail after the portal answers. Name each binding.
+/// Return the trigger detail after the portal answers.
 pub fn portal_detail(bindings: &[Binding]) -> String {
     if bindings.is_empty() {
-        return "GlobalShortcuts portal bound nothing - control socket is the only trigger"
+        return "GlobalShortcuts portal bound nothing - control socket serves configured binds"
             .to_string();
     }
     let described: Vec<String> = bindings.iter().map(Binding::describe).collect();
     format!("GlobalShortcuts portal - {}", described.join(", "))
 }
 
-/// Return the trigger detail when the portal rung cannot serve. The
-/// control socket still serves, and `why` gives an action.
-///
-/// A status row has one short line
-/// (ARCHITECTURE.md#platform-integration). It names verbs instead of the
-/// binary. A bare `chibipop` command does not resolve under `cargo run`.
-/// The settings window gives binding snippets that name the binary.
+/// Return the trigger detail when the portal rung cannot serve.
 pub fn native_detail(why: &str) -> String {
-    format!("control socket (`ctl trigger-down`) - {why}")
+    format!("control socket (configured bind IDs) - {why}")
 }
 
 /// Format the native rung reason for a status row.
@@ -533,92 +411,57 @@ pub fn native_reason(reason: NativeReason) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use chibipop::config::BindAction;
+
+use super::*;
 
     #[test]
-    fn shortcut_ids_round_trip_and_keep_wire_names() {
-        assert_eq!(7, ShortcutId::ALL.len());
-        assert_eq!(
-            [
-                "trigger",
-                "anki-add",
-                "search",
-                "sentence-search",
-                "selected-text",
-                "ocr-clipboard",
-                "static-region",
-            ],
-            ShortcutId::ALL.map(ShortcutId::as_str)
-        );
-        for id in ShortcutId::ALL {
-            assert_eq!(Some(id), ShortcutId::parse(id.as_str()));
-            assert!(!id.description().is_empty(), "{id:?} needs dialog text");
-        }
-        assert_eq!(None, ShortcutId::parse("toggle"));
+    fn shortcut_ids_accept_only_saved_config_id_syntax() {
+        let id = ShortcutId::parse("bind_17").unwrap();
+        assert_eq!("bind_17", id.as_str());
         assert_eq!(None, ShortcutId::parse(""));
+        assert_eq!(None, ShortcutId::parse("bad/id"));
+        assert_eq!(None, ShortcutId::parse(&"x".repeat(65)));
     }
 
     #[test]
-    fn preferred_contains_each_enabled_non_empty_linux_chord() {
-        let mut config = chibipop::config::Config::default();
-        config.trigger.trigger_key_linux = "ALT+F".into();
-        config.anki.enabled = true;
-        config.anki.sentence_mode = chibipop::config::SentenceMode::Static;
-        config.anki.add_key_linux = "SUPER+A".into();
-        config.anki.static_region_key_linux = "CTRL+R".into();
-        config.actions.search.hotkey_linux = Some("SUPER+F5".into());
-        config.actions.search.sentence_hotkey_linux = Some("SUPER+F6".into());
-        config.actions.search.selected_hotkey_linux = Some("SUPER+F7".into());
-        config.actions.ocr_clipboard = Some(chibipop::config::OcrClipboardConfig {
-            hotkey_linux: Some("SUPER+O".into()),
-            ..Default::default()
-        });
-        assert_eq!(
-            vec![
-                (ShortcutId::Trigger, "ALT+f".into()),
-                (ShortcutId::AnkiAdd, "LOGO+a".into()),
-                (ShortcutId::Search, "LOGO+F5".into()),
-                (ShortcutId::SentenceSearch, "LOGO+F6".into()),
-                (ShortcutId::SelectedText, "LOGO+F7".into()),
-                (ShortcutId::OcrClipboard, "LOGO+o".into()),
-                (ShortcutId::StaticRegion, "CTRL+r".into()),
-            ],
-            preferred(&config)
-        );
+    fn preferred_registers_only_enabled_binds_with_linux_chords() {
+        let mut config = Config::default();
+        config.binds.clear();
+        let mut lookup = chibipop::config::Bind::new("bind-1".into(), BindAction::Lookup);
+        lookup.linux = "ALT+F".into();
+        config.binds.push(lookup);
+        let mut search = chibipop::config::Bind::new("bind-2".into(), BindAction::Search);
+        search.linux = "SUPER+F5".into();
+        config.binds.push(search);
+        let mut disabled = chibipop::config::Bind::new("bind-3".into(), BindAction::AnkiAdd);
+        disabled.enabled = false;
+        disabled.linux = "ALT+A".into();
+        config.binds.push(disabled);
+        let mut unbound = chibipop::config::Bind::new("bind-4".into(), BindAction::SelectedText);
+        unbound.linux = "  ".into();
+        config.binds.push(unbound);
 
-        config.anki.enabled = false;
-        config.actions.enabled = false;
-        let ids: Vec<_> = preferred(&config).into_iter().map(|(id, _)| id).collect();
-        assert_eq!(vec![ShortcutId::Trigger], ids);
+        let specs = preferred(&config);
+        assert_eq!(2, specs.len());
+        assert_eq!("bind-1", specs[0].id.as_str());
+        assert_eq!("ALT+f", specs[0].trigger);
+        assert_eq!("Screen lookup (bind-1)", specs[0].description);
+        assert_eq!("bind-2", specs[1].id.as_str());
+        assert_eq!("LOGO+F5", specs[1].trigger);
+        assert_eq!("Search (bind-2)", specs[1].description);
     }
 
     #[test]
-    fn static_region_preference_requires_static_sentence_mode() {
-        let mut config = chibipop::config::Config::default();
-        config.actions.enabled = true;
-        config.anki.static_region_key_linux = "CTRL+R".into();
-
-        assert!(preferred(&config)
-            .iter()
-            .all(|(id, _)| *id != ShortcutId::StaticRegion));
-
-        config.anki.sentence_mode = chibipop::config::SentenceMode::Static;
-        assert_eq!(
-            Some(&(ShortcutId::StaticRegion, "CTRL+r".to_string())),
-            preferred(&config)
-                .iter()
-                .find(|(id, _)| *id == ShortcutId::StaticRegion)
-        );
-    }
-
-    #[test]
-    fn an_empty_chord_is_not_registered() {
-        let mut config = chibipop::config::Config::default();
-        config.trigger.trigger_key_linux.clear();
-        config.anki.enabled = true;
-        config.anki.add_key_linux.clear();
-        config.actions.search.hotkey_linux = Some(" ".into());
-        config.anki.static_region_key_linux.clear();
+    fn an_empty_or_invalid_bind_is_not_registered() {
+        let mut config = Config::default();
+        config.binds.clear();
+        let mut empty = chibipop::config::Bind::new("bind-1".into(), BindAction::Lookup);
+        empty.linux = " ".into();
+        config.binds.push(empty);
+        let mut invalid_id = chibipop::config::Bind::new("bad/id".into(), BindAction::Search);
+        invalid_id.linux = "ALT+F".into();
+        config.binds.push(invalid_id);
         assert!(preferred(&config).is_empty());
     }
 
@@ -696,13 +539,11 @@ mod tests {
         }
 
         let advice = Selection::Native(NativeReason::NoPortal).startup_line(exe);
-        assert!(
-            advice.contains("bind `/home/u/chibipop/target/debug/chibipop ctl trigger-down"),
-            "{advice}"
-        );
+        assert!(advice.contains("ctl bind-down <id>"), "{advice}");
+        assert!(advice.contains("ctl bind-up <id>"), "{advice}");
         let spaced = Selection::Native(NativeReason::NoPortal)
             .startup_line(Path::new("/home/u/my builds/chibipop"));
-        assert!(spaced.contains("bind `'/home/u/my builds/chibipop' ctl"), "{spaced}");
+        assert!(spaced.contains("'/home/u/my builds/chibipop' ctl bind-down"), "{spaced}");
     }
 
     #[test]
@@ -715,71 +556,13 @@ mod tests {
     }
 
     #[test]
-    fn every_action_id_dispatches_its_matching_press_verb() {
-        for (id, verb) in [
-            (ShortcutId::AnkiAdd, Verb::AnkiAdd),
-            (ShortcutId::Search, Verb::Search),
-            (ShortcutId::SentenceSearch, Verb::SentenceSearch),
-            (ShortcutId::SelectedText, Verb::SelectedText),
-            (ShortcutId::OcrClipboard, Verb::OcrClipboard),
-            (ShortcutId::StaticRegion, Verb::StaticRegion),
-        ] {
-            assert_eq!(Action::Verb(verb), action(id, true, TriggerMode::HoldKey));
-            assert_eq!(Action::Nothing, action(id, false, TriggerMode::HoldKey));
-        }
-    }
-
-    #[test]
-    fn trigger_modes_keep_their_press_and_release_contract() {
-        assert_eq!(
-            Action::Verb(Verb::TriggerDown),
-            action(ShortcutId::Trigger, true, TriggerMode::HoldKey)
-        );
-        assert_eq!(
-            Action::Verb(Verb::TriggerUp),
-            action(ShortcutId::Trigger, false, TriggerMode::HoldKey)
-        );
-        assert_eq!(
-            Action::Verb(Verb::Toggle),
-            action(ShortcutId::Trigger, true, TriggerMode::Toggle)
-        );
-        assert_eq!(
-            Action::Nothing,
-            action(ShortcutId::Trigger, false, TriggerMode::Toggle)
-        );
-        assert_eq!(
-            Action::Verb(Verb::Lookup),
-            action(ShortcutId::Trigger, true, TriggerMode::Press)
-        );
-        assert_eq!(
-            Action::Nothing,
-            action(ShortcutId::Trigger, false, TriggerMode::Press)
-        );
-
-        // Every other mode is a hold and needs both events. Without the
-        // release, the frozen grab remains active.
-        for mode in [TriggerMode::Live, TriggerMode::HoldShift] {
-            assert_eq!(
-                Action::Verb(Verb::TriggerDown),
-                action(ShortcutId::Trigger, true, mode)
-            );
-            assert_eq!(
-                Action::Verb(Verb::TriggerUp),
-                action(ShortcutId::Trigger, false, mode)
-            );
-        }
-    }
-
-    #[test]
-    fn status_details_name_the_owner_of_the_binding() {
-        let named = vec![
-            Binding { id: ShortcutId::Trigger, trigger: Some("Alt+F".into()) },
-        ];
+    fn status_details_name_the_owner_and_dynamic_bind_id() {
+        let id = ShortcutId::parse("bind-17").unwrap();
+        let named = vec![Binding { id: id.clone(), trigger: Some("Alt+F".into()) }];
         let detail = portal_detail(&named);
         assert!(detail.contains("GlobalShortcuts portal"), "{detail}");
-        assert!(detail.contains("trigger Alt+F"), "{detail}");
-        assert!(portal_detail(&[Binding { id: ShortcutId::Trigger, trigger: None }])
-            .contains("key not reported"));
+        assert!(detail.contains("bind-17 Alt+F"), "{detail}");
+        assert!(portal_detail(&[Binding { id, trigger: None }]).contains("key not reported"));
         assert!(portal_detail(&[]).contains("bound nothing"));
 
         let native = native_detail(&native_reason(NativeReason::NoPortal));

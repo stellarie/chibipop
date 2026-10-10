@@ -11,7 +11,6 @@
 //! The window offers the compositor rule when one exists.
 //! It states when no rule exists.
 
-use crate::control::Verb;
 use crate::paths;
 use chibipop::config::TriggerMode;
 use std::fmt;
@@ -88,17 +87,20 @@ impl Compositor {
     ///
     /// Niri has no release-bind syntax. Desktop shortcut editors accept a
     /// press command but cannot represent the two events in a hold bind.
-    pub fn supports_bind(self, chord: &str, bind: Bind) -> bool {
+    pub fn supports_bind(self, chord: &str, bind: Bind<'_>) -> bool {
+        if !crate::shortcuts::ShortcutId::is_valid(bind.id) {
+            return false;
+        }
         match self {
             Compositor::Hyprland | Compositor::Sway => true,
-            Compositor::Niri => matches!(bind, Bind::Press(_))
+            Compositor::Niri => !bind.requires_release()
                 && chord.rsplit('+').map(str::trim).filter(|part| !part.is_empty()).skip(1).all(|name| {
                     ["SUPER", "META", "MOD4", "LOGO", "WIN", "CONTROL", "CTRL",
                      "ALT", "MOD1", "SHIFT", "ALTGR", "ISO_LEVEL3_SHIFT", "MOD5",
                      "MOD", "ISO_LEVEL5_SHIFT", "MOD3"]
                         .iter().any(|modifier| name.eq_ignore_ascii_case(modifier))
                 }),
-            Compositor::Kde | Compositor::Gnome | Compositor::Other => matches!(bind, Bind::Press(_)),
+            Compositor::Kde | Compositor::Gnome | Compositor::Other => !bind.requires_release(),
         }
     }
 }
@@ -239,31 +241,38 @@ fn kdl_quote(text: &str) -> String {
     quoted
 }
 
-/// Select the bind shape that a chord needs.
-///
-/// The caller does not build the verb text.
-/// [`Verb::as_str`] supplies it, so a verb rename cannot leave a snippet
-/// with a word that the socket no longer accepts.
+/// Select the native bind shape and request ID.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Bind {
-    /// The trigger. A press sends `trigger-down`, and a release sends `trigger-up`.
-    /// The pair carries the Hyprland release caveat.
-    Hold,
-    /// A one-shot global action. One press sends one verb and no release line.
-    Press(Verb),
+pub struct Bind<'a> {
+    pub id: &'a str,
+    pub mode: TriggerMode,
 }
 
-/// Select the native bind verb for a trigger mode.
-///
-/// The mode picks which verb the native bind sends.
-/// Toggle mode gets a one-line press bind with no release line, so the Hyprland
-/// modifier-first release defect already documented on [`Bind::Hold`] cannot wedge it.
-/// Press mode also gets one press bind, and it sends `lookup` for one lookup per key press.
-pub fn trigger_bind(mode: TriggerMode) -> Bind {
-    match mode {
-        TriggerMode::Toggle => Bind::Press(Verb::Toggle),
-        TriggerMode::Press => Bind::Press(Verb::Lookup),
-        _ => Bind::Hold,
+impl<'a> Bind<'a> {
+    fn requires_release(self) -> bool {
+        self.mode == TriggerMode::HoldKey
+    }
+}
+
+#[derive(Clone, Copy)]
+struct CtlCommand<'a> {
+    id: &'a str,
+    activated: bool,
+}
+
+impl fmt::Display for CtlCommand<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} -- {}", if self.activated { "bind-down" } else { "bind-up" }, self.id)
+    }
+}
+
+impl<'a> Bind<'a> {
+    fn down(self) -> CtlCommand<'a> {
+        CtlCommand { id: self.id, activated: true }
+    }
+
+    fn up(self) -> CtlCommand<'a> {
+        CtlCommand { id: self.id, activated: false }
     }
 }
 
@@ -276,7 +285,11 @@ pub fn trigger_bind(mode: TriggerMode) -> Bind {
 /// A pasted bind must execute the daemon that the user runs.
 /// Under `cargo run`, that daemon is `target/debug/chibipop` and is not on PATH.
 /// The external lookup keeps this function pure.
-pub fn bind_snippet(compositor: Compositor, chord: &str, exe: &Path, bind: Bind) -> String {
+pub fn bind_snippet(compositor: Compositor, chord: &str, exe: &Path, bind: Bind<'_>) -> String {
+    if !compositor.supports_bind(chord, bind) {
+        return unsupported_bind(compositor, bind);
+    }
+
     match compositor {
         Compositor::Hyprland => {
             let (mods, key) = split_chord(chord);
@@ -286,82 +299,69 @@ pub fn bind_snippet(compositor: Compositor, chord: &str, exe: &Path, bind: Bind)
                 .collect::<Vec<_>>()
                 .join(" ");
             let exe = paths::shell_quote(exe);
-            match bind {
-                // Hyprland (≤ 0.55.4, verified in source and live) can fire no release bind
-                // when a chord modifier goes up before its key.
-                // Release checks require the bind's mod mask to remain active at release.
-                // KeybindManager.cpp calls this condition "Gate A".
-                // When the user presses another key during the hold, that key shadows a
-                // modifier-keyed `bindr` (hyprwm/Hyprland#5032, #7675).
-                // We tried and measured every alternative:
-                // a modifier `bindr`/`bindir`, an empty-mask `bindr` on the key,
-                // and a submap-scoped `bindri`, which wedges the whole keymap.
-                // The code ships the pair unchanged.
-                // The snippet states one habit and one recovery:
-                // release the key before the modifier, then repeat the chord if needed.
-                Bind::Hold => format!(
+            if bind.requires_release() {
+                format!(
                     "bind = {mask}, {key}, exec, {exe} ctl {down}\n\
                      bindr = {mask}, {key}, exec, {exe} ctl {up}\n\
                      # Release {key} before {mask} - Hyprland drops modifier-first releases (hyprwm/Hyprland#5032).\n\
-                     # If the popup sticks, tap the chord again (release {key} first), or bind `ctl toggle` instead.",
-                    down = Verb::TriggerDown.as_str(),
-                    up = Verb::TriggerUp.as_str(),
-                ),
-                Bind::Press(verb) => format!(
-                    "bind = {mask}, {key}, exec, {exe} ctl {verb}",
-                    verb = verb.as_str(),
-                ),
+                     # If the popup stays open, change this bind to Press or Toggle mode in chibipop settings.",
+                    down = bind.down(),
+                    up = bind.up(),
+                )
+            } else {
+                format!("bind = {mask}, {key}, exec, {exe} ctl {down}", down = bind.down())
             }
         }
         Compositor::Sway => {
             let chord = native_chord(Compositor::Sway, chord, "+");
             let exe = paths::shell_quote(exe);
-            match bind {
-                Bind::Hold => format!(
+            if bind.requires_release() {
+                format!(
                     "bindsym --no-repeat {chord} exec {exe} ctl {down}\n\
                      bindsym --release {chord} exec {exe} ctl {up}",
-                    down = Verb::TriggerDown.as_str(),
-                    up = Verb::TriggerUp.as_str(),
-                ),
-                Bind::Press(verb) => format!(
-                    "bindsym --no-repeat {chord} exec {exe} ctl {verb}",
-                    verb = verb.as_str(),
-                ),
+                    down = bind.down(),
+                    up = bind.up(),
+                )
+            } else {
+                format!("bindsym --no-repeat {chord} exec {exe} ctl {down}", down = bind.down())
             }
         }
         Compositor::Niri => {
-            if !compositor.supports_bind(chord, bind) {
-                return unsupported_bind(compositor, bind);
-            }
             let chord = kdl_quote(&native_chord(Compositor::Niri, chord, "+"));
             let exe = kdl_quote(&exe.to_string_lossy());
-            let Bind::Press(verb) = bind else {
-                unreachable!("unsupported niri hold bind returned above");
-            };
             format!(
-                "{chord} repeat=false {{ spawn {exe} \"ctl\" \"{verb}\"; }};",
-                verb = verb.as_str(),
+                "{chord} repeat=false {{ spawn {exe} {}; }};",
+                NiriArgs(bind.down())
             )
         }
-        Compositor::Kde | Compositor::Gnome | Compositor::Other => match bind {
-            Bind::Press(verb) => {
-                format!("{} ctl {}", paths::shell_quote(exe), verb.as_str())
-            }
-            Bind::Hold => unsupported_bind(compositor, bind),
-        },
+        Compositor::Kde | Compositor::Gnome | Compositor::Other => {
+            format!("{} ctl {}", paths::shell_quote(exe), bind.down())
+        }
     }
 }
 
-fn unsupported_bind(compositor: Compositor, bind: Bind) -> String {
+struct NiriArgs<'a>(CtlCommand<'a>);
+
+impl fmt::Display for NiriArgs<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "\"ctl\" \"{}\" \"--\" \"{}\"",
+            if self.0.activated { "bind-down" } else { "bind-up" }, self.0.id)
+    }
+}
+
+fn unsupported_bind(compositor: Compositor, bind: Bind<'_>) -> String {
+    if !crate::shortcuts::ShortcutId::is_valid(bind.id) {
+        return "The configured bind ID is invalid.".to_string();
+    }
     match compositor {
-        Compositor::Niri => match bind {
-            Bind::Hold => "Niri has no key-release bind. Select Press or Toggle mode for a native trigger bind.".to_string(),
-            Bind::Press(_) => {
-                "For Niri, use Ctrl, Alt, Shift, Super, Mod, Mod3, or Mod5. Niri does not support the requested modifiers.".to_string()
-            }
-        },
+        Compositor::Niri if bind.requires_release() => {
+            "Niri has no key-release bind. Select Press or Toggle mode for this lookup bind.".to_string()
+        }
+        Compositor::Niri => {
+            "For Niri, use Ctrl, Alt, Shift, Super, Mod, Mod3, or Mod5. Niri does not support the requested modifiers.".to_string()
+        }
         Compositor::Kde | Compositor::Gnome | Compositor::Other => {
-            assert!(matches!(bind, Bind::Hold));
+            assert!(bind.requires_release());
             format!(
                 "# {compositor} has no native text bind syntax for a hold action.\n\
                  # {help}\n\
@@ -374,6 +374,7 @@ fn unsupported_bind(compositor: Compositor, bind: Bind) -> String {
         }
     }
 }
+
 
 /// Provide screen-share exclusion guidance
 /// (ARCHITECTURE.md#capture-and-masking).
@@ -413,12 +414,12 @@ mod tests {
 
     #[test]
     fn hyprland_bind_for_the_default_chord() {
-        let snippet = bind_snippet(Compositor::Hyprland, "ALT+F", Path::new(DEV_EXE), Bind::Hold);
+        let snippet = bind_snippet(Compositor::Hyprland, "ALT+F", Path::new(DEV_EXE), Bind { id: "lookup", mode: TriggerMode::HoldKey });
         assert_eq!(
             snippet.lines().filter(|line| !line.starts_with('#')).collect::<Vec<_>>(),
             [
-                "bind = ALT, F, exec, /home/u/chibipop/target/debug/chibipop ctl trigger-down",
-                "bindr = ALT, F, exec, /home/u/chibipop/target/debug/chibipop ctl trigger-up",
+                "bind = ALT, F, exec, /home/u/chibipop/target/debug/chibipop ctl bind-down -- lookup",
+                "bindr = ALT, F, exec, /home/u/chibipop/target/debug/chibipop ctl bind-up -- lookup",
             ]
         );
     }
@@ -426,12 +427,12 @@ mod tests {
     #[test]
     fn hyprland_bind_for_a_two_modifier_chord() {
         let snippet =
-            bind_snippet(Compositor::Hyprland, "CTRL+SHIFT+K", Path::new("chibipop"), Bind::Hold);
+            bind_snippet(Compositor::Hyprland, "CTRL+SHIFT+K", Path::new("chibipop"), Bind { id: "lookup", mode: TriggerMode::HoldKey });
         assert_eq!(
             snippet.lines().filter(|line| !line.starts_with('#')).collect::<Vec<_>>(),
             [
-                "bind = CTRL SHIFT, K, exec, chibipop ctl trigger-down",
-                "bindr = CTRL SHIFT, K, exec, chibipop ctl trigger-up",
+                "bind = CTRL SHIFT, K, exec, chibipop ctl bind-down -- lookup",
+                "bindr = CTRL SHIFT, K, exec, chibipop ctl bind-up -- lookup",
             ]
         );
     }
@@ -444,44 +445,67 @@ mod tests {
             Compositor::Hyprland,
             "ALT+A",
             Path::new(DEV_EXE),
-            Bind::Press(Verb::AnkiAdd),
+            Bind { id: "action", mode: TriggerMode::Press },
         );
         assert_eq!(
             snippet,
-            "bind = ALT, A, exec, /home/u/chibipop/target/debug/chibipop ctl anki-add"
+            "bind = ALT, A, exec, /home/u/chibipop/target/debug/chibipop ctl bind-down -- action"
         );
     }
 
     #[test]
-    fn trigger_modes_select_toggle_or_hold_bind_shape() {
+    fn configured_lookup_modes_emit_the_required_bind_events() {
         for compositor in [Compositor::Hyprland, Compositor::Sway] {
-            let toggle =
-                bind_snippet(compositor, "ALT+F", Path::new(DEV_EXE), trigger_bind(TriggerMode::Toggle));
-            assert!(toggle.ends_with("ctl toggle"), "{toggle}");
-            assert!(!toggle.contains("trigger-up"), "{toggle}");
+            let toggle = bind_snippet(
+                compositor,
+                "ALT+F",
+                Path::new(DEV_EXE),
+                Bind { id: "bind-7", mode: TriggerMode::Toggle },
+            );
+            assert!(toggle.contains("ctl bind-down -- bind-7"), "{toggle}");
+            assert!(!toggle.contains("bind-up"), "{toggle}");
 
-            let press =
-                bind_snippet(compositor, "ALT+F", Path::new(DEV_EXE), trigger_bind(TriggerMode::Press));
-            assert!(press.ends_with("ctl lookup"), "{press}");
-            assert!(!press.contains("trigger-up"), "{press}");
+            let press = bind_snippet(
+                compositor,
+                "ALT+F",
+                Path::new(DEV_EXE),
+                Bind { id: "bind-7", mode: TriggerMode::Press },
+            );
+            assert!(press.contains("ctl bind-down -- bind-7"), "{press}");
+            assert!(!press.contains("bind-up"), "{press}");
 
-            for mode in [TriggerMode::Live, TriggerMode::HoldKey, TriggerMode::HoldShift] {
-                let hold =
-                    bind_snippet(compositor, "ALT+F", Path::new(DEV_EXE), trigger_bind(mode));
-                assert!(hold.contains("trigger-down"), "{hold}");
-                assert!(hold.contains("trigger-up"), "{hold}");
-            }
+            let hold = bind_snippet(
+                compositor,
+                "ALT+F",
+                Path::new(DEV_EXE),
+                Bind { id: "bind-7", mode: TriggerMode::HoldKey },
+            );
+            assert!(hold.contains("ctl bind-down -- bind-7"), "{hold}");
+            assert!(hold.contains("ctl bind-up -- bind-7"), "{hold}");
+        }
+    }
+
+    #[test]
+    fn native_shell_bind_ids_start_after_the_option_delimiter() {
+        for compositor in [Compositor::Hyprland, Compositor::Sway] {
+            let snippet = bind_snippet(
+                compositor,
+                "ALT+F",
+                Path::new(DEV_EXE),
+                Bind { id: "-lookup", mode: TriggerMode::Press },
+            );
+            assert!(snippet.contains("ctl bind-down -- -lookup"), "{snippet}");
         }
     }
 
     #[test]
     fn sway_bind_normalizes_portal_modifiers() {
-        let snippet = bind_snippet(Compositor::Sway, "ALT+SUPER+CTRL+SHIFT+F", Path::new(DEV_EXE), Bind::Hold);
+        let snippet = bind_snippet(Compositor::Sway, "ALT+SUPER+CTRL+SHIFT+F", Path::new(DEV_EXE), Bind { id: "lookup", mode: TriggerMode::HoldKey });
         assert!(snippet.contains(&format!(
-            "bindsym --no-repeat Mod1+Mod4+Control+Shift+f exec {DEV_EXE} ctl trigger-down"
+            "bindsym --no-repeat Mod1+Mod4+Control+Shift+f exec {DEV_EXE} ctl bind-down -- lookup"
         )));
         assert!(snippet.contains(&format!(
-            "bindsym --release Mod1+Mod4+Control+Shift+f exec {DEV_EXE} ctl trigger-up"
+            "bindsym --release Mod1+Mod4+Control+Shift+f exec {DEV_EXE} ctl bind-up -- lookup"
         )));
     }
 
@@ -491,49 +515,30 @@ mod tests {
             Compositor::Sway,
             "SUPER+A",
             Path::new(DEV_EXE),
-            Bind::Press(Verb::AnkiAdd),
+            Bind { id: "action", mode: TriggerMode::Press },
         );
         assert_eq!(
             snippet,
-            format!("bindsym --no-repeat Mod4+a exec {DEV_EXE} ctl anki-add")
+            format!("bindsym --no-repeat Mod4+a exec {DEV_EXE} ctl bind-down -- action")
         );
         assert!(!snippet.contains("--release"), "a press bind has no release line: {snippet}");
     }
 
 
-    /// The snippet must name a verb that the socket accepts.
-    /// It must not use a string that the caller builds.
-    /// A verb rename must change the snippet.
-    #[test]
-    fn every_press_bind_names_the_verbs_own_wire_word() {
-        for verb in crate::control::VERBS {
-            for compositor in [Compositor::Hyprland, Compositor::Sway] {
-                let snippet =
-                    bind_snippet(compositor, "ALT+A", Path::new("chibipop"), Bind::Press(verb));
-                assert!(
-                    snippet.ends_with(&format!("chibipop ctl {}", verb.as_str())),
-                    "{snippet}"
-                );
-            }
-        }
-        let hold = bind_snippet(Compositor::Hyprland, "ALT+F", Path::new("chibipop"), Bind::Hold);
-        assert!(hold.contains(&format!("ctl {}", Verb::TriggerDown.as_str())), "{hold}");
-        assert!(hold.contains(&format!("ctl {}", Verb::TriggerUp.as_str())), "{hold}");
-    }
 
     #[test]
     fn unknown_compositor_gets_explicit_guidance_instead_of_sway_syntax() {
-        let hold = bind_snippet(Compositor::Other, "ALT+F", Path::new(DEV_EXE), Bind::Hold);
+        let hold = bind_snippet(Compositor::Other, "ALT+F", Path::new(DEV_EXE), Bind { id: "lookup", mode: TriggerMode::HoldKey });
         assert!(!hold.contains("bindsym"), "{hold}");
-        assert!(Compositor::Other.supports_bind("ALT+A", Bind::Press(Verb::AnkiAdd)));
+        assert!(Compositor::Other.supports_bind("ALT+A", Bind { id: "action", mode: TriggerMode::Press }));
         assert_eq!(
             bind_snippet(
                 Compositor::Other,
                 "ALT+A",
                 Path::new(DEV_EXE),
-                Bind::Press(Verb::AnkiAdd),
+                Bind { id: "action", mode: TriggerMode::Press },
             ),
-            format!("{DEV_EXE} ctl anki-add")
+            format!("{DEV_EXE} ctl bind-down -- action")
         );
     }
 
@@ -544,31 +549,31 @@ mod tests {
     #[test]
     fn a_path_with_a_space_is_quoted_for_both_dialects() {
         let exe = Path::new("/home/u/my builds/chibipop");
-        let hypr = bind_snippet(Compositor::Hyprland, "ALT+F", exe, Bind::Hold);
+        let hypr = bind_snippet(Compositor::Hyprland, "ALT+F", exe, Bind { id: "lookup", mode: TriggerMode::HoldKey });
         assert!(
-            hypr.contains("bind = ALT, F, exec, '/home/u/my builds/chibipop' ctl trigger-down"),
+            hypr.contains("bind = ALT, F, exec, '/home/u/my builds/chibipop' ctl bind-down -- lookup"),
             "{hypr}"
         );
         assert!(
-            hypr.contains("bindr = ALT, F, exec, '/home/u/my builds/chibipop' ctl trigger-up"),
+            hypr.contains("bindr = ALT, F, exec, '/home/u/my builds/chibipop' ctl bind-up -- lookup"),
             "{hypr}"
         );
-        let sway = bind_snippet(Compositor::Sway, "ALT+F", exe, Bind::Hold);
+        let sway = bind_snippet(Compositor::Sway, "ALT+F", exe, Bind { id: "lookup", mode: TriggerMode::HoldKey });
         assert!(
             sway.contains(
-                "bindsym --no-repeat Mod1+f exec '/home/u/my builds/chibipop' ctl trigger-down"
+                "bindsym --no-repeat Mod1+f exec '/home/u/my builds/chibipop' ctl bind-down -- lookup"
             ),
             "{sway}"
         );
         assert!(
             sway.contains(
-                "bindsym --release Mod1+f exec '/home/u/my builds/chibipop' ctl trigger-up"
+                "bindsym --release Mod1+f exec '/home/u/my builds/chibipop' ctl bind-up -- lookup"
             ),
             "{sway}"
         );
-        let press = bind_snippet(Compositor::Hyprland, "ALT+A", exe, Bind::Press(Verb::AnkiAdd));
+        let press = bind_snippet(Compositor::Hyprland, "ALT+A", exe, Bind { id: "action", mode: TriggerMode::Press });
         assert_eq!(
-            "bind = ALT, A, exec, '/home/u/my builds/chibipop' ctl anki-add",
+            "bind = ALT, A, exec, '/home/u/my builds/chibipop' ctl bind-down -- action",
             press
         );
     }
@@ -587,19 +592,19 @@ mod tests {
             Compositor::Niri,
             "SUPER+CTRL+A",
             Path::new("/home/u/my builds/chibipop"),
-            Bind::Press(Verb::AnkiAdd),
+            Bind { id: "-lookup", mode: TriggerMode::Press },
         );
         assert_eq!(
             press,
-            "\"Super+Ctrl+a\" repeat=false { spawn \"/home/u/my builds/chibipop\" \"ctl\" \"anki-add\"; };"
+            "\"Super+Ctrl+a\" repeat=false { spawn \"/home/u/my builds/chibipop\" \"ctl\" \"bind-down\" \"--\" \"-lookup\"; };"
         );
-        assert!(!Compositor::Niri.supports_bind("ALT+F", Bind::Hold));
+        assert!(!Compositor::Niri.supports_bind("ALT+F", Bind { id: "lookup", mode: TriggerMode::HoldKey }));
     }
 
     #[test]
     fn niri_quotes_a_digit_key_as_a_node_name() {
-        let snippet = bind_snippet(Compositor::Niri, "1", Path::new("chibipop"), Bind::Press(Verb::Search));
-        assert_eq!(snippet, "\"1\" repeat=false { spawn \"chibipop\" \"ctl\" \"search\"; };");
+        let snippet = bind_snippet(Compositor::Niri, "1", Path::new("chibipop"), Bind { id: "action", mode: TriggerMode::Press });
+        assert_eq!(snippet, "\"1\" repeat=false { spawn \"chibipop\" \"ctl\" \"bind-down\" \"--\" \"action\"; };");
     }
 
     #[test]
@@ -611,26 +616,18 @@ mod tests {
         assert_eq!(classify(false, false, Some("Sway")), Compositor::Sway);
     }
 
-    /// KDE and GNOME editors take one command for a press action. A hold
-    /// needs a key release that no editor can send. GNOME cannot suppress
-    /// key repeat for a command, so its help states the caveat.
     #[test]
     fn desktop_editors_get_commands_for_press_and_guidance_for_hold() {
-        let add = Bind::Press(Verb::AnkiAdd);
+        let add = Bind { id: "action", mode: TriggerMode::Press };
         let press = bind_snippet(Compositor::Kde, "ALT+A", Path::new(DEV_EXE), add);
-        assert_eq!(format!("{DEV_EXE} ctl anki-add"), press);
+        assert_eq!(format!("{DEV_EXE} ctl bind-down -- action"), press);
         assert_eq!(press, bind_snippet(Compositor::Gnome, "ALT+A", Path::new(DEV_EXE), add));
         assert!(Compositor::Kde.supports_bind("ALT+A", add));
 
-        let gnome_help = Compositor::Gnome.bind_help();
-        assert!(gnome_help.contains("repeats a held custom shortcut"), "{gnome_help}");
-        assert!(!Compositor::Kde.bind_help().contains("repeats"));
-
-        assert!(!Compositor::Kde.supports_bind("ALT+A", Bind::Hold));
-        assert!(!Compositor::Gnome.supports_bind("ALT+A", Bind::Hold));
-        let hold = bind_snippet(Compositor::Other, "ALT+A", Path::new(DEV_EXE), Bind::Hold);
-        assert!(hold.contains("cannot send key release"), "{hold}");
-        assert!(!hold.contains("ctl trigger-down"), "{hold}");
+        let hold = Bind { id: "lookup", mode: TriggerMode::HoldKey };
+        assert!(!Compositor::Kde.supports_bind("ALT+A", hold));
+        assert!(!Compositor::Gnome.supports_bind("ALT+A", hold));
+        assert!(!Compositor::Other.supports_bind("ALT+A", hold));
     }
 
     #[test]
@@ -639,12 +636,12 @@ mod tests {
             Compositor::Hyprland,
             "meta+control+alt+shift+F",
             Path::new(DEV_EXE),
-            Bind::Press(Verb::Lookup),
+            Bind { id: "action", mode: TriggerMode::Press },
         );
         assert_eq!(
             snippet,
             format!(
-                "bind = SUPER CTRL ALT SHIFT, F, exec, {DEV_EXE} ctl lookup"
+                "bind = SUPER CTRL ALT SHIFT, F, exec, {DEV_EXE} ctl bind-down -- action"
             )
         );
     }

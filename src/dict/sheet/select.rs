@@ -21,6 +21,9 @@
 //!   selector.
 //! - one of Yomitan's three image chrome classes as the subject, alone. See
 //!   [`Chrome`]. 72 of the 73 class tokens in the corpus name this chrome.
+//!   Descendants can constrain real GlossDoc ancestors. A `>` before the
+//!   container or image element is unsupported because its parent is virtual.
+//!   A `>` before the link remains valid because its parent is real.
 //!
 //! Every other form fails the compile step. Examples include a class outside
 //! the image chrome, an id, `*`, a sibling combinator, and a pseudo-element.
@@ -52,9 +55,10 @@ pub(super) enum Combinator {
 /// link at `1em`. Each such rule sizes a picture that its node leaves unsized.
 ///
 /// This grammar keeps a chrome class only as the subject compound, and only
-/// alone. The three elements form one node, so no selector can relate two
-/// elements or test an attribute on one that Yomitan adds.
-/// The compile step drops such a rule with the other unreadable forms.
+/// alone. Descendant constraints can name real GlossDoc ancestors.
+/// A `>` before the container or image names a virtual parent that this tree
+/// does not represent. The link's parent is real, so its child relation works.
+/// The compile step drops unsupported relations with other unreadable forms.
 ///
 /// Two variants represent three classes. `.gloss-image` inherits the
 /// container's font size and fills its box, so a length on either element
@@ -308,12 +312,16 @@ fn parse_complex(sel: &str, pool: &mut Pool) -> Option<Compiled> {
             return None;
         }
     }
-    // The three chrome elements belong to one node. A chrome class before the
-    // subject can relate two of them or place a node inside one.
-    // This tree has neither arrangement. An empty selector has no subject, so
-    // `split_last` also drops it.
+    // The chrome classes name virtual elements inside one image node. They can
+    // only form the subject, so a selector cannot relate two of those elements.
+    // A `>` before Container would name its virtual parent. Link has a real
+    // parent, and descendant constraints can use real GlossDoc ancestors.
+    // An empty selector has no subject, so `split_last` also drops it.
     let (subject, rest) = pool.compounds[at as usize..].split_last()?;
     if rest.iter().any(|c| c.chrome != Chrome::None) {
+        return None;
+    }
+    if subject.chrome == Chrome::Container && subject.combinator == Combinator::Child {
         return None;
     }
     let len = pool.compounds.len() as u32 - at;

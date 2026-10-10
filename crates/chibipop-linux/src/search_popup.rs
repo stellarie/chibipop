@@ -1,5 +1,5 @@
 use crate::popup::{paint, physical_theme, text::TextEngine};
-use chibipop::config::Config;
+use chibipop::config::{ProfileSession, ResolvedConfig};
 use chibipop::present::Presentation;
 use chibipop::ui::layout::{self, PopupScene, SceneRequest};
 use chibipop::ui::theme::Theme;
@@ -18,44 +18,42 @@ pub struct Definition {
     pub hovered: Option<String>,
     pub generation: u64,
     pub pointer: Point,
+    pub(crate) pointer_left: bool,
+    pub session: ProfileSession,
+    theme: Theme,
 }
 
 impl Definition {
-    pub fn new(presentation: Presentation, config: &Config, theme: &Theme,
+    pub fn new(presentation: Presentation, session: ProfileSession, theme: Theme,
         text: &mut TextEngine, media: Option<&mut MediaSurfaces>) -> anyhow::Result<Self> {
         let mut size = Size::new(620.0, 560.0);
-        let scene = measure(&presentation, config, theme, text, size, 1.0)?;
+        let scene = measure(&presentation, session.config(), &theme, text, size, 1.0)?;
         size.height = paint::surface_height(&scene).ceil().max(1.0);
         let mut definition = Self {
             presentation, scene, image: Handle::from_rgba(1, 1, vec![0; 4]),
-            size, scale: 1.0, scroll: 0.0, hovered: None, generation: 0, pointer: Point::ORIGIN,
+            size, scale: 1.0, scroll: 0.0, hovered: None, generation: 0,
+            pointer: Point::ORIGIN, pointer_left: false, session, theme,
         };
-        definition.paint(theme, text, media)?;
+        definition.paint(text, media)?;
         Ok(definition)
     }
 
-    pub fn resize(&mut self, config: &Config, theme: &Theme, text: &mut TextEngine,
-        media: Option<&mut MediaSurfaces>, size: Size, scale: f32) -> anyhow::Result<()> {
+    pub fn resize(&mut self, text: &mut TextEngine, media: Option<&mut MediaSurfaces>,
+        size: Size, scale: f32) -> anyhow::Result<()> {
         self.size = Size::new(size.width.clamp(120.0, 2048.0), size.height.clamp(80.0, 2048.0));
         self.scale = if scale.is_finite() { scale.clamp(0.5, 4.0) } else { 1.0 };
-        self.scene = measure(&self.presentation, config, theme, text, self.size, self.scale)?;
+        self.scene = measure(&self.presentation, self.session.config(), &self.theme, text, self.size, self.scale)?;
         self.hovered = None;
         self.generation = self.generation.wrapping_add(1);
-        self.paint(theme, text, media)
+        self.paint(text, media)
     }
 
-    pub fn restyle(&mut self, config: &Config, theme: &Theme, text: &mut TextEngine,
-        media: Option<&mut MediaSurfaces>) -> anyhow::Result<()> {
-        let mut size = Size::new(self.size.width, 560.0);
-        let scene = measure(&self.presentation, config, theme, text, size, self.scale)?;
-        size.height = (paint::surface_height(&scene) / self.scale).ceil();
-        self.resize(config, theme, text, media, size, self.scale)
-    }
-
-    pub fn hover(&mut self, point: Point, theme: &Theme, text: &mut TextEngine) -> Option<String> {
+    pub fn hover(&mut self, point: Point, text: &mut TextEngine) -> Option<String> {
         self.scene.hover_query((point.x * self.scale, point.y * self.scale),
-            self.scroll, &theme.font_name, text).ok().flatten()
+            self.scroll, &self.theme.font_name, text).ok().flatten()
     }
+    pub fn body_size(&self) -> f32 { self.theme.body_size }
+
 
     pub fn click(&self) -> Option<chibipop::controller::HitAction> {
         let x = self.pointer.x * self.scale;
@@ -66,9 +64,9 @@ impl Definition {
         }).map(|hit| hit.action)
     }
 
-    pub fn paint(&mut self, theme: &Theme, text: &mut TextEngine,
+    pub fn paint(&mut self, text: &mut TextEngine,
         media: Option<&mut MediaSurfaces>) -> anyhow::Result<()> {
-        let theme = physical_theme(theme, f64::from(self.scale));
+        let theme = physical_theme(&self.theme, f64::from(self.scale));
         self.scroll = self.scroll.clamp(0.0, (self.scene.content_h - self.scene.view_h).max(0.0));
         let width = (self.size.width * self.scale).ceil() as u32;
         let height = (self.size.height * self.scale).ceil() as u32;
@@ -85,7 +83,7 @@ impl Definition {
     }
 }
 
-fn measure(presentation: &Presentation, config: &Config, theme: &Theme,
+fn measure(presentation: &Presentation, config: &ResolvedConfig, theme: &Theme,
     text: &mut TextEngine, size: Size, scale: f32) -> anyhow::Result<PopupScene> {
     Ok(layout::scene(&SceneRequest {
         presentation, theme: &physical_theme(theme, f64::from(scale)),
@@ -101,7 +99,7 @@ fn themed_alpha(alpha: u8, opacity: f32) -> u8 {
     ((u32::from(alpha) * target + base / 2) / base).min(255) as u8
 }
 
-fn theme_with_css(config: &Config, css: Option<&str>, text: &mut TextEngine) ->
+fn theme_with_css(config: &ResolvedConfig, css: Option<&str>, text: &mut TextEngine) ->
     (Theme, Vec<chibipop::ui::css::CssError>) {
     let mut theme = if config.popup.theme == "light" { Theme::light() } else { Theme::dark() };
     theme.font_name.clone_from(&config.popup.font);
@@ -114,7 +112,7 @@ fn theme_with_css(config: &Config, css: Option<&str>, text: &mut TextEngine) ->
     (theme, errors)
 }
 
-pub fn theme(config: &Config, css_path: Option<&Path>, text: &mut TextEngine) -> Theme {
+pub fn theme(config: &ResolvedConfig, css_path: Option<&Path>, text: &mut TextEngine) -> Theme {
     let css = css_path.and_then(|path| std::fs::read_to_string(path).ok());
     let (theme, errors) = theme_with_css(config, css.as_deref(), text);
     for error in errors {
@@ -128,16 +126,27 @@ mod tests {
     use super::*;
     use chibipop::ui::layout::{ElemKind, MeasureRun, Measured, TextMeasure};
 
+    fn test_session(config: &ResolvedConfig) -> ProfileSession {
+        let mut saved = chibipop::config::Config::default();
+        let id = saved.default_profile.clone();
+        saved.update_profile(&id, &chibipop::config::ProfileSettings::from_resolved(config)).unwrap();
+        chibipop::config::ProfileCatalog::new(&saved, &[]).unwrap().session(Some(&id)).unwrap()
+    }
+
     #[test]
     fn native_scene_raster_hover_and_back_use_the_same_scaled_geometry() {
-        let config = Config::default();
+        let config = ResolvedConfig::default();
+        let session = test_session(&config);
         let mut engine = TextEngine::new("Noto Sans CJK JP");
-        let theme = theme(&config, None, &mut engine);
-        let mut definition = Definition::new(crate::popup::canned(), &config, &theme, &mut engine, None).unwrap();
+        let theme = theme(session.config(), None, &mut engine);
+        let mut definition = Definition::new(
+            crate::popup::canned(), session, theme.clone(), &mut engine, None,
+        ).unwrap();
         for scale in [1.0, 1.5, 2.0] {
             definition.scroll = 0.0;
-            definition.resize(&config, &theme, &mut engine, None, Size::new(620.0, 420.0), scale).unwrap();
-            let elem = definition.scene.elems.iter().find(|elem| elem.kind == ElemKind::Headword).unwrap();
+            definition.resize(&mut engine, None, Size::new(620.0, 420.0), scale).unwrap();
+            let elem = definition.scene.elems.iter()
+                .find(|elem| elem.kind == ElemKind::Headword).unwrap();
             let spans: Vec<_> = elem.styled_spans(&theme.font_name).collect();
             let run = MeasureRun { spans: &spans, max_w: elem.wrap_w };
             let mut measured = Measured::default();
@@ -148,13 +157,14 @@ mod tests {
             let slack = (elem.wrap_w - measured.lines[0].w).max(0.0) * elem.align.slack_before();
             let point = Point::new((elem.pen.0 + slack + glyph.x + glyph.w / 2.0) / scale,
                 (elem.pen.1 + glyph.y + glyph.h / 2.0) / scale);
-            assert!(definition.hover(point, &theme, &mut engine).is_some_and(|query| query.starts_with('漢')));
+            assert!(definition.hover(point, &mut engine).is_some_and(|query| query.starts_with('漢')));
             let back = definition.scene.hit_targets().into_iter().find(|hit|
                 hit.action == chibipop::controller::HitAction::Back).unwrap();
-            definition.pointer = Point::new((back.x.unwrap_or(0.0) + 1.0) / scale, (back.y + back.h / 2.0) / scale);
+            definition.pointer = Point::new((back.x.unwrap_or(0.0) + 1.0) / scale,
+                (back.y + back.h / 2.0) / scale);
             assert_eq!(definition.click(), Some(chibipop::controller::HitAction::Back));
             definition.scroll = f32::MAX;
-            definition.paint(&theme, &mut engine, None).unwrap();
+            definition.paint(&mut engine, None).unwrap();
             assert_eq!(definition.scroll, (definition.scene.content_h - definition.scene.view_h).max(0.0));
         }
     }
@@ -162,7 +172,7 @@ mod tests {
     #[test]
     fn search_defaults_keep_both_palettes_clear_and_emphasized() {
         for name in ["dark", "light"] {
-            let mut config = Config::default();
+            let mut config = ResolvedConfig::default();
             config.popup.theme = name.into();
             let mut engine = TextEngine::new("Noto Sans CJK JP");
             let (theme, errors) = theme_with_css(&config, None, &mut engine);
@@ -179,7 +189,7 @@ mod tests {
 
     #[test]
     fn css_maps_search_roles_and_overrides_emphasis_defaults() {
-        let config = Config::default();
+        let config = ResolvedConfig::default();
         let mut engine = TextEngine::new("Noto Sans CJK JP");
         let css = concat!(
             ".popup { background-color: #123456; border-color: #abcdef; ",
@@ -217,26 +227,30 @@ mod tests {
     }
 
     #[test]
-    fn larger_css_remeasures_definition_height_at_each_scale() {
-        let config = Config::default();
+    fn an_open_definition_keeps_its_profile_and_theme_after_a_profile_edit() {
+        let mut config = ResolvedConfig::default();
+        config.popup.theme = "dark".into();
+        let session = test_session(&config);
         let mut engine = TextEngine::new("Noto Sans CJK JP");
-        let base = theme(&config, None, &mut engine);
-        let mut larger = base.clone();
-        assert!(chibipop::ui::css::parse(
-            ".popup { padding: 24px; } .body { font-size: 28px; } .headword { font-size: 36px; }",
-            &mut larger,
-        ).is_empty());
+        let original_theme = theme(session.config(), None, &mut engine);
+        let mut presentation = crate::popup::canned();
+        presentation.collapsed.clear();
+        presentation.top.as_mut().unwrap().blocks.truncate(1);
+        let mut definition = Definition::new(
+            presentation, session.clone(), original_theme.clone(), &mut engine, None,
+        ).unwrap();
+
+        config.popup.theme = "light".into();
+        let future_session = test_session(&config);
+        let future_theme = theme(future_session.config(), None, &mut engine);
+        assert_ne!(session.config().popup.theme, future_session.config().popup.theme);
+        assert_ne!(original_theme.background, future_theme.background);
+
         for scale in [1.0, 1.5, 2.0] {
-            let mut presentation = crate::popup::canned();
-            presentation.collapsed.clear();
-            presentation.top.as_mut().unwrap().blocks.truncate(1);
-            let mut definition = Definition::new(presentation, &config, &base, &mut engine, None).unwrap();
-            definition.scale = scale;
-            definition.restyle(&config, &base, &mut engine, None).unwrap();
-            let old_height = definition.size.height;
-            definition.restyle(&config, &larger, &mut engine, None).unwrap();
-            assert!(definition.size.height > old_height);
-            assert!(definition.size.height <= 560.0);
+            definition.resize(&mut engine, None, Size::new(620.0, 420.0), scale).unwrap();
+            assert_eq!(definition.session, session);
+            assert_eq!(definition.theme.background, original_theme.background);
+            assert_eq!(definition.body_size(), original_theme.body_size);
             assert!(definition.scene.view_h > 0.0);
         }
     }
