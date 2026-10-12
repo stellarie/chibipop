@@ -680,6 +680,7 @@ enum Message {
     Scroll(bool),
     EdgeAutoscroll(bool),
     SidePanel(bool),
+    HideOnCursorExit(bool),
     LayerPicked(String),
     /// The layout-mode picker label. [`LAYOUT_MODES`] maps the label back,
     /// so the call site does not compare strings or indexes.
@@ -835,6 +836,7 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
         Message::Scroll(on) => app.form.cfg.popup.scroll_popup = on,
         Message::EdgeAutoscroll(on) => app.form.cfg.popup.edge_autoscroll = on,
         Message::SidePanel(on) => app.form.cfg.popup.side_panel = on,
+        Message::HideOnCursorExit(on) => app.form.cfg.popup.hide_on_cursor_exit = on,
         Message::LayerPicked(layer) => {
             app.form.cfg.popup.layer = if layer == "top" { PopupLayer::Top } else { PopupLayer::Overlay };
         }
@@ -1775,6 +1777,10 @@ fn popup_page(app: &App) -> Element<'_, Message> {
             checkbox(app.form.cfg.popup.side_panel)
                 .label("Show other matching entries")
                 .on_toggle(Message::SidePanel),
+            checkbox(app.form.cfg.popup.hide_on_cursor_exit)
+                .label("Hide popup on cursor exit")
+                .on_toggle(Message::HideOnCursorExit),
+            hint("When off, the popup stays until you click outside it. That click only closes the popup."),
         ].spacing(10)),
         card("Result content", column![
             labeled(

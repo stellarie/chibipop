@@ -50,6 +50,13 @@ static CLICK_ARMED: AtomicBool = AtomicBool::new(false);
 /// is the user's click on another window. Chibipop only adds a hide action.
 static OUTSIDE_WATCH: AtomicBool = AtomicBool::new(false);
 
+/// Consumes a watched outside press and its
+/// release.
+static OUTSIDE_SWALLOW: AtomicBool = AtomicBool::new(false);
+
+/// Buttons whose outside press the hook consumed.
+static SWALLOWED_BUTTONS: AtomicU8 = AtomicU8::new(0);
+
 /// Stores one outside button press in screen coordinates.
 static PENDING_OUTSIDE: AtomicI64 = AtomicI64::new(NO_POINT);
 
@@ -476,13 +483,60 @@ fn record_outside_click(point: PhysPoint) {
     }
 }
 
-/// Reads and records one unarmed button press from a low-level hook event.
-unsafe fn record_outside_click_from_lparam(lparam: LPARAM) {
+/// Returns the button bit for one message.
+/// `mouse_data_high` names the X button.
+fn outside_button_bit(message: u32, mouse_data_high: u32) -> u8 {
+    match message {
+        WM_LBUTTONDOWN | WM_LBUTTONUP => 1,
+        WM_RBUTTONDOWN | WM_RBUTTONUP => 2,
+        WM_MBUTTONDOWN | WM_MBUTTONUP => 4,
+        WM_XBUTTONDOWN | WM_XBUTTONUP if mouse_data_high == 2 => 16,
+        WM_XBUTTONDOWN | WM_XBUTTONUP => 8,
+        _ => 0,
+    }
+}
+
+/// Records an outside press. Returns `true`
+/// when the hook must consume it.
+fn outside_press(bit: u8, point: PhysPoint) -> bool {
+    record_outside_click(point);
+    if bit != 0 && OUTSIDE_WATCH.load(Ordering::SeqCst) && OUTSIDE_SWALLOW.load(Ordering::SeqCst) {
+        SWALLOWED_BUTTONS.fetch_or(bit, Ordering::SeqCst);
+        true
+    } else {
+        SWALLOWED_BUTTONS.fetch_and(!bit, Ordering::SeqCst);
+        false
+    }
+}
+
+/// Returns `true` for the release of a
+/// consumed outside press.
+fn outside_release(bit: u8) -> bool {
+    bit != 0 && SWALLOWED_BUTTONS.fetch_and(!bit, Ordering::SeqCst) & bit != 0
+}
+
+/// Records an unarmed press from a hook event.
+/// Returns `true` when the hook must consume it.
+unsafe fn outside_press_from_lparam(message: u32, lparam: LPARAM) -> bool {
     // SAFETY: `mouse_hook_proc` calls this only when `code >= 0` and
     // the message is a button-down edge. The `WH_MOUSE_LL` contract
     // guarantees a valid, aligned `MSLLHOOKSTRUCT` for this call.
     let data = unsafe { &*(lparam.0 as *const MSLLHOOKSTRUCT) };
-    record_outside_click(PhysPoint { x: data.pt.x, y: data.pt.y });
+    let bit = outside_button_bit(message, data.mouseData >> 16);
+    outside_press(bit, PhysPoint { x: data.pt.x, y: data.pt.y })
+}
+
+/// Returns `true` when a hook release event
+/// belongs to a consumed outside press.
+unsafe fn outside_release_from_lparam(message: u32, lparam: LPARAM) -> bool {
+    if SWALLOWED_BUTTONS.load(Ordering::SeqCst) == 0 {
+        return false;
+    }
+    // SAFETY: `mouse_hook_proc` calls this only when `code >= 0` and
+    // the message is a button-up edge. The `WH_MOUSE_LL` contract
+    // guarantees a valid, aligned `MSLLHOOKSTRUCT` for this call.
+    let data = unsafe { &*(lparam.0 as *const MSLLHOOKSTRUCT) };
+    outside_release(outside_button_bit(message, data.mouseData >> 16))
 }
 
 /// Stores one wheel event's delta.
@@ -506,9 +560,19 @@ fn accumulate_wheel(delta: i32) {
 /// An armed wheel event returns before the next hook receives it.
 /// An outside Press-mode click reaches the next hook because it belongs to
 /// another window. Chibipop only adds a hide action.
+/// [`OUTSIDE_SWALLOW`] consumes it instead.
 unsafe extern "system" fn mouse_hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if code >= 0 {
-        match wparam.0 as u32 {
+        let message = wparam.0 as u32;
+        match message {
+            // Consume the release of a consumed
+            // outside press before arming checks.
+            WM_LBUTTONUP | WM_RBUTTONUP | WM_MBUTTONUP | WM_XBUTTONUP
+                if catch_unwind(|| unsafe { outside_release_from_lparam(message, lparam) })
+                    .unwrap_or(false) =>
+            {
+                return LRESULT(1);
+            }
             WM_MOUSEMOVE => {
                 let _ = catch_unwind(|| unsafe { record_mouse_move(lparam) });
             }
@@ -517,12 +581,6 @@ unsafe extern "system" fn mouse_hook_proc(code: i32, wparam: WPARAM, lparam: LPA
                     record_pointer_event(PointerButton::Left, true, lparam)
                 });
                 return LRESULT(1);
-            }
-            WM_LBUTTONDOWN
-                if !CLICK_ARMED.load(Ordering::SeqCst)
-                    && OUTSIDE_WATCH.load(Ordering::SeqCst) =>
-            {
-                let _ = catch_unwind(|| unsafe { record_outside_click_from_lparam(lparam) });
             }
             WM_LBUTTONUP if CLICK_ARMED.load(Ordering::SeqCst) => {
                 let _ = catch_unwind(|| unsafe {
@@ -536,20 +594,21 @@ unsafe extern "system" fn mouse_hook_proc(code: i32, wparam: WPARAM, lparam: LPA
                 });
                 return LRESULT(1);
             }
-            WM_RBUTTONDOWN
-                if !CLICK_ARMED.load(Ordering::SeqCst)
-                    && OUTSIDE_WATCH.load(Ordering::SeqCst) =>
-            {
-                let _ = catch_unwind(|| unsafe { record_outside_click_from_lparam(lparam) });
-            }
             WM_RBUTTONUP if CLICK_ARMED.load(Ordering::SeqCst) => {
                 let _ = catch_unwind(|| unsafe {
                     record_pointer_event(PointerButton::Right, false, lparam)
                 });
                 return LRESULT(1);
             }
-            WM_MBUTTONDOWN | WM_XBUTTONDOWN if OUTSIDE_WATCH.load(Ordering::SeqCst) => {
-                let _ = catch_unwind(|| unsafe { record_outside_click_from_lparam(lparam) });
+            WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN | WM_XBUTTONDOWN
+                if !CLICK_ARMED.load(Ordering::SeqCst)
+                    && OUTSIDE_WATCH.load(Ordering::SeqCst) =>
+            {
+                if catch_unwind(|| unsafe { outside_press_from_lparam(message, lparam) })
+                    .unwrap_or(false)
+                {
+                    return LRESULT(1);
+                }
             }
             WM_MOUSEWHEEL if SCROLL_ARMED.load(Ordering::SeqCst) => {
                 let _ = catch_unwind(|| unsafe { record_wheel(lparam) });
@@ -760,6 +819,12 @@ impl Hooks {
         if !watch {
             PENDING_OUTSIDE.store(NO_POINT, Ordering::SeqCst);
         }
+    }
+
+    /// Consumes a watched outside press and its
+    /// release.
+    pub fn set_outside_swallow(swallow: bool) {
+        OUTSIDE_SWALLOW.store(swallow, Ordering::SeqCst);
     }
 
     /// Takes one observed outside button press.
@@ -1092,6 +1157,39 @@ mod tests {
         record_outside_click(point);
         Hooks::set_outside_watch(false);
         assert_eq!(None, Hooks::take_outside_click());
+    }
+
+    #[test]
+    fn outside_swallow_consumes_the_press_and_its_release() {
+        let _g = pointer_guard();
+        Hooks::set_click_armed(false);
+        SWALLOWED_BUTTONS.store(0, Ordering::SeqCst);
+        let point = PhysPoint { x: 10, y: 20 };
+        let left = outside_button_bit(WM_LBUTTONDOWN, 0);
+
+        Hooks::set_outside_swallow(false);
+        Hooks::set_outside_watch(true);
+        assert!(!outside_press(left, point), "the default passes the click on");
+        assert_eq!(Some(point), Hooks::take_outside_click());
+        assert!(!outside_release(outside_button_bit(WM_LBUTTONUP, 0)));
+
+        Hooks::set_outside_swallow(true);
+        assert!(outside_press(left, point));
+        assert_eq!(Some(point), Hooks::take_outside_click());
+        Hooks::set_outside_watch(false);
+        Hooks::set_outside_swallow(false);
+        assert!(!outside_release(outside_button_bit(WM_RBUTTONUP, 0)), "another button passes");
+        assert!(outside_release(outside_button_bit(WM_LBUTTONUP, 0)));
+        assert!(!outside_release(outside_button_bit(WM_LBUTTONUP, 0)), "one release only");
+
+        Hooks::set_outside_swallow(true);
+        assert!(!outside_press(left, point), "no watch, no swallow");
+        assert_eq!(None, Hooks::take_outside_click());
+
+        assert_ne!(outside_button_bit(WM_XBUTTONDOWN, 1), outside_button_bit(WM_XBUTTONDOWN, 2));
+        assert_eq!(outside_button_bit(WM_XBUTTONDOWN, 2), outside_button_bit(WM_XBUTTONUP, 2));
+        Hooks::set_outside_swallow(false);
+        SWALLOWED_BUTTONS.store(0, Ordering::SeqCst);
     }
 
     #[test]

@@ -670,6 +670,9 @@ pub struct Controller {
     last_accepted: Option<PhysPoint>,
     /// The point of the newest lookup. The dwell re-check uses this point.
     last_dispatch: Option<PhysPoint>,
+    /// The point of the lookup that produced the
+    /// shown popup.
+    shown_dispatch: Option<PhysPoint>,
     /// Whether the active trigger is held or latched.
     trigger_held: bool,
     /// The Anki button height from the latest tick.
@@ -729,6 +732,7 @@ impl Controller {
             pending_cursor: None,
             last_accepted: None,
             last_dispatch: None,
+            shown_dispatch: None,
             trigger_held: false,
             button_h: 0,
             armed_ticks: 0,
@@ -783,7 +787,27 @@ impl Controller {
 
     pub fn watches_outside_clicks(&self) -> bool {
         self.selected_text_active()
-            || (self.trigger_mode() == TriggerMode::Press && self.surface.is_some())
+            || (self.surface.is_some()
+                && (self.trigger_mode() == TriggerMode::Press || !self.hides_on_cursor_exit()))
+    }
+
+    /// Whether the bin must consume the outside
+    /// press that hides the popup.
+    pub fn swallows_outside_clicks(&self) -> bool {
+        self.watches_outside_clicks() && !self.hides_on_cursor_exit()
+    }
+
+    /// Whether a cursor miss hides the popup.
+    /// The root popup's profile decides.
+    fn hides_on_cursor_exit(&self) -> bool {
+        self.parents.first().or(self.surface.as_ref())
+            .is_none_or(|surface| surface.session.config().popup.hide_on_cursor_exit)
+    }
+
+    /// Whether a miss for `request` keeps the
+    /// popup. Key lookups never keep it.
+    fn keeps_popup_on_miss(&self, request: &LookupRequest) -> bool {
+        !request.replace_chain && self.surface.is_some() && !self.hides_on_cursor_exit()
     }
 
     pub fn popup_depth(&self) -> usize {
@@ -1936,8 +1960,17 @@ impl Controller {
         let Some(request) = self.request_session.take().filter(|request| request.id == id) else {
             return Vec::new();
         };
+        let keep = self.keeps_popup_on_miss(&request);
         match outcome {
+            LookupOutcome::Hide if keep => {
+                self.last_dispatch = self.shown_dispatch;
+                Vec::new()
+            }
             LookupOutcome::Hide => self.hide(),
+            LookupOutcome::Failed(message) if keep => {
+                self.last_dispatch = self.shown_dispatch;
+                vec![Command::WarnLookupFailed(message)]
+            }
             LookupOutcome::Failed(message) => {
                 let mut out = vec![Command::WarnLookupFailed(message)];
                 out.extend(self.hide());
@@ -1945,6 +1978,7 @@ impl Controller {
             }
             LookupOutcome::DrillDown(presentation) => self.push_drilldown(*presentation, request.session),
             LookupOutcome::Ready { presentation, anchor, orientation, matched, scan } => {
+                self.shown_dispatch = self.last_dispatch;
                 self.ready(
                     *presentation,
                     anchor,
@@ -2534,6 +2568,13 @@ mod tests {
     }
 
     fn session_for_controller_cfg(cfg: &ControllerConfig) -> ProfileSession {
+        session_for_controller_cfg_with(cfg, |_| {})
+    }
+
+    fn session_for_controller_cfg_with(
+        cfg: &ControllerConfig,
+        edit: impl FnOnce(&mut crate::config::ProfileSettings),
+    ) -> ProfileSession {
         assert!(matches!(cfg.trigger_mode, TriggerMode::Live | TriggerMode::Press));
         let mut config = crate::config::Config {
             live_lookup: cfg.trigger_mode == TriggerMode::Live,
@@ -2578,6 +2619,7 @@ mod tests {
             settings.anki.triple_click = cfg.triple_click;
             settings.actions.search.selected_opens_sentence_search =
                 cfg.selected_text_sentence_search;
+            edit(settings);
         }
         config.debug.show_lookup_log = cfg.log_lookups;
         crate::config::ProfileCatalog::new(&config, &[])
@@ -3817,6 +3859,113 @@ mod tests {
         assert!(c.handle(ready_id(stale, "\u{72AC}", ANCHOR)).is_empty());
         assert!(!c.is_shown());
         assert!(c.handle(Event::PointerDownOutside).is_empty(), "nothing to hide twice");
+    }
+
+    fn exit_keeping_controller(cfg: ControllerConfig) -> Controller {
+        let session = session_for_controller_cfg_with(&cfg, |settings| {
+            settings.popup.hide_on_cursor_exit = false;
+        });
+        remember_test_session(&session);
+        Controller::new(cfg, session)
+    }
+
+    fn cursor_miss(c: &mut Controller, pos: PhysPoint) -> Vec<Command> {
+        let out = c.handle(Event::CursorMoved { pos });
+        assert!(
+            out.iter().any(|command| matches!(command, Command::RequestLookup { .. })),
+            "the cursor left the sticky region, so it asks again",
+        );
+        let id = c.latest;
+        c.handle(Event::LookupResult { id, outcome: LookupOutcome::Hide })
+    }
+
+    #[test]
+    fn by_default_a_cursor_miss_hides_the_popup() {
+        let mut c = test_controller(cfg());
+        shown(&mut c);
+        assert!(!c.watches_outside_clicks());
+        assert!(!c.swallows_outside_clicks());
+        let out = cursor_miss(&mut c, PhysPoint { x: 900, y: 900 });
+        assert!(out.contains(&Command::HidePopup));
+        assert!(!c.is_shown());
+    }
+
+    #[test]
+    fn with_hide_on_cursor_exit_off_only_an_outside_click_hides_the_popup() {
+        let mut c = exit_keeping_controller(cfg());
+        shown(&mut c);
+        assert!(c.watches_outside_clicks());
+        assert!(c.swallows_outside_clicks());
+
+        let out = cursor_miss(&mut c, PhysPoint { x: 900, y: 900 });
+        assert!(!out.contains(&Command::HidePopup), "{out:?}");
+        assert!(c.is_shown());
+        let out = cursor_miss(&mut c, PhysPoint { x: 1500, y: 40 });
+        assert!(!out.contains(&Command::HidePopup), "{out:?}");
+        assert!(c.is_shown());
+
+        c.handle(Event::CursorMoved { pos: PhysPoint { x: 40, y: 900 } });
+        let id = c.latest;
+        let out = c.handle(Event::LookupResult { id, outcome: LookupOutcome::Failed("ocr".into()) });
+        assert_eq!(out, vec![Command::WarnLookupFailed("ocr".into())]);
+        assert!(c.is_shown(), "a failed cursor lookup keeps the popup too");
+
+        let out = c.handle(Event::PointerDownOutside);
+        assert!(out.contains(&Command::HidePopup));
+        assert!(!c.is_shown());
+        assert!(!c.watches_outside_clicks());
+        assert!(!c.swallows_outside_clicks());
+    }
+
+    #[test]
+    fn with_hide_on_cursor_exit_off_another_word_replaces_the_popup() {
+        let mut c = exit_keeping_controller(cfg());
+        shown(&mut c);
+        cursor_miss(&mut c, PhysPoint { x: 900, y: 900 });
+        c.handle(Event::CursorMoved { pos: PhysPoint { x: 1200, y: 600 } });
+        let id = c.latest;
+        let other = PhysRect { x: 1190, y: 590, w: 20, h: 20 };
+        let out = c.handle(ready_id(id, "\u{72AC}", other));
+        assert!(out.iter().any(|command| matches!(
+            command,
+            Command::ShowPopup { anchor, .. } if *anchor == other
+        )), "{out:?}");
+    }
+
+    #[test]
+    fn a_kept_miss_restores_the_dwell_point() {
+        let mut c = exit_keeping_controller(cfg());
+        shown(&mut c);
+        let shown_at = c.last_dispatch;
+        cursor_miss(&mut c, PhysPoint { x: 900, y: 900 });
+        assert_eq!(shown_at, c.last_dispatch);
+    }
+
+    #[test]
+    fn with_hide_on_cursor_exit_off_a_press_miss_still_hides() {
+        let mut c = exit_keeping_controller(press_cfg());
+        let pos = PhysPoint { x: 110, y: 110 };
+        pressed_and_shown(&mut c, pos);
+        assert!(c.swallows_outside_clicks());
+        bind_down(&mut c, "press", TriggerMode::Press, PhysPoint { x: 900, y: 900 });
+        let id = c.latest;
+        let out = c.handle(Event::LookupResult { id, outcome: LookupOutcome::Hide });
+        assert!(out.contains(&Command::HidePopup));
+        assert!(!c.is_shown());
+    }
+
+    #[test]
+    fn with_hide_on_cursor_exit_off_hold_release_still_hides() {
+        let mut c = exit_keeping_controller(hold_cfg());
+        bind_down(&mut c, "hold", TriggerMode::HoldKey, PhysPoint { x: 110, y: 110 });
+        let id = c.latest;
+        c.handle(ready_id(id, "\u{732B}", ANCHOR));
+        c.handle(placed(POPUP, 200, 200));
+        let out = cursor_miss(&mut c, PhysPoint { x: 900, y: 900 });
+        assert!(!out.contains(&Command::HidePopup), "{out:?}");
+        assert!(c.watches_outside_clicks());
+        let out = bind_up(&mut c, "hold");
+        assert!(out.contains(&Command::HidePopup), "{out:?}");
     }
 
     /// A press while the popup is still placing waits for the rectangle.

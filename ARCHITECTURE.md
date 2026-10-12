@@ -177,11 +177,15 @@ Worker: capture -> mask -> OCR -> lookup -> present --result--> Controller
   `Event::PopupPlaced { rect }`.
 - Comments in `crates/chibipop-linux/src/popup/surface.rs` and `popup/text.rs` describe
   the Wayland surface protocol rules.
-- A click catcher exists in Press mode and for selected-text popups while a popup is placed. The daemon gives every
+- A click catcher exists in Press mode, for selected-text popups, and with `popup.hide_on_cursor_exit = false`
+  while a popup is placed (`Controller::watches_outside_clicks`). The daemon gives every
   output a transparent full-output layer surface at the popup layer. Its input region covers
   the output except the popup rectangle. The catcher is never unmapped. Hide clears its input
   region, and a button press on the catcher hides the popup. The catcher swallows that click
   because there is no evdev path and the popup takes no focus.
+- `popup.hide_on_cursor_exit = false` keeps the popup after a cursor lookup (hover or Dwell
+  re-check) misses or fails. Only a key action or an outside click hides it. Windows consumes that
+  outside press and its release when `Controller::swallows_outside_clicks` is true.
 - The daemon routes each event of one `wl_pointer` frame by surface. The catcher and the
   popup are one client, so a compositor can put a leave from the catcher and an enter onto
   the popup in one frame. A per-frame owner would hide that enter from the popup, and the

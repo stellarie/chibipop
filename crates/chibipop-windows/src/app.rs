@@ -2600,6 +2600,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                 drive!(Event::Tick { cursor: cursor_pos, button_h });
             }
 
+            Hooks::set_outside_swallow(controller.swallows_outside_clicks());
             Hooks::set_outside_watch(
                 controller.watches_outside_clicks(),
             );

@@ -905,6 +905,24 @@ shows the next word rather than holding the previous popup. That is what you
 want when scanning a line, and it is why the held area is the word plus the
 popup rather than the box enclosing both.
 
+### `hide_on_cursor_exit`
+
+`popup.hide_on_cursor_exit` is **on** by default, and Settings shows it as
+**Hide popup on cursor exit** under Popup → Behavior. When the cursor leaves
+the sticky region and the next cursor lookup finds no text, the popup hides.
+
+Turn it off to keep the popup until you click outside it. A cursor lookup
+that finds no text — or fails — then leaves the popup where it is. Hovering
+another word still replaces the popup with that word. A button press outside
+the popup hides it and does nothing else: the press, and its release, never
+reach the window under the popup, so a stray click cannot act on that window.
+Clicks inside the popup work as usual.
+
+Key actions still hide the popup in every mode: releasing a Hold bind,
+turning a Toggle bind off, and a Press lookup that finds no text (Escape too, on Windows).
+The setting belongs to a profile; the root popup's profile decides for the
+whole popup chain.
+
 ### `scroll_popup`
 
 Lets the wheel scroll a popup whose content overflows the `max_height_percent`

@@ -67,6 +67,11 @@ label = "Show other matching entries"
 help = "Places additional dictionary results beside the main result."
 
 [[tabs.sections.entries]]
+id = "popup-hide-on-cursor-exit"
+label = "Hide popup on cursor exit"
+help = "When off, the popup stays until you click outside it. That click only closes the popup."
+
+[[tabs.sections.entries]]
 id = "popup-sub-popups"
 label = "Look up words inside the popup"
 help = "Hover over popup text to open another definition."

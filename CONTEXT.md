@@ -312,16 +312,19 @@ If a press finds no text, the popup hides. A press over the popup also hides it 
 no text. A button press outside the popup also hides it. The key release does nothing. Per-character
 lookup is inert in this mode.
 On Windows, the low-level mouse hook observes an outside button press without swallowing it, so the
-press reaches the window under the popup.
+press reaches the window under the popup, unless `popup.hide_on_cursor_exit` is off.
 _Avoid_: one-shot mode, sticky popup
 
 **Click catcher**:
-The transparent full-output layer surface that the daemon gives every output while a Press-mode popup is placed.
+The transparent full-output layer surface that the daemon gives every output while a Press-mode popup,
+a selected-text popup, or a popup with `popup.hide_on_cursor_exit = false` is placed.
 Its input region covers the output except a hole over the popup rectangle. It is never unmapped. When
 the daemon hides the popup, it clears the input region. It swallows the outside button press, so that
 press does not reach the window under it.
 Wayland gives a client no other way to observe the click because there is no evdev path and the popup
 takes no focus.
+With `popup.hide_on_cursor_exit = false`, the Windows mouse hook also consumes the outside press and
+its release, so on both platforms that click only hides the popup.
 _Avoid_: dismiss layer, shield
 
 **Control socket**:
