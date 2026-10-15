@@ -26,6 +26,13 @@ const TRAY_UID: u32 = 1;
 /// The tray icon of chibipop.
 const ICON_BYTES: &[u8] = include_bytes!("../../assets/chibipop.ico");
 
+/// Maps a tray mouse event to the command it runs without a menu.
+///
+/// A left click opens the settings window.
+fn left_click_command(event: u32) -> Option<TrayCommand> {
+    (event == WM_LBUTTONUP).then_some(TrayCommand::OpenSettings)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TrayCommand {
     OpenSettings,
@@ -190,10 +197,11 @@ impl Tray {
         if msg != WM_TRAYICON {
             return None;
         }
-        match lparam.0 as u32 {
-            WM_RBUTTONUP => self.show_menu(before_blocking),
-            _ => None,
+        let event = lparam.0 as u32;
+        if event == WM_RBUTTONUP {
+            return self.show_menu(before_blocking);
         }
+        left_click_command(event)
     }
 
     /// Shows a balloon notification.
@@ -448,6 +456,13 @@ fn ico_frame_bytes(ico: &[u8], desired: u32) -> Option<&[u8]> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_left_click_opens_settings_and_other_events_do_nothing() {
+        assert_eq!(Some(TrayCommand::OpenSettings), left_click_command(WM_LBUTTONUP));
+        assert_eq!(None, left_click_command(WM_MOUSEMOVE));
+        assert_eq!(None, left_click_command(WM_RBUTTONUP));
+    }
+
     use super::*;
 
     /// Shell32 reads the tip up to the NUL.
