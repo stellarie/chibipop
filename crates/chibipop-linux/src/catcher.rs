@@ -130,7 +130,7 @@ struct Pane {
     active: bool,
 }
 
-/// The transparent full-output input layer for Press mode.
+/// The full-output input layer for outside clicks.
 pub struct Catcher {
     qh: QueueHandle<App>,
     compositor: CompositorState,

@@ -171,6 +171,7 @@ Per-character lookup is inert in Press and Toggle modes.
 Hovering text in an existing popup can open a child popup.
 The parent stays visible.
 The click catcher exists in Press mode while a popup has a rectangle.
+It also exists in every mode when **Hide popup on cursor exit** is off.
 It consumes an outside click and clears its input region when the popup hides.
 
 Apply requests changed portal bindings without a daemon restart.

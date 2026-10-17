@@ -158,6 +158,7 @@ const ID_ANKI_TEST: i32 = 129;
 const ID_TAB: i32 = 130;
 const ID_PREFER_VERT: i32 = 132;
 const ID_SIDE_PANEL: i32 = 134;
+const ID_HIDE_ON_CURSOR_EXIT: i32 = 188;
 const ID_FIELD_MAP_TOGGLE: i32 = 135;
 const ID_CAPTURE_W: i32 = 136;
 const ID_CAPTURE_H: i32 = 137;
@@ -3302,6 +3303,7 @@ fn profile_override_paths(id: SettingId) -> &'static [&'static str] {
         SettingId::PopupScroll => &["popup.scroll_popup"],
         SettingId::PopupEdgeAutoscroll => &["popup.edge_autoscroll"],
         SettingId::PopupSidePanel => &["popup.side_panel"],
+        SettingId::PopupHideOnCursorExit => &["popup.hide_on_cursor_exit"],
         SettingId::PopupCaptureExclusion => &["popup.exclude_from_capture"],
         SettingId::PopupLayout => &["popup.layout_mode"],
         SettingId::PopupDictionaryStyling => &["popup.dictionary_styling"],
@@ -6344,6 +6346,9 @@ impl SettingsWindow {
                 checkbox!(ID_EDGE_AUTOSCROLL, form.cfg.popup.edge_autoscroll);
             }
             SettingId::PopupSidePanel => { checkbox!(ID_SIDE_PANEL, form.cfg.popup.side_panel); }
+            SettingId::PopupHideOnCursorExit => {
+                checkbox!(ID_HIDE_ON_CURSOR_EXIT, form.cfg.popup.hide_on_cursor_exit);
+            }
             SettingId::PopupCaptureExclusion => {
                 checkbox!(ID_EXCLUDE, form.cfg.popup.exclude_from_capture);
             }
@@ -7367,6 +7372,7 @@ impl SettingsWindow {
             form.cfg.popup.scroll_popup = checked(ID_SCROLL);
             form.cfg.popup.edge_autoscroll = checked(ID_EDGE_AUTOSCROLL);
             form.cfg.popup.side_panel = checked(ID_SIDE_PANEL);
+            form.cfg.popup.hide_on_cursor_exit = checked(ID_HIDE_ON_CURSOR_EXIT);
             form.cfg.popup.layout_mode = layout_mode_at(combo_index(ID_LAYOUT_MODE));
             form.cfg.popup.dictionary_styling = checked(ID_DICT_STYLING);
             form.cfg.popup.show_examples = checked(ID_SHOW_EXAMPLES);

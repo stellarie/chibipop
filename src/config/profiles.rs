@@ -279,7 +279,7 @@ pub const PROFILE_FIELDS: &[&str] = &[
     "popup.max_height_percent", "popup.summary_chars", "popup.font", "popup.highlight_match",
     "popup.scroll_popup", "popup.edge_autoscroll", "popup.side_panel", "popup.layer", "popup.layout_mode",
     "popup.dictionary_styling", "popup.show_examples", "popup.show_attributions", "popup.show_images",
-    "popup.show_part_of_speech", "ocr.max_ocr_passes", "ocr.prefer_vertical", "ocr.capture_width",
+    "popup.show_part_of_speech", "popup.hide_on_cursor_exit", "ocr.max_ocr_passes", "ocr.prefer_vertical", "ocr.capture_width",
     "ocr.capture_height", "ocr.scan_alphanumeric", "ocr.discard_furigana", "ocr.language", "ocr.engine",
     "per_character_lookup", "dictionaries.terms", "dictionaries.pitch", "dictionaries.per_language",
     "anki.enabled", "anki.overwrite_duplicates", "anki.url", "anki.deck", "anki.model", "anki.notify_on_add",
