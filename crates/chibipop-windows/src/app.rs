@@ -1851,7 +1851,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
     Hooks::set_configured_binds(&catalog.config.binds);
 
     // The tray provides the control surface for this process.
-    let mut tray = Tray::create(popup.hwnd(), &cfg).context("creating the tray icon")?;
+    let mut tray = Tray::create(&cfg).context("creating the tray icon")?;
 
     // Use a thread timer without a window.
     let timer_id = unsafe { SetTimer(None, 0, DISPATCH_TICK_MS, None) };
@@ -2105,6 +2105,9 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
         let got = unsafe { GetMessageW(&mut msg, None, 0, 0) };
         if got.0 <= 0 {
             break; // 0 means WM_QUIT. -1 means an error. Stop the message loop in either case.
+        }
+        if msg.message != WM_TIMER {
+            crate::ui::tray::trace("loop", msg.hwnd, msg.message, msg.wParam, msg.lParam);
         }
 
         let mut search_focused = crate::ui::search_window::is_foreground();

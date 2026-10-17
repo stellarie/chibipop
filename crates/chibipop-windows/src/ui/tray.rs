@@ -6,6 +6,8 @@
 use anyhow::{Context, Result};
 use std::mem::size_of;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::OnceLock;
+use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::core::*;
 use windows::Win32::Foundation::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -26,6 +28,13 @@ const TRAY_UID: u32 = 1;
 /// The tray icon of chibipop.
 const ICON_BYTES: &[u8] = include_bytes!("../../assets/chibipop.ico");
 
+/// Maps a tray mouse event to the command it runs without a menu.
+///
+/// A left click opens the settings window.
+fn left_click_command(event: u32) -> Option<TrayCommand> {
+    (event == WM_LBUTTONUP).then_some(TrayCommand::OpenSettings)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TrayCommand {
     OpenSettings,
@@ -44,10 +53,36 @@ fn owner_class_name() -> PCWSTR {
     w!("ChibipopTrayOwnerClass")
 }
 
+/// True when `CHIBIPOP_TRAY_TRACE` is set.
+pub fn trace_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("CHIBIPOP_TRAY_TRACE").is_some())
+}
+
+/// Writes one message to stderr when tracing.
+pub fn trace(site: &str, hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) {
+    if trace_enabled() {
+        eprintln!(
+            "chibipop: tray-trace {site} hwnd={:#x} msg={msg:#06x} wparam={:#x} lparam={:#x}",
+            hwnd.0 as usize, wparam.0, lparam.0
+        );
+    }
+}
+
 /// Passes every message to `DefWindowProcW`.
 ///
 /// The owner window only holds the menu, so it needs no message handling.
 unsafe extern "system" fn owner_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    trace("owner", hwnd, msg, wparam, lparam);
+    if msg == WM_TRAYICON {
+        // SAFETY: both calls take plain integers and no pointers.
+        // This wndproc runs on the thread that created the window,
+        // so `GetCurrentThreadId` names the thread of the loop.
+        unsafe {
+            let _ = PostThreadMessageW(GetCurrentThreadId(), WM_TRAYICON, wparam, lparam);
+        }
+        return LRESULT(0);
+    }
     unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
 }
 
@@ -79,8 +114,6 @@ unsafe fn register_owner_class(hinstance: HINSTANCE) -> Result<()> {
 }
 
 pub struct Tray {
-    /// The value of `NOTIFYICONDATAW.hWnd`. Shell32 sends the callback here.
-    notify_hwnd: HWND,
     uid: u32,
     /// The target window of `TrackPopupMenu`.
     menu_owner: HWND,
@@ -96,7 +129,7 @@ impl Tray {
     /// Adds the icon to the tray. A failure is fatal.
     ///
     /// Every error path frees the icon and the owner window first.
-    pub fn create(hwnd: HWND, config: &crate::config::Config) -> Result<Tray> {
+    pub fn create(config: &crate::config::Config) -> Result<Tray> {
         let profiles = tray_profiles(config);
         let default_profile = config.default_profile.clone();
         unsafe {
@@ -140,7 +173,7 @@ impl Tray {
 
             let mut nid = NOTIFYICONDATAW {
                 cbSize: size_of::<NOTIFYICONDATAW>() as u32,
-                hWnd: hwnd,
+                hWnd: menu_owner,
                 uID: TRAY_UID,
                 uFlags: NIF_ICON | NIF_TIP | NIF_MESSAGE,
                 uCallbackMessage: WM_TRAYICON,
@@ -149,7 +182,14 @@ impl Tray {
             };
             set_tip(&mut nid, "chibipop");
 
-            if !Shell_NotifyIconW(NIM_ADD, &nid).as_bool() {
+            let added = Shell_NotifyIconW(NIM_ADD, &nid).as_bool();
+            if trace_enabled() {
+                eprintln!(
+                    "chibipop: tray-trace create owner={:#x} callback={WM_TRAYICON:#06x} added={added}",
+                    menu_owner.0 as usize
+                );
+            }
+            if !added {
                 let _ = DestroyWindow(menu_owner);
                 if hicon_owned {
                     let _ = DestroyIcon(hicon);
@@ -161,7 +201,6 @@ impl Tray {
             }
 
             Ok(Tray {
-                notify_hwnd: hwnd,
                 uid: TRAY_UID,
                 menu_owner,
                 hicon,
@@ -190,16 +229,17 @@ impl Tray {
         if msg != WM_TRAYICON {
             return None;
         }
-        match lparam.0 as u32 {
-            WM_RBUTTONUP => self.show_menu(before_blocking),
-            _ => None,
+        let event = lparam.0 as u32;
+        if event == WM_RBUTTONUP {
+            return self.show_menu(before_blocking);
         }
+        left_click_command(event)
     }
 
     /// Shows a balloon notification.
     pub fn notify(&self, title: &str, message: &str) {
-        // SAFETY: `self.notify_hwnd` is the live window handle that the
-        // caller gave to `Tray::create`. The existing icon uses that same
+        // SAFETY: `self.menu_owner` is the live window that
+        // `Tray::create` made. The existing icon uses that same
         // handle. `NIM_MODIFY` with `NIF_INFO` tells Shell32 to show a
         // balloon on the icon that this `uID` and `hWnd` already registered.
         // The code writes the `szInfoTitle` and `szInfo` buffers from owned
@@ -207,7 +247,7 @@ impl Tray {
         unsafe {
             let mut nid = NOTIFYICONDATAW {
                 cbSize: size_of::<NOTIFYICONDATAW>() as u32,
-                hWnd: self.notify_hwnd,
+                hWnd: self.menu_owner,
                 uID: self.uid,
                 uFlags: NIF_INFO,
                 ..Default::default()
@@ -265,7 +305,7 @@ impl Drop for Tray {
         unsafe {
             let nid = NOTIFYICONDATAW {
                 cbSize: size_of::<NOTIFYICONDATAW>() as u32,
-                hWnd: self.notify_hwnd,
+                hWnd: self.menu_owner,
                 uID: self.uid,
                 ..Default::default()
             };
@@ -448,6 +488,33 @@ fn ico_frame_bytes(ico: &[u8], desired: u32) -> Option<&[u8]> {
 
 #[cfg(test)]
 mod tests {
+    /// The loop must see a sent tray callback.
+    #[test]
+    fn the_owner_wndproc_reposts_the_tray_callback() {
+        let mut msg = MSG::default();
+        // SAFETY: `msg` is a live stack value.
+        while unsafe { PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE) }.as_bool() {}
+        // SAFETY: this arm never reads the null `HWND`.
+        let result = unsafe {
+            owner_wndproc(HWND::default(), WM_TRAYICON, WPARAM(7), LPARAM(WM_LBUTTONUP as isize))
+        };
+        assert_eq!(0, result.0);
+
+        // SAFETY: `msg` is a live stack value.
+        let found =
+            unsafe { PeekMessageW(&mut msg, None, WM_TRAYICON, WM_TRAYICON, PM_REMOVE) }.as_bool();
+        assert!(found, "the callback must arrive as a thread message");
+        assert_eq!(7, msg.wParam.0);
+        assert_eq!(WM_LBUTTONUP as isize, msg.lParam.0);
+    }
+
+    #[test]
+    fn a_left_click_opens_settings_and_other_events_do_nothing() {
+        assert_eq!(Some(TrayCommand::OpenSettings), left_click_command(WM_LBUTTONUP));
+        assert_eq!(None, left_click_command(WM_MOUSEMOVE));
+        assert_eq!(None, left_click_command(WM_RBUTTONUP));
+    }
+
     use super::*;
 
     /// Shell32 reads the tip up to the NUL.
