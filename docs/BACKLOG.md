@@ -211,6 +211,23 @@ was one `grep` away.
 
 ## 7. The tray menu does not open on a real right-click
 
+**Status: fixed 2026-10-16. A real click on Windows 10 LTSC passed.**
+
+Cause: the icon was registered against the popup `hwnd`. Shell32 sends the callback as a sent
+message. A sent message skips the `GetMessageW` loop, so `tray.handle_message` never ran.
+
+Fix:
+
+- `Tray::create` registers the icon against `menu_owner`. `NIM_MODIFY` and `NIM_DELETE` use the
+  same handle.
+- `owner_wndproc` reposts `WM_TRAYICON` with `PostThreadMessageW`. The loop then sees it.
+- The unit test `the_owner_wndproc_reposts_the_tray_callback` covers the repost.
+
+Evidence: with `CHIBIPOP_TRAY_TRACE=1`, each real click logs an `owner` line and a `loop` line.
+A left-click logs `action=open_settings`, and Settings appeared. A right-click opened the menu.
+
+The rest of this item is the record of the investigation before the fix.
+
 **Reported by oniichan twice, on 2026-07-28 and again on 2026-07-29 after a "fixed" claim from me
 that was not.** Right-clicking chibipop's notification-area icon shows no menu at all.
 
