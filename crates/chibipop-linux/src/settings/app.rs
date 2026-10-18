@@ -790,7 +790,6 @@ enum Message {
     BindEnabled(String, bool),
     BindLinux(String, String),
     BindModePicked(String, TriggerMode),
-    BindProfileOverride(String, bool),
     BindProfilePicked(String, Option<String>),
     ProfileSelected(String),
     ProfileName(String),
@@ -1020,13 +1019,6 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
                 {
                     bind.mode = mode;
                 }
-            }
-        }
-        Message::BindProfileOverride(id, enabled) => {
-            if let Some(bind) = app.form.catalog.binds.iter_mut()
-                .find(|bind| bind.id == id && bind.action.allows_profile())
-            {
-                bind.profile = enabled.then(|| app.form.profile_id.clone());
             }
         }
         Message::BindProfilePicked(id, profile) => {
@@ -1513,66 +1505,65 @@ fn bind_card<'a>(app: &'a App, bind: &'a Bind) -> Element<'a, Message> {
     });
     let enabled_id = id.clone();
     let chord_id = id.clone();
-    let mut body = column![
-        labeled("Action", action),
+    let mut chord = text_input("ALT+F", &bind.linux).width(Length::Fill);
+    if bind.enabled {
+        chord = chord.on_input(move |chord| Message::BindLinux(chord_id.clone(), chord));
+    }
+    let mut header = row![
         checkbox(bind.enabled)
-            .label("Enabled")
             .on_toggle(move |enabled| Message::BindEnabled(enabled_id.clone(), enabled)),
-        labeled(
-            "Linux chord",
-            text_input("ALT+F", &bind.linux)
-                .on_input(move |chord| Message::BindLinux(chord_id.clone(), chord))
-                .width(220),
-        ),
+        action,
+        chord,
     ]
-    .spacing(10);
+    .spacing(10)
+    .align_y(iced::Center);
 
     if bind.action == BindAction::Lookup {
         let mode_id = id.clone();
-        body = body.push(labeled(
-            "Lookup mode",
-            pick_list(
-                labels(&BIND_MODES),
-                Some(label_of(&BIND_MODES, bind.mode).to_string()),
-                move |label| {
-                    Message::BindModePicked(
-                        mode_id.clone(),
-                        value_of(&BIND_MODES, &label, TriggerMode::Press),
-                    )
-                },
-            ),
-        ));
+        let mode_label = label_of(&BIND_MODES, bind.mode).to_string();
+        header = header.push(if bind.enabled {
+            Element::from(pick_list(labels(&BIND_MODES), Some(mode_label), move |label| {
+                Message::BindModePicked(
+                    mode_id.clone(),
+                    value_of(&BIND_MODES, &label, TriggerMode::Press),
+                )
+            }))
+        } else {
+            text(mode_label).style(text::secondary).into()
+        });
     }
 
     if bind.action.allows_profile() {
-        let override_id = id.clone();
-        body = body.push(
-            checkbox(bind.profile.is_some())
-                .label("Override profile")
-                .on_toggle(move |enabled| Message::BindProfileOverride(override_id.clone(), enabled)),
-        );
-        if let Some(profile_id) = bind.profile.as_deref() {
-            let choices: Vec<String> = app.form.catalog.profiles.iter().map(profile_label).collect();
-            let selected = profile_label_for_id(&app.form.catalog, profile_id);
+        let selected = match bind.profile.as_deref() {
+            None => Some(NO_PROFILE.to_string()),
+            Some(profile_id) => profile_label_for_id(&app.form.catalog, profile_id),
+        };
+        header = header.push(if bind.enabled {
+            let choices: Vec<String> = std::iter::once(NO_PROFILE.to_string())
+                .chain(app.form.catalog.profiles.iter().map(profile_label))
+                .collect();
             let profile_bind_id = id.clone();
-            body = body.push(labeled(
-                "Profile",
-                pick_list(choices, selected, move |label| {
-                    Message::BindProfilePicked(
-                        profile_bind_id.clone(),
-                        profile_id_from_label(&app.form.catalog, &label).map(str::to_owned),
-                    )
-                }),
-            ));
-        }
-    } else {
-        body = body.push(hint("This action uses the displayed profile."));
+            Element::from(pick_list(choices, selected, move |label| {
+                Message::BindProfilePicked(
+                    profile_bind_id.clone(),
+                    bind_profile_from_label(&app.form.catalog, &label),
+                )
+            }))
+        } else {
+            text(selected.unwrap_or_default()).style(text::secondary).into()
+        });
     }
 
-    let mut controls = column![bind_controls(app, bind)].spacing(6);
-    controls = controls.push(button("Delete bind").on_press(Message::BindDelete(id)));
-    body = body.push(controls);
+    header = header.push(button("Remove").on_press(Message::BindDelete(id)));
+    let body = column![header, bind_controls(app, bind)].spacing(10);
     card(format!("{} — {}", bind.action.name(), bind.id), body)
+}
+
+fn bind_profile_from_label(catalog: &chibipop::config::Config, label: &str) -> Option<String> {
+    if label == NO_PROFILE {
+        return None;
+    }
+    profile_id_from_label(catalog, label).map(str::to_owned)
 }
 
 fn bind_controls<'a>(app: &'a App, bind: &'a Bind) -> Element<'a, Message> {
@@ -1603,6 +1594,8 @@ fn bind_controls<'a>(app: &'a App, bind: &'a Bind) -> Element<'a, Message> {
         HotkeyControl::Unsupported { reason } => hint(reason),
     }
 }
+
+const NO_PROFILE: &str = "No profile";
 
 fn profile_label(profile: &chibipop::config::Profile) -> String {
     format!("{} ({})", profile.name, profile.id)
@@ -2742,6 +2735,33 @@ mod tests {
         assert_eq!("CTRL+Q", bind.linux);
         let _ = update(&mut app, Message::BindModePicked("bind-42".into(), TriggerMode::HoldKey));
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The first pick-list choice clears the override. A profile label sets it.
+    #[test]
+    fn no_profile_choice_clears_the_bind_profile() {
+        let dir = scratch("bind-no-profile");
+        let mut app = app(&dir);
+        app.form.catalog.binds.clear();
+        app.form.catalog.binds.push(Bind::new("bind-7".into(), BindAction::Lookup));
+        let profile_id = app.form.profile_id.clone();
+        let label = profile_label_for_id(&app.form.catalog, &profile_id).unwrap();
+
+        let picked = bind_profile_from_label(&app.form.catalog, &label);
+        assert_eq!(Some(profile_id.clone()), picked);
+        let _ = update(&mut app, Message::BindProfilePicked("bind-7".into(), picked));
+        assert_eq!(Some(profile_id), app.form.catalog.binds[0].profile);
+        every_page(&app);
+
+        let picked = bind_profile_from_label(&app.form.catalog, NO_PROFILE);
+        assert_eq!(None, picked);
+        let _ = update(&mut app, Message::BindProfilePicked("bind-7".into(), picked));
+        assert_eq!(None, app.form.catalog.binds[0].profile);
+
+        let _ = update(&mut app, Message::BindEnabled("bind-7".into(), false));
+        assert!(!app.form.catalog.binds[0].enabled);
+        every_page(&app);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

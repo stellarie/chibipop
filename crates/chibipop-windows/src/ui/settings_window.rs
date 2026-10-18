@@ -266,7 +266,6 @@ const ID_PROFILE_DELETE: i32 = 30007;
 const ID_PROFILE_DEFAULT: i32 = 30008;
 const ID_NESTED_PROFILE: i32 = 30009;
 
-const ID_BIND_ADD_ACTION: i32 = 29990;
 const ID_BIND_ADD: i32 = 29991;
 const ID_BIND_ROW_BASE: i32 = 40000;
 const BIND_ROW_STRIDE: i32 = 8;
@@ -275,24 +274,17 @@ const ID_BIND_ACTION_OFFSET: i32 = 0;
 const ID_BIND_ENABLED_OFFSET: i32 = 1;
 const ID_BIND_MODE_OFFSET: i32 = 2;
 const ID_BIND_CHORD_OFFSET: i32 = 3;
-const ID_BIND_CLEAR_OFFSET: i32 = 4;
-const ID_BIND_OVERRIDE_OFFSET: i32 = 5;
 const ID_BIND_PROFILE_OFFSET: i32 = 6;
 const ID_BIND_REMOVE_OFFSET: i32 = 7;
 const ID_RESET_OVERRIDE_BASE: i32 = 50000;
 
-/// Left edge of the second bind column, relative to `PAD`.
-const BIND_COL2_X: i32 = 228;
-/// Left edge of the third bind column, relative to `PAD`.
-const BIND_COL3_X: i32 = 336;
-/// Width of the first bind column.
-const BIND_COL1_W: i32 = 220;
-/// Width of the second and third columns of the button line.
-const BIND_BUTTON_W: i32 = 100;
-/// Right edge of the bind grid, relative to `PAD`.
-const BIND_GRID_W: i32 = 486;
-/// Extra space after the last line of a bind, in pixels.
-const BIND_BLOCK_GAP: i32 = 12;
+/// Bind row columns as `(x, width)`, relative to `PAD`.
+const BIND_ENABLED_COL: (i32, i32) = (0, 22);
+const BIND_ACTION_COL: (i32, i32) = (28, 136);
+const BIND_CHORD_COL: (i32, i32) = (170, 102);
+const BIND_MODE_COL: (i32, i32) = (278, 70);
+const BIND_PROFILE_COL: (i32, i32) = (354, 100);
+const BIND_REMOVE_COL: (i32, i32) = (460, 26);
 
 
 /// The first field-map combo identifier.
@@ -811,7 +803,6 @@ enum Action {
     Remove(Role),
     AddBind,
     RemoveBind(usize),
-    ClearBind(usize),
     ConfigureEngine,
     ResetScreenshotTargets,
 }
@@ -1217,7 +1208,7 @@ fn without_edit_tracking<T>(hwnd: HWND, action: impl FnOnce() -> T) -> T {
 }
 
 fn user_edit_command(id: i32, notify: u16) -> bool {
-    if matches!(id, 1 | 2 | ID_PROFILE_SELECT | ID_PROFILE_PARENT | ID_BIND_ADD_ACTION) {
+    if matches!(id, 1 | 2 | ID_PROFILE_SELECT | ID_PROFILE_PARENT) {
         return false;
     }
     if (ID_FIELD_MAP_BASE..ID_FIELD_MAP_BASE + 100).contains(&id) {
@@ -1466,7 +1457,7 @@ unsafe fn begin_capture(hwnd: HWND, id: i32) {
         CAPTURE_MODIFIERS.with(|slot| slot.set(Some((hwnd.0 as isize, 0))));
         CAPTURING.with(|cell| cell.set(Some((hwnd.0 as isize, id))));
         let prompt = if bind_row_control(id).is_some() {
-            w!("Press keys (Esc cancels)")
+            w!("Press keys\u{2026}")
         } else {
             w!("Press a key\u{2026}")
         };
@@ -1551,17 +1542,13 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                     record_user_edit(hwnd);
                     return LRESULT(0);
                 }
-                if offset == ID_BIND_OVERRIDE_OFFSET && notify == BN_CLICKED as u16 {
-                    unsafe { update_bind_profile_control(hwnd, row) };
+                if offset == ID_BIND_ENABLED_OFFSET && notify == BN_CLICKED as u16 {
+                    unsafe { update_bind_row_controls(hwnd, row) };
                     record_user_edit(hwnd);
                     return LRESULT(0);
                 }
                 if offset == ID_BIND_CHORD_OFFSET && notify == BN_CLICKED as u16 {
                     unsafe { begin_capture(hwnd, id) };
-                    return LRESULT(0);
-                }
-                if offset == ID_BIND_CLEAR_OFFSET && notify == BN_CLICKED as u16 {
-                    record_action(hwnd, Action::ClearBind(row));
                     return LRESULT(0);
                 }
                 if offset == ID_BIND_REMOVE_OFFSET && notify == BN_CLICKED as u16 {
@@ -3229,11 +3216,42 @@ fn apply_bind_row(
     bind.profile = action.allows_profile().then_some(profile).flatten();
 }
 
+/// Label of a bind key button.
+fn bind_chord_label(chord: &str) -> String {
+    if chord.is_empty() {
+        "Not set".to_string()
+    } else {
+        display_bind_chord(chord)
+    }
+}
+
+/// What one key press does while a bind key button records.
+#[derive(Debug, PartialEq, Eq)]
+enum CaptureStep {
+    Cancel,
+    Clear,
+    Modifier,
+    Chord,
+}
+
+fn capture_step(vk: u16) -> CaptureStep {
+    match vk {
+        0x1B => CaptureStep::Cancel,
+        0x08 => CaptureStep::Clear,
+        _ if is_modifier_key(vk) => CaptureStep::Modifier,
+        _ => CaptureStep::Chord,
+    }
+}
+
 unsafe fn update_bind_row_controls(hwnd: HWND, row: usize) {
     unsafe {
         let action = dlg_item(hwnd, bind_control_id(row, ID_BIND_ACTION_OFFSET))
             .map(|combo| bind_action_at(SendMessageW(combo, CB_GETCURSEL, None, None).0))
             .unwrap_or(BindAction::Lookup);
+        let enabled = checkbox_is_checked(hwnd, bind_control_id(row, ID_BIND_ENABLED_OFFSET));
+        if let Ok(chord) = dlg_item(hwnd, bind_control_id(row, ID_BIND_CHORD_OFFSET)) {
+            let _ = EnableWindow(chord, enabled);
+        }
         if let Ok(mode) = dlg_item(hwnd, bind_control_id(row, ID_BIND_MODE_OFFSET)) {
             let modes = bind_modes(action);
             let lookup = action == BindAction::Lookup;
@@ -3256,35 +3274,22 @@ unsafe fn update_bind_row_controls(hwnd: HWND, row: usize) {
             let row_visible = dlg_item(hwnd, bind_control_id(row, ID_BIND_ACTION_OFFSET))
                 .is_ok_and(|action| IsWindowVisible(action).as_bool());
             let _ = ShowWindow(mode, if lookup && row_visible { SW_SHOW } else { SW_HIDE });
-            let _ = EnableWindow(mode, lookup);
+            let _ = EnableWindow(mode, lookup && enabled);
         }
-        update_bind_profile_control(hwnd, row);
-    }
-}
-
-unsafe fn update_bind_profile_control(hwnd: HWND, row: usize) {
-    unsafe {
-        let action = dlg_item(hwnd, bind_control_id(row, ID_BIND_ACTION_OFFSET))
-            .map(|combo| bind_action_at(SendMessageW(combo, CB_GETCURSEL, None, None).0))
-            .unwrap_or(BindAction::Lookup);
-        let allows_profile = action.allows_profile();
-        let override_id = bind_control_id(row, ID_BIND_OVERRIDE_OFFSET);
-        let profile_id = bind_control_id(row, ID_BIND_PROFILE_OFFSET);
-        if !allows_profile {
-            if let Ok(override_check) = dlg_item(hwnd, override_id) {
-                SendMessageW(override_check, BM_SETCHECK, Some(WPARAM(0)), None);
+        if let Ok(profile) = dlg_item(hwnd, bind_control_id(row, ID_BIND_PROFILE_OFFSET)) {
+            let allows_profile = action.allows_profile();
+            if !allows_profile {
+                SendMessageW(profile, CB_SETCURSEL, Some(WPARAM(0)), None);
             }
-        }
-        let has_override = allows_profile && checkbox_is_checked(hwnd, override_id);
-        if let Ok(override_check) = dlg_item(hwnd, override_id) {
-            let _ = EnableWindow(override_check, allows_profile);
-        }
-        if let Ok(profile) = dlg_item(hwnd, profile_id) {
-            let _ = EnableWindow(profile, has_override);
+            let row_visible = dlg_item(hwnd, bind_control_id(row, ID_BIND_ACTION_OFFSET))
+                .is_ok_and(|action| IsWindowVisible(action).as_bool());
+            let _ = ShowWindow(profile, if allows_profile && row_visible { SW_SHOW } else { SW_HIDE });
+            let _ = EnableWindow(profile, allows_profile && enabled);
         }
     }
 }
 
+/// Index 0 is "No profile". Profile `n` sits at index `n + 1`.
 fn bind_profile_at(index: isize, profiles: &[String]) -> Option<String> {
     let index = usize::try_from(index).ok()?;
     index.checked_sub(1).and_then(|index| profiles.get(index).cloned())
@@ -3372,77 +3377,76 @@ unsafe fn build_configured_binds(
     profile_ids: &[String],
     y: &mut i32,
     controls: &mut Vec<HWND>,
-) -> Result<usize> {
+) -> Result<(usize, Vec<(HWND, String)>)> {
     anyhow::ensure!(
         form.catalog.binds.len() <= MAX_BIND_ROWS,
         "Windows settings supports at most {MAX_BIND_ROWS} configured binds."
     );
     unsafe {
-        let title_height = measured_text_height(root, font, "Configured binds", WIN_W - 2 * PAD - 20);
-        controls.push(child(
-            page,
-            w!("STATIC"),
-            "Configured binds",
-            WINDOW_STYLE(0),
-            PAD,
-            *y,
-            WIN_W - 2 * PAD - 20,
-            title_height,
-            0,
-            font,
-        )?);
-        *y += title_height + ROW_GAP;
-
+        let mut tips = Vec::new();
         let action_names: Vec<String> = BindAction::ALL
             .iter()
             .map(|action| action.name().to_string())
             .collect();
-        let add_action = child(
-            page,
-            w!("COMBOBOX"),
-            "",
-            WINDOW_STYLE(CBS_DROPDOWNLIST as u32) | WS_TABSTOP | WS_VSCROLL,
-            PAD,
-            *y,
-            270,
-            180,
-            ID_BIND_ADD_ACTION,
-            font,
-        )?;
-        fill_combo_if_changed(add_action, &action_names);
-        SendMessageW(
-            add_action,
-            CB_SETCURSEL,
-            Some(WPARAM(bind_action_index(BindAction::Lookup))),
-            None,
-        );
-        controls.push(add_action);
-        controls.push(child(
-            page,
-            w!("BUTTON"),
-            "Add bind",
-            WS_TABSTOP,
-            PAD + 280,
-            *y,
-            100,
-            ROW_H,
-            ID_BIND_ADD,
-            font,
-        )?);
-        *y += ROW_H + ROW_GAP;
-
-        let mut profile_names = vec!["No override".to_string()];
+        let mut profile_names = vec!["No profile".to_string()];
         profile_names.extend(form.catalog.profiles.iter().map(|profile| profile.name.clone()));
+
+        if !form.catalog.binds.is_empty() {
+            let header_height = measured_text_height(root, font, "Action", BIND_ACTION_COL.1);
+            for (label, (x, width)) in [
+                ("On", BIND_ENABLED_COL),
+                ("Action", BIND_ACTION_COL),
+                ("Key", BIND_CHORD_COL),
+                ("Trigger", BIND_MODE_COL),
+                ("Profile", BIND_PROFILE_COL),
+            ] {
+                controls.push(child(
+                    page,
+                    w!("STATIC"),
+                    label,
+                    WINDOW_STYLE(0),
+                    PAD + x,
+                    *y,
+                    width,
+                    header_height,
+                    0,
+                    font,
+                )?);
+            }
+            *y += header_height + ROW_GAP;
+        }
+
         for (row, bind) in form.catalog.binds.iter().enumerate() {
             let row_top = *y;
+            let enabled = child(
+                page,
+                w!("BUTTON"),
+                "",
+                WINDOW_STYLE(BS_AUTOCHECKBOX as u32) | WS_TABSTOP,
+                PAD + BIND_ENABLED_COL.0,
+                row_top,
+                BIND_ENABLED_COL.1,
+                ROW_H,
+                bind_control_id(row, ID_BIND_ENABLED_OFFSET),
+                font,
+            )?;
+            SendMessageW(
+                enabled,
+                BM_SETCHECK,
+                Some(WPARAM(if bind.enabled { 1 } else { 0 })),
+                None,
+            );
+            controls.push(enabled);
+            tips.push((enabled, "Enabled".to_string()));
+
             let action = child(
                 page,
                 w!("COMBOBOX"),
                 "",
                 WINDOW_STYLE(CBS_DROPDOWNLIST as u32) | WS_TABSTOP | WS_VSCROLL,
-                PAD,
+                PAD + BIND_ACTION_COL.0,
                 row_top,
-                BIND_COL1_W,
+                BIND_ACTION_COL.1,
                 180,
                 bind_control_id(row, ID_BIND_ACTION_OFFSET),
                 font,
@@ -3456,25 +3460,23 @@ unsafe fn build_configured_binds(
             );
             controls.push(action);
 
-            let enabled = child(
+            let chord = child(
                 page,
                 w!("BUTTON"),
-                "Enabled",
-                WINDOW_STYLE(BS_AUTOCHECKBOX as u32) | WS_TABSTOP,
-                PAD + BIND_COL2_X,
+                &bind_chord_label(&bind.windows),
+                WS_TABSTOP,
+                PAD + BIND_CHORD_COL.0,
                 row_top,
-                BIND_BUTTON_W,
+                BIND_CHORD_COL.1,
                 ROW_H,
-                bind_control_id(row, ID_BIND_ENABLED_OFFSET),
+                bind_control_id(row, ID_BIND_CHORD_OFFSET),
                 font,
             )?;
-            SendMessageW(
-                enabled,
-                BM_SETCHECK,
-                Some(WPARAM(if bind.enabled { 1 } else { 0 })),
-                None,
-            );
-            controls.push(enabled);
+            controls.push(chord);
+            tips.push((
+                chord,
+                "Click, then press the keys. Esc cancels. Backspace clears.".to_string(),
+            ));
 
             let modes: Vec<String> = bind_modes(bind.action)
                 .iter()
@@ -3485,9 +3487,9 @@ unsafe fn build_configured_binds(
                 w!("COMBOBOX"),
                 "",
                 WINDOW_STYLE(CBS_DROPDOWNLIST as u32) | WS_TABSTOP | WS_VSCROLL,
-                PAD + BIND_COL3_X,
+                PAD + BIND_MODE_COL.0,
                 row_top,
-                BIND_GRID_W - BIND_COL3_X,
+                BIND_MODE_COL.1,
                 180,
                 bind_control_id(row, ID_BIND_MODE_OFFSET),
                 font,
@@ -3501,76 +3503,14 @@ unsafe fn build_configured_binds(
             );
             controls.push(mode);
 
-            let chord = if bind.windows.is_empty() {
-                "Not set".to_string()
-            } else {
-                display_bind_chord(&bind.windows)
-            };
-            controls.push(child(
-                page,
-                w!("BUTTON"),
-                &chord,
-                WS_TABSTOP,
-                PAD,
-                row_top + ROW_H + ROW_GAP,
-                BIND_COL1_W,
-                ROW_H,
-                bind_control_id(row, ID_BIND_CHORD_OFFSET),
-                font,
-            )?);
-            controls.push(child(
-                page,
-                w!("BUTTON"),
-                "Clear",
-                WS_TABSTOP,
-                PAD + BIND_COL2_X,
-                row_top + ROW_H + ROW_GAP,
-                BIND_BUTTON_W,
-                ROW_H,
-                bind_control_id(row, ID_BIND_CLEAR_OFFSET),
-                font,
-            )?);
-            controls.push(child(
-                page,
-                w!("BUTTON"),
-                "Remove",
-                WS_TABSTOP,
-                PAD + BIND_COL3_X,
-                row_top + ROW_H + ROW_GAP,
-                BIND_BUTTON_W,
-                ROW_H,
-                bind_control_id(row, ID_BIND_REMOVE_OFFSET),
-                font,
-            )?);
-
-            let use_profile = child(
-                page,
-                w!("BUTTON"),
-                "Use a profile",
-                WINDOW_STYLE(BS_AUTOCHECKBOX as u32) | WS_TABSTOP,
-                PAD,
-                row_top + 2 * (ROW_H + ROW_GAP),
-                BIND_COL1_W,
-                ROW_H,
-                bind_control_id(row, ID_BIND_OVERRIDE_OFFSET),
-                font,
-            )?;
-            SendMessageW(
-                use_profile,
-                BM_SETCHECK,
-                Some(WPARAM(if bind.profile.is_some() { 1 } else { 0 })),
-                None,
-            );
-            controls.push(use_profile);
-
             let profile = child(
                 page,
                 w!("COMBOBOX"),
                 "",
                 WINDOW_STYLE(CBS_DROPDOWNLIST as u32) | WS_TABSTOP | WS_VSCROLL,
-                PAD + BIND_COL2_X,
-                row_top + 2 * (ROW_H + ROW_GAP),
-                BIND_GRID_W - BIND_COL2_X,
+                PAD + BIND_PROFILE_COL.0,
+                row_top,
+                BIND_PROFILE_COL.1,
                 180,
                 bind_control_id(row, ID_BIND_PROFILE_OFFSET),
                 font,
@@ -3584,10 +3524,39 @@ unsafe fn build_configured_binds(
             SendMessageW(profile, CB_SETCURSEL, Some(WPARAM(profile_index)), None);
             controls.push(profile);
 
-            *y += 3 * ROW_H + 2 * ROW_GAP + BIND_BLOCK_GAP;
+            let remove = child(
+                page,
+                w!("BUTTON"),
+                "\u{2715}",
+                WS_TABSTOP,
+                PAD + BIND_REMOVE_COL.0,
+                row_top,
+                BIND_REMOVE_COL.1,
+                ROW_H,
+                bind_control_id(row, ID_BIND_REMOVE_OFFSET),
+                font,
+            )?;
+            controls.push(remove);
+            tips.push((remove, "Remove bind".to_string()));
+
+            *y += ROW_H + ROW_GAP;
             update_bind_row_controls(root, row);
         }
-        Ok(form.catalog.binds.len())
+
+        controls.push(child(
+            page,
+            w!("BUTTON"),
+            "+ Add bind",
+            WS_TABSTOP,
+            PAD,
+            *y,
+            100,
+            ROW_H,
+            ID_BIND_ADD,
+            font,
+        )?);
+        *y += ROW_H + ROW_GAP;
+        Ok((form.catalog.binds.len(), tips))
     }
 }
 
@@ -4228,12 +4197,6 @@ unsafe fn capture_control_runtime(
         let id = GetDlgCtrlID(hwnd);
         let horizontal = match id {
             ID_SCREENSHOT_SUMMARY => HorizontalLayout::Stretch,
-            _ if bind_row_control(id).is_some_and(|(_, offset)| {
-                matches!(offset, ID_BIND_CLEAR_OFFSET | ID_BIND_REMOVE_OFFSET)
-            }) =>
-            {
-                HorizontalLayout::Fixed
-            }
             _ if x >= WIN_W - PAD - BTN_W - 16 => HorizontalLayout::MoveRight,
             _ if x + width >= WIN_W - PAD - BTN_W - 24 => HorizontalLayout::Stretch,
             _ => HorizontalLayout::Fixed,
@@ -4711,27 +4674,14 @@ impl SettingsWindow {
         let mut form = self.read(&snapshot);
         match action {
             Action::AddBind => {
-                let action = unsafe {
-                    dlg_item(self.hwnd, ID_BIND_ADD_ACTION)
-                        .map(|combo| {
-                            bind_action_at(SendMessageW(combo, CB_GETCURSEL, None, None).0)
-                        })
-                        .unwrap_or(BindAction::Lookup)
-                };
                 let id = form.catalog.next_bind_id();
-                form.catalog.binds.push(Bind::new(id, action));
+                form.catalog.binds.push(Bind::new(id, BindAction::Lookup));
             }
             Action::RemoveBind(row) => {
                 if row >= form.catalog.binds.len() {
                     return;
                 }
                 form.catalog.binds.remove(row);
-            }
-            Action::ClearBind(row) => {
-                let Some(bind) = form.catalog.binds.get_mut(row) else {
-                    return;
-                };
-                bind.windows.clear();
             }
             _ => return,
         }
@@ -4812,7 +4762,7 @@ impl SettingsWindow {
                     self.configure_engine();
                 }
                 Action::ResetScreenshotTargets => self.reset_screenshot_targets(),
-                Action::AddBind | Action::RemoveBind(_) | Action::ClearBind(_) => {
+                Action::AddBind | Action::RemoveBind(_) => {
                     self.handle_bind_catalog_action(action)
                 }
             }
@@ -5020,7 +4970,6 @@ impl SettingsWindow {
                 }
             }
             for id in [
-                ID_BIND_ADD_ACTION,
                 ID_BIND_ADD,
                 ID_PROFILE_SELECT,
                 ID_PROFILE_NAME,
@@ -5573,14 +5522,21 @@ impl SettingsWindow {
         else {
             return false;
         };
-        if vk == 0x1B {
-            // SAFETY: Capture belongs to this live settings window.
-            unsafe { cancel_capture(self.hwnd) };
-            return true;
-        }
-        if is_modifier_key(vk) {
-            note_capture_modifier(self.hwnd, vk);
-            return true;
+        match capture_step(vk) {
+            CaptureStep::Cancel => {
+                // SAFETY: Capture belongs to this live settings window.
+                unsafe { cancel_capture(self.hwnd) };
+                return true;
+            }
+            CaptureStep::Clear => {
+                self.commit_bind_capture(id, String::new());
+                return true;
+            }
+            CaptureStep::Modifier => {
+                note_capture_modifier(self.hwnd, vk);
+                return true;
+            }
+            CaptureStep::Chord => {}
         }
         // SAFETY: GetKeyState reads the current UI thread's modifier state.
         let key = unsafe {
@@ -5594,7 +5550,7 @@ impl SettingsWindow {
             )
         };
         if crate::config::parse_hotkey(&key).is_none() {
-            self.set_status("Use a key with Ctrl, Shift, or Alt. Escape cancels capture.");
+            self.set_status("Use a key with Ctrl, Shift, or Alt. Escape cancels capture. Backspace clears.");
             return true;
         }
         self.commit_bind_capture(id, key);
@@ -5660,7 +5616,7 @@ impl SettingsWindow {
         // SAFETY: `id` names the live bind-chord button captured above.
         unsafe {
             if let Ok(button) = dlg_item(self.hwnd, id) {
-                let label = display_bind_chord(&key);
+                let label = bind_chord_label(&key);
                 let _ = SetWindowTextW(button, PCWSTR(wide(&label).as_ptr()));
             }
         }
@@ -6137,6 +6093,7 @@ impl SettingsWindow {
             let page = self.content;
             let f = self.font.get();
             let mut controls = Vec::new();
+            let mut bind_tips = Vec::new();
             let mut y = top;
             let mut help_rendered = false;
 
@@ -6229,7 +6186,7 @@ impl SettingsWindow {
                 checkbox!(ID_MODE_LIVE, form.catalog.live_lookup);
             }
             SettingId::ConfiguredBinds => {
-                self.bind_count = build_configured_binds(
+                (self.bind_count, bind_tips) = build_configured_binds(
                     h,
                     page,
                     f,
@@ -6820,6 +6777,8 @@ impl SettingsWindow {
                         .extend(controls.iter().map(|&control| (control, text.to_string())));
                 }
             }
+            // Row tips replace the entry help.
+            self.tips.borrow_mut().extend(bind_tips);
 
             Ok(BuiltEntry {
                 id: spec.id,
@@ -7334,16 +7293,10 @@ impl SettingsWindow {
                         .get(&bind_control_id(row, ID_BIND_CHORD_OFFSET))
                         .cloned()
                         .unwrap_or_else(|| source.windows.clone());
-                    let profile = if action.allows_profile()
-                        && checked(bind_control_id(row, ID_BIND_OVERRIDE_OFFSET))
-                    {
-                        bind_profile_at(
-                            combo_index(bind_control_id(row, ID_BIND_PROFILE_OFFSET)),
-                            &self.profile_ids,
-                        )
-                    } else {
-                        None
-                    };
+                    let profile = bind_profile_at(
+                        combo_index(bind_control_id(row, ID_BIND_PROFILE_OFFSET)),
+                        &self.profile_ids,
+                    );
                     let mut bind = source.clone();
                     apply_bind_row(
                         &mut bind,
@@ -7670,6 +7623,56 @@ mod tests {
         assert_eq!("SUPER+J", bind.linux);
         let applied = crate::settings::apply_to(&edited, &config);
         assert!(applied.config.resolve("default").unwrap().actions.search.selected_opens_sentence_search);
+    }
+
+    #[test]
+    fn profile_combo_index_zero_is_no_profile() {
+        let profiles = vec!["work".to_string(), "game".to_string()];
+        assert_eq!(None, bind_profile_at(0, &profiles));
+        assert_eq!(Some("work".to_string()), bind_profile_at(1, &profiles));
+        assert_eq!(Some("game".to_string()), bind_profile_at(2, &profiles));
+        assert_eq!(None, bind_profile_at(3, &profiles));
+        assert_eq!(None, bind_profile_at(-1, &profiles));
+    }
+
+    #[test]
+    fn a_disabled_bind_row_keeps_its_chord_mode_and_profile() {
+        let mut bind = Bind::new("b1".into(), BindAction::Lookup);
+        apply_bind_row(
+            &mut bind,
+            BindAction::Lookup,
+            "Ctrl+F7".into(),
+            TriggerMode::HoldKey,
+            false,
+            Some("work".into()),
+        );
+        assert!(!bind.enabled);
+        assert_eq!("Ctrl+F7", bind.windows);
+        assert_eq!(TriggerMode::HoldKey, bind.mode);
+        assert_eq!(Some("work".to_string()), bind.profile);
+    }
+
+    #[test]
+    fn a_profile_is_dropped_for_an_action_without_profiles() {
+        let action = BindAction::ALL
+            .iter()
+            .copied()
+            .find(|action| !action.allows_profile())
+            .unwrap();
+        let mut bind = Bind::new("b1".into(), BindAction::Lookup);
+        apply_bind_row(&mut bind, action, "F7".into(), TriggerMode::Toggle, true, Some("work".into()));
+        assert_eq!(None, bind.profile);
+        assert_eq!(TriggerMode::Press, bind.mode);
+    }
+
+    #[test]
+    fn backspace_clears_and_escape_cancels_bind_capture() {
+        assert_eq!(CaptureStep::Clear, capture_step(0x08));
+        assert_eq!(CaptureStep::Cancel, capture_step(0x1B));
+        assert_eq!(CaptureStep::Modifier, capture_step(0x11));
+        assert_eq!(CaptureStep::Chord, capture_step(0x46));
+        assert_eq!("Not set", bind_chord_label(""));
+        assert_eq!("Ctrl+F7", bind_chord_label("ctrl+f7"));
     }
 
     #[test]
@@ -8757,8 +8760,9 @@ mod tests {
 
         send_button_click(
             &window,
-            bind_control_id(original_row, ID_BIND_CLEAR_OFFSET),
+            bind_control_id(original_row, ID_BIND_CHORD_OFFSET),
         );
+        assert!(window.handle_capture_key(0x08));
         window.pump(|| {});
         let cleared = window.read(&form);
         let cleared_bind = cleared
@@ -8988,6 +8992,15 @@ mod tests {
                         ) {
                             continue;
                         }
+                        // These bind buttons keep their own tooltip.
+                        if bind_row_control(GetDlgCtrlID(*control)).is_some_and(|(_, offset)| {
+                            matches!(
+                                offset,
+                                ID_BIND_ENABLED_OFFSET | ID_BIND_CHORD_OFFSET | ID_BIND_REMOVE_OFFSET
+                            )
+                        }) {
+                            continue;
+                        }
                         assert_ne!(
                             help,
                             window_text(*control),
@@ -9021,6 +9034,23 @@ mod tests {
             checked >= 60,
             "expected most entries to use a tooltip, saw {checked}",
         );
+    }
+
+    #[test]
+    fn bind_row_buttons_carry_their_own_tooltips() {
+        let mut config = crate::config::Config::default();
+        let bind_id = config.next_bind_id();
+        config.binds.push(Bind::new(bind_id.clone(), BindAction::Lookup));
+        let form = crate::settings::from_config(&config, &[]);
+        let row = form.catalog.binds.iter().position(|bind| bind.id == bind_id).unwrap();
+        let window = SettingsWindow::open(&form, &[], ApplyMode::Standalone).unwrap();
+        // SAFETY: The test window owns the bind row controls.
+        unsafe {
+            let enabled = dlg_item(window.hwnd, bind_control_id(row, ID_BIND_ENABLED_OFFSET)).unwrap();
+            let remove = dlg_item(window.hwnd, bind_control_id(row, ID_BIND_REMOVE_OFFSET)).unwrap();
+            assert_eq!(Some("Enabled".to_string()), tip_text(&window, enabled));
+            assert_eq!(Some("Remove bind".to_string()), tip_text(&window, remove));
+        }
     }
 
     /// An inline entry keeps its help on the page and registers no tooltip.
