@@ -799,7 +799,7 @@ impl Controller {
 
     /// Whether a cursor miss hides the popup.
     /// The root popup's profile decides.
-    fn hides_on_cursor_exit(&self) -> bool {
+    pub fn hides_on_cursor_exit(&self) -> bool {
         self.parents.first().or(self.surface.as_ref())
             .is_none_or(|surface| surface.session.config().popup.hide_on_cursor_exit)
     }
@@ -1682,6 +1682,12 @@ impl Controller {
             return Vec::new();
         }
         if matches!(self.trigger_mode(), TriggerMode::Live | TriggerMode::Press) {
+            return Vec::new();
+        }
+        if self.surface.is_some() && !self.hides_on_cursor_exit() {
+            self.last_accepted = None;
+            self.pending_cursor = None;
+            self.next_lookup_request();
             return Vec::new();
         }
         self.chain_bind = None;
@@ -3955,7 +3961,7 @@ mod tests {
     }
 
     #[test]
-    fn with_hide_on_cursor_exit_off_hold_release_still_hides() {
+    fn with_hide_on_cursor_exit_off_hold_release_keeps_the_popup() {
         let mut c = exit_keeping_controller(hold_cfg());
         bind_down(&mut c, "hold", TriggerMode::HoldKey, PhysPoint { x: 110, y: 110 });
         let id = c.latest;
@@ -3963,7 +3969,62 @@ mod tests {
         c.handle(placed(POPUP, 200, 200));
         let out = cursor_miss(&mut c, PhysPoint { x: 900, y: 900 });
         assert!(!out.contains(&Command::HidePopup), "{out:?}");
+        let in_flight = {
+            c.handle(Event::CursorMoved { pos: PhysPoint { x: 1400, y: 900 } });
+            c.latest
+        };
+
+        let out = bind_up(&mut c, "hold");
+        assert!(!out.contains(&Command::HidePopup), "{out:?}");
+        assert!(c.is_shown());
         assert!(c.watches_outside_clicks());
+        assert!(c.swallows_outside_clicks());
+        assert!(c.handle(ready_id(in_flight, "\u{72AC}", ANCHOR)).is_empty(),
+            "a lookup from before the release is stale");
+        assert!(c.handle(Event::CursorMoved { pos: PhysPoint { x: 40, y: 40 } }).is_empty(),
+            "no lookups follow the cursor after the release");
+        assert!(c.is_shown());
+
+        let out = c.handle(Event::PointerDownOutside);
+        assert!(out.contains(&Command::HidePopup), "{out:?}");
+        assert!(!c.is_shown());
+        assert!(!c.watches_outside_clicks());
+    }
+
+    #[test]
+    fn with_hide_on_cursor_exit_off_a_new_hold_press_still_replaces_or_hides() {
+        let mut c = exit_keeping_controller(hold_cfg());
+        bind_down(&mut c, "hold", TriggerMode::HoldKey, PhysPoint { x: 110, y: 110 });
+        c.handle(ready_id(c.latest, "\u{732B}", ANCHOR));
+        c.handle(placed(POPUP, 200, 200));
+        bind_up(&mut c, "hold");
+        assert!(c.is_shown());
+
+        bind_down(&mut c, "hold", TriggerMode::HoldKey, PhysPoint { x: 900, y: 900 });
+        let out = c.handle(Event::LookupResult { id: c.latest, outcome: LookupOutcome::Hide });
+        assert!(out.contains(&Command::HidePopup), "a key lookup that misses hides: {out:?}");
+    }
+
+    #[test]
+    fn with_hide_on_cursor_exit_off_toggle_off_keeps_the_popup() {
+        let mut c = exit_keeping_controller(press_cfg());
+        bind_down(&mut c, "toggle", TriggerMode::Toggle, PhysPoint { x: 110, y: 110 });
+        c.handle(ready_id(c.latest, "\u{732B}", ANCHOR));
+        c.handle(placed(POPUP, 200, 200));
+
+        let out = bind_down(&mut c, "toggle", TriggerMode::Toggle, PhysPoint { x: 110, y: 110 });
+        assert!(!out.contains(&Command::HidePopup), "{out:?}");
+        assert!(c.is_shown());
+        assert!(c.handle(Event::CursorMoved { pos: PhysPoint { x: 40, y: 40 } }).is_empty());
+        assert!(c.handle(Event::PointerDownOutside).contains(&Command::HidePopup));
+    }
+
+    #[test]
+    fn by_default_hold_release_hides_the_popup() {
+        let mut c = test_controller(hold_cfg());
+        bind_down(&mut c, "hold", TriggerMode::HoldKey, PhysPoint { x: 110, y: 110 });
+        c.handle(ready_id(c.latest, "\u{732B}", ANCHOR));
+        c.handle(placed(POPUP, 200, 200));
         let out = bind_up(&mut c, "hold");
         assert!(out.contains(&Command::HidePopup), "{out:?}");
     }

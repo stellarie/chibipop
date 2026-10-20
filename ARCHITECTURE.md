@@ -184,7 +184,8 @@ Worker: capture -> mask -> OCR -> lookup -> present --result--> Controller
   region, and a button press on the catcher hides the popup. The catcher swallows that click
   because there is no evdev path and the popup takes no focus.
 - `popup.hide_on_cursor_exit = false` keeps the popup after a cursor lookup (hover or Dwell
-  re-check) misses or fails. Only a key action or an outside click hides it. Windows consumes that
+  re-check) misses or fails. A Hold release or a Toggle-off also keeps the popup. Only a key lookup
+  that misses, Escape, or an outside click hides it. Windows consumes that
   outside press and its release when `Controller::swallows_outside_clicks` is true.
 - The daemon routes each event of one `wl_pointer` frame by surface. The catcher and the
   popup are one client, so a compositor can put a leave from the catcher and an enter onto

@@ -918,8 +918,10 @@ the popup hides it and does nothing else: the press, and its release, never
 reach the window under the popup, so a stray click cannot act on that window.
 Clicks inside the popup work as usual.
 
-Key actions still hide the popup in every mode: releasing a Hold bind,
-turning a Toggle bind off, and a Press lookup that finds no text (Escape too, on Windows).
+Releasing a Hold bind or turning a Toggle bind off stops new lookups but
+keeps the popup. The popup then stays until an outside click.
+A new lookup key press still replaces the popup, or hides it when the press
+finds no text. Escape also hides the popup on Windows.
 The setting belongs to a profile; the root popup's profile decides for the
 whole popup chain.
 

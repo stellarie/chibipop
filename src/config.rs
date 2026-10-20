@@ -238,8 +238,8 @@ pub struct PopupConfig {
     /// Inline labels repeat them.
     /// `gloss::RoleFilter::CARD` drops them for the same reason.
     pub show_part_of_speech: bool,
-    /// Off keeps the popup after a cursor miss.
-    /// An outside click then hides it.
+    /// Off keeps the popup after a cursor miss or
+    /// key release, until an outside click.
     pub hide_on_cursor_exit: bool,
 }
 

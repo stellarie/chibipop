@@ -3717,6 +3717,7 @@ struct Exec<'a> {
 fn drive(controller: &mut Controller, event: Event, x: &mut Exec<'_>) {
     if let Event::LookupBindUp { bind_id } = &event {
         if controller.active_bind_id() == Some(bind_id.as_str())
+            && controller.hides_on_cursor_exit()
             && matches!(
                 controller.trigger_mode(),
                 crate::config::TriggerMode::HoldKey
