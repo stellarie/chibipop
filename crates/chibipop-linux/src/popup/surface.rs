@@ -736,7 +736,7 @@ impl Popup {
         Some(Interaction::Move { local, text })
     }
 
-    /// Tell the pointer whether the Controller has an active selection drag.
+    /// Tell the pointer whether Core has an active drag.
     pub fn set_dragging(&mut self, dragging: bool) {
         self.dragging = dragging;
         self.pointer.set_dragging(dragging);
@@ -959,6 +959,15 @@ impl Popup {
             self.notes.push(format!(
                 "pointer:   {:?} logical y {top:.0}..{bottom:.0}, {across}",
                 target.action
+            ));
+        }
+        if let Some((thumb, travel)) = hits.scrollbar_thumb {
+            self.notes.push(format!(
+                "pointer:   ScrollThumb {{ travel: {travel} }} logical y {:.3}..{:.3}, x {:.3}..{:.3}",
+                f64::from(thumb.y) / hits.scale,
+                f64::from(thumb.y + thumb.h) / hits.scale,
+                f64::from(thumb.x) / hits.scale,
+                f64::from(thumb.x + thumb.w) / hits.scale,
             ));
         }
         if let Some(strip) = hits.anki {
@@ -1339,6 +1348,8 @@ impl Popup {
             InputRegion::Panel { .. } => Some(HitScene::of(
                 panel_id,
                 &pending.scene,
+                bw,
+                pending.theme.padding,
                 pending.scroll,
                 pending.scale,
             )),

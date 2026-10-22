@@ -66,6 +66,7 @@ pub enum HitAction {
     /// The Entry header checkbox emits this action. `e` is the ordinal from
     /// [`crate::select::entries`].
     ToggleEntry(u32),
+    ScrollThumb { travel: i32 },
 }
 
 /// A pointer button has a role instead of a physical code.
@@ -515,6 +516,13 @@ struct Placed {
     view_h: i32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ScrollDrag {
+    start_y: i32,
+    start_scroll: i32,
+    travel: i32,
+}
+
 /// The note payload authorized when an add-time sentence probe starts.
 ///
 /// Popup state can change while the Worker reads the sentence. Keep this
@@ -576,6 +584,7 @@ struct Surface {
     history: Vec<HistoryEntry>,
     /// The content offset. Zero places the content at the top.
     scroll: i32,
+    scroll_drag: Option<ScrollDrag>,
     /// The generation that guards against stale duplicate results.
     generation: u64,
     /// The selected ranges for every Card in the `Presentation`.
@@ -1336,9 +1345,24 @@ impl Controller {
         self.hover_buttons |= match button { Button::Primary => 1, Button::Secondary => 2 };
         let Some(s) = self.surface.as_ref() else { return Vec::new() };
         let Some(p) = s.placed else { return Vec::new() };
+        if s.scroll_drag.is_some() {
+            return Vec::new();
+        }
         let anki = s.session.config().anki.enabled;
 
         match hit {
+            Some(HitAction::ScrollThumb { travel }) => {
+                if button != Button::Primary || travel <= 0
+                    || p.content_h <= p.view_h || !s.session.config().popup.scroll_popup {
+                    return Vec::new();
+                }
+                let s = self.surface.as_mut().expect("checked above");
+                s.scroll_drag = Some(ScrollDrag { start_y: local.y, start_scroll: s.scroll, travel });
+                s.gesture.reset();
+                s.pressed_link = None;
+                s.last_drag_point = None;
+                vec![Command::SetDragging(true)]
+            }
             Some(HitAction::ExpandEntry(index)) => self.expand_entry(index),
             Some(HitAction::Back) => self.pop_history(),
             Some(HitAction::ToggleEntry(entry)) => self.toggle_entry(entry),
@@ -1376,6 +1400,20 @@ impl Controller {
     }
 
     fn pointer_moved(&mut self, local: PhysPoint, text: Option<TextAddr>) -> Vec<Command> {
+        if let Some(s) = self.surface.as_mut() {
+            if let (Some(drag), Some(p)) = (s.scroll_drag, s.placed) {
+                let span = (p.content_h - p.view_h).max(0);
+                let delta = i64::from(local.y) - i64::from(drag.start_y);
+                let next = (i64::from(drag.start_scroll)
+                    + delta * i64::from(span) / i64::from(drag.travel))
+                    .clamp(0, i64::from(span)) as i32;
+                if next == s.scroll {
+                    return Vec::new();
+                }
+                s.scroll = next;
+                return vec![self.repaint(next)];
+            }
+        }
         if !self.surface_config().is_some_and(|config| config.anki.enabled) {
             return Vec::new();
         }
@@ -1392,6 +1430,15 @@ impl Controller {
 
     fn pointer_up(&mut self, local: PhysPoint, button: Button) -> Vec<Command> {
         self.hover_buttons &= !match button { Button::Primary => 1, Button::Secondary => 2 };
+        if self.surface.as_ref().is_some_and(|s| s.scroll_drag.is_some()) {
+            if button != Button::Primary {
+                return Vec::new();
+            }
+            let mut out = self.pointer_moved(local, None);
+            self.surface.as_mut().expect("checked above").scroll_drag = None;
+            out.push(Command::SetDragging(false));
+            return out;
+        }
         if !self.surface_config().is_some_and(|config| config.anki.enabled) {
             return Vec::new();
         }
@@ -1812,6 +1859,9 @@ impl Controller {
     }
 
     fn cursor_moved(&mut self, pos: PhysPoint) -> Vec<Command> {
+        if self.surface.as_ref().is_some_and(|s| s.scroll_drag.is_some()) {
+            return Vec::new();
+        }
         if let Some(depth) = self.popup_at(pos) {
             return self.popup_entered(depth);
         }
@@ -1882,6 +1932,9 @@ impl Controller {
     /// A drill-down is not screen content. A dialogue behind it must not change
     /// the history stack that the user opened.
     pub fn dwell_armed(&self) -> bool {
+        if self.surface.as_ref().is_some_and(|s| s.scroll_drag.is_some()) {
+            return false;
+        }
         if self.selected_text_active() {
             return false;
         }
@@ -2070,6 +2123,7 @@ impl Controller {
     }
 
     fn hide(&mut self) -> Vec<Command> {
+        let stop_dragging = self.surface.as_ref().is_some_and(|s| s.scroll_drag.is_some());
         self.hover_buttons = 0;
         self.cancel_hover();
         self.chain_bind = None;
@@ -2084,7 +2138,11 @@ impl Controller {
         let session = self.active_bind.as_ref().map(|bind| bind.session.clone())
             .unwrap_or_else(|| self.future_session.clone());
         self.set_profile_config(&session);
-        vec![Command::HidePopup, Command::SetBackArmed(false)]
+        let mut out = vec![Command::HidePopup, Command::SetBackArmed(false)];
+        if stop_dragging {
+            out.push(Command::SetDragging(false));
+        }
+        out
     }
 
     fn ready(
@@ -2149,6 +2207,7 @@ impl Controller {
             anki: AnkiPopupState::fresh(anki_enabled, overwrite_duplicates),
             history: Vec::new(),
             scroll: 0,
+            scroll_drag: None,
             generation: 0,
             selection: Selections::default(),
             gesture: Gesture::default(),
@@ -2228,17 +2287,23 @@ impl Controller {
     /// Measure, place, and show the popup again.
     fn begin_place(&mut self, kind: PlaceKind) -> Vec<Command> {
         let Some(s) = self.surface.as_mut() else { return Vec::new() };
+        let stop_dragging = s.scroll_drag.take().is_some();
         if matches!(kind, PlaceKind::Fresh) {
             s.placed = None;
         }
         self.awaiting = Some(kind);
         let s = self.surface.as_ref().expect("checked above");
-        vec![Command::ShowPopup {
+        let mut out = Vec::with_capacity(if stop_dragging { 2 } else { 1 });
+        if stop_dragging {
+            out.push(Command::SetDragging(false));
+        }
+        out.push(Command::ShowPopup {
             presentation: Box::new(s.presentation.clone()),
             anchor: s.anchor,
             scroll: s.scroll,
             show_back: self.has_history(),
-        }]
+        });
+        out
     }
 
     fn popup_placed(&mut self, rect: PhysRect, content_h: i32, view_h: i32) -> Vec<Command> {
@@ -4562,6 +4627,101 @@ mod tests {
     }
 
     // -- scroll behavior --
+
+    #[test]
+    fn dragging_the_scroll_thumb_preserves_the_grab_and_stops_on_release() {
+        for anki_enabled in [false, true] {
+            let mut c = test_controller(ControllerConfig { anki_enabled, ..cfg() });
+            shown_sized(&mut c, 800, 200);
+            c.handle(Event::Scrolled { notches: -2 });
+            let down = PhysPoint { x: 290, y: 40 };
+            let commands = c.handle(Event::PointerDown {
+                local: down, button: Button::Primary,
+                hit: Some(HitAction::ScrollThumb { travel: 120 }), text: None,
+            });
+            assert!(commands.contains(&Command::SetDragging(true)));
+            assert_eq!(96, c.popup().unwrap().scroll);
+            assert!(!c.dwell_armed());
+            assert!(c.handle(Event::CursorMoved {
+                pos: PhysPoint { x: 20, y: 20 },
+            }).is_empty());
+            c.handle(Event::PointerUp { local: down, button: Button::Secondary });
+            let moved = PhysPoint { x: -20, y: 60 };
+            assert_eq!(
+                vec![Command::RepaintPopup { scroll: 196, show_back: false }],
+                c.handle(Event::PointerMoved { local: moved, text: None }),
+            );
+            c.handle(Event::PointerMoved {
+                local: PhysPoint { x: -20, y: 400 }, text: None,
+            });
+            assert_eq!(600, c.popup().unwrap().scroll);
+            c.handle(Event::PointerMoved {
+                local: PhysPoint { x: -20, y: -200 }, text: None,
+            });
+            assert_eq!(0, c.popup().unwrap().scroll);
+            c.handle(Event::PointerMoved { local: moved, text: None });
+            let commands = c.handle(Event::PointerUp { local: moved, button: Button::Primary });
+            assert!(commands.contains(&Command::SetDragging(false)));
+            c.handle(Event::PointerMoved {
+                local: PhysPoint { x: 290, y: 100 }, text: None,
+            });
+            assert_eq!(196, c.popup().unwrap().scroll);
+        }
+    }
+
+    #[test]
+    fn the_scroll_thumb_requires_primary_input_and_enabled_overflow() {
+        for (button, scroll_popup, content_h, travel) in [
+            (Button::Secondary, true, 800, 120),
+            (Button::Primary, false, 800, 120),
+            (Button::Primary, true, 200, 120),
+            (Button::Primary, true, 800, 0),
+        ] {
+            let mut c = test_controller(ControllerConfig { scroll_popup, ..cfg() });
+            shown_sized(&mut c, content_h, 200);
+            let commands = c.handle(Event::PointerDown {
+                local: PhysPoint { x: 290, y: 40 }, button,
+                hit: Some(HitAction::ScrollThumb { travel }), text: None,
+            });
+            assert!(!commands.contains(&Command::SetDragging(true)));
+            c.handle(Event::PointerMoved {
+                local: PhysPoint { x: 290, y: 100 }, text: None,
+            });
+            assert_eq!(0, c.popup().unwrap().scroll);
+        }
+    }
+
+    #[test]
+    fn hiding_or_remeasuring_a_popup_cancels_its_scroll_thumb_drag() {
+        for dismiss in [false, true] {
+            let mut c = test_controller(ControllerConfig { anki_enabled: true, ..cfg() });
+            shown_sized(&mut c, 800, 200);
+            c.handle(Event::PointerDown {
+                local: PhysPoint { x: 290, y: 40 }, button: Button::Primary,
+                hit: Some(HitAction::ScrollThumb { travel: 120 }), text: None,
+            });
+            let commands = if dismiss {
+                c.handle(Event::PointerDownOutside)
+            } else {
+                c.handle(Event::DupesChecked {
+                    generation: 1, session: test_session(), dupes: Some(HashSet::new()),
+                })
+            };
+            assert!(commands.contains(&Command::SetDragging(false)));
+            if dismiss {
+                assert!(c.popup().is_none());
+                assert!(c.handle(Event::PointerMoved {
+                    local: PhysPoint { x: 290, y: 100 }, text: None,
+                }).is_empty());
+            } else {
+                c.handle(placed(POPUP, 800, 200));
+                c.handle(Event::PointerMoved {
+                    local: PhysPoint { x: 290, y: 100 }, text: None,
+                });
+                assert_eq!(0, c.popup().unwrap().scroll);
+            }
+        }
+    }
 
     #[test]
     fn the_wheel_scrolls_by_whole_notches_and_clamps() {
