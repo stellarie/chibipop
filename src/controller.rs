@@ -116,6 +116,10 @@ pub enum Event {
     DismissRequested,
     PopupHover { local: PhysPoint, query: Option<String> },
     PopupHoverAt { depth: usize, local: PhysPoint, query: Option<String> },
+    PopupLookupRequested {
+        depth: usize, local: PhysPoint, query: Option<String>, session: ProfileSession,
+    },
+    PopupLookupCancelled,
     PopupActivated { depth: usize },
     PopupEntered { depth: usize },
     /// A dispatch tick with the live cursor and the Anki button height.
@@ -646,6 +650,7 @@ pub struct Controller {
     hover_buttons: u8,
     hover_candidate: Option<(String, PhysPoint, u64)>,
     hover_request: Option<(RequestId, PhysPoint, ProfileSession)>,
+    popup_request: Option<(RequestId, PhysPoint, ProfileSession)>,
     cfg: ControllerConfig,
     cfg_session: ProfileSession,
     future_cfg: ControllerConfig,
@@ -717,6 +722,7 @@ impl Controller {
             parents: Vec::new(),
             hover_candidate: None,
             hover_request: None,
+            popup_request: None,
             cfg: cfg.clone(),
             cfg_session: session.clone(),
             future_cfg: cfg,
@@ -845,6 +851,7 @@ impl Controller {
     }
 
     fn popup_hover(&mut self, local: PhysPoint, query: Option<String>) -> Vec<Command> {
+        if self.popup_request.is_some() { return Vec::new(); }
         let Some(sub_popups) = self.surface_config().map(|config| config.popup.sub_popups) else {
             return Vec::new();
         };
@@ -883,6 +890,16 @@ impl Controller {
         if self.hover_buttons != 0 || query.as_ref().is_none_or(String::is_empty) || parent.hovered == query {
             return Vec::new();
         }
+        let Some(placed) = parent.placed else { return Vec::new() };
+        let point = PhysPoint {
+            x: placed.popup.x.saturating_add(local.x),
+            y: placed.popup.y.saturating_add(local.y),
+        };
+        if self.parents.get(depth + 1).or(self.surface.as_ref()).is_some_and(|child| {
+            child.placed.is_none_or(|placed| in_sticky(point, child.hold, child.hold, placed.popup))
+        }) {
+            return Vec::new();
+        }
         let mut out = self.enter_parent(depth);
         out.extend(self.popup_hover(local, query));
         out
@@ -907,6 +924,36 @@ impl Controller {
         let id = self.next_lookup_request();
         self.hover_request = Some((id, local, session.clone()));
         vec![Command::RequestDrillDown { id, text, session }]
+    }
+
+    fn popup_lookup(
+        &mut self,
+        depth: usize,
+        local: PhysPoint,
+        query: Option<String>,
+        session: ProfileSession,
+    ) -> Vec<Command> {
+        if self.hover_buttons != 0 { return Vec::new(); }
+        let surface = if depth == self.parents.len() {
+            self.surface.as_ref()
+        } else {
+            self.parents.get(depth)
+        };
+        if surface.is_none_or(|s| s.placed.is_none() || s.last_drag_point.is_some()) {
+            return Vec::new();
+        }
+        let Some(text) = query.filter(|text| !text.is_empty()) else { return Vec::new() };
+        let mut out = self.enter_parent(depth);
+        self.cancel_hover();
+        let id = self.next_lookup_request();
+        self.pointer_depth = Some(depth);
+        let surface = self.surface.as_mut().expect("source popup exists");
+        if surface.hovered.as_deref() != Some(text.as_str()) {
+            surface.hovered = Some(text.clone());
+        }
+        self.popup_request = Some((id, local, session.clone()));
+        out.push(Command::RequestDrillDown { id, text, session });
+        out
     }
 
     fn enter_parent(&mut self, depth: usize) -> Vec<Command> {
@@ -967,7 +1014,7 @@ impl Controller {
         self.enter_parent(depth)
     }
 
-    fn push_hover(&mut self, mut presentation: Presentation, local: PhysPoint, session: ProfileSession) -> Vec<Command> {
+    fn push_popup(&mut self, mut presentation: Presentation, local: PhysPoint, session: ProfileSession, explicit: bool) -> Vec<Command> {
         let Some(parent) = self.surface.as_ref() else { return Vec::new() };
         let Some(placed) = parent.placed else { return Vec::new() };
         let source = parent.source;
@@ -977,9 +1024,7 @@ impl Controller {
         }
         let same_word = parent.session == session && presentation.top.as_ref().zip(parent.presentation.top.as_ref())
             .is_some_and(|(a, b)| a.written == b.written && a.reading == b.reading);
-        if presentation.top.is_none() || same_word
-            || self.parents.len() >= 16
-        {
+        if presentation.top.is_none() || (!explicit && same_word) {
             return Vec::new();
         }
         let anchor = PhysRect {
@@ -1052,6 +1097,15 @@ impl Controller {
             }
             Event::PopupHover { local, query } => self.popup_hover(local, query),
             Event::PopupHoverAt { depth, local, query } => self.popup_hover_at(depth, local, query),
+            Event::PopupLookupRequested { depth, local, query, session } => {
+                self.popup_lookup(depth, local, query, session)
+            }
+            Event::PopupLookupCancelled => {
+                self.cancel_hover();
+                if self.popup_request.is_some() { self.next_lookup_request(); }
+                if let Some(surface) = self.surface.as_mut() { surface.hovered = None; }
+                Vec::new()
+            }
             Event::PopupActivated { depth } => {
                 if self.hover_buttons != 0 { Vec::new() } else { self.enter_parent(depth) }
             }
@@ -1106,6 +1160,7 @@ impl Controller {
         let id = self.next_request();
         self.latest_lookup = id;
         self.selected_text = None;
+        self.popup_request = None;
         self.request_session = None;
         id
     }
@@ -1812,8 +1867,8 @@ impl Controller {
     }
 
     fn cursor_moved(&mut self, pos: PhysPoint) -> Vec<Command> {
-        if let Some(depth) = self.popup_at(pos) {
-            return self.popup_entered(depth);
+        if self.popup_at(pos).is_some() {
+            return Vec::new();
         }
         if !self.mode_eligible() || !self.gate_open(pos) {
             return Vec::new();
@@ -1890,7 +1945,7 @@ impl Controller {
             TriggerMode::Toggle => self.trigger_held,
             _ => false,
         };
-        live && self.parents.is_empty() && self.hover_request.is_none()
+        live && self.parents.is_empty() && self.hover_request.is_none() && self.popup_request.is_none()
             && self.hover_candidate.is_none() && self
             .surface
             .as_ref()
@@ -1905,8 +1960,8 @@ impl Controller {
         Some(self.surface.as_ref()?.placed?.popup)
     }
 
-    /// Press mode has no sticky region. A press over the popup is a deliberate
-    /// lookup that the mask turns into a miss, which hides the popup.
+    /// Press mode does not keep a screen lookup
+    /// inside the sticky region.
     fn frozen(&self, p: PhysPoint, session: &ProfileSession) -> bool {
         if self.parents.iter().any(|s| s.placed.is_some_and(|placed| {
             in_sticky(p, s.hold, s.hold, placed.popup)
@@ -1949,10 +2004,18 @@ impl Controller {
             self.request_session = None;
             return self.selected_text_lookup_result(outcome);
         }
+        if self.popup_request.as_ref().is_some_and(|(request, _, _)| *request == id) {
+            let (_, local, session) = self.popup_request.take().expect("matching request");
+            return match outcome {
+                LookupOutcome::DrillDown(presentation) => self.push_popup(*presentation, local, session, true),
+                LookupOutcome::Failed(message) => vec![Command::WarnLookupFailed(message)],
+                _ => Vec::new(),
+            };
+        }
         if self.hover_request.as_ref().is_some_and(|(request, _, _)| *request == id) {
             let (_, local, session) = self.hover_request.take().expect("matching request");
             return match outcome {
-                LookupOutcome::DrillDown(presentation) => self.push_hover(*presentation, local, session),
+                LookupOutcome::DrillDown(presentation) => self.push_popup(*presentation, local, session, false),
                 LookupOutcome::Failed(message) => vec![Command::WarnLookupFailed(message)],
                 _ => Vec::new(),
             };
@@ -2081,6 +2144,7 @@ impl Controller {
         self.pending_cursor = None;
         self.selected_text = None;
         self.request_session = None;
+        self.popup_request = None;
         let session = self.active_bind.as_ref().map(|bind| bind.session.clone())
             .unwrap_or_else(|| self.future_session.clone());
         self.set_profile_config(&session);
@@ -2780,6 +2844,175 @@ mod tests {
         c.handle(placed(PhysRect { x: 100 + depth * 150, y: 160 + depth * 60, ..POPUP }, 700, 200));
     }
 
+    fn popup_shortcut(c: &mut Controller, depth: usize, session: ProfileSession, text: &str) -> RequestId {
+        c.handle(Event::PopupLookupRequested {
+            depth, local: PhysPoint { x: 50, y: 70 }, query: Some(text.into()), session,
+        }).into_iter().find_map(|command| match command {
+            Command::RequestDrillDown { id, .. } => Some(id),
+            Command::RequestLookup { .. } => panic!("popup shortcuts must not request OCR"),
+            _ => None,
+        }).expect("popup text starts a dictionary lookup")
+    }
+
+    #[test]
+    fn capture_hide_cancels_popup_requests_without_dismissing_the_parent() {
+        let mut c = test_controller(cfg());
+        shown(&mut c);
+        let session = c.popup().unwrap().session.clone();
+        let id = popup_shortcut(&mut c, 0, session.clone(), "犬");
+        c.handle(Event::PopupLookupCancelled);
+        assert!(c.handle(Event::LookupResult {
+            id, outcome: LookupOutcome::DrillDown(Box::new(presentation_of("犬"))),
+        }).is_empty());
+        assert_eq!(c.popup_depth(), 0);
+        assert_eq!(c.popup().unwrap().presentation.top.as_ref().unwrap().written.as_deref(), Some("猫"));
+        let resumed = popup_shortcut(&mut c, 0, session, "鳥");
+        assert!(c.handle(Event::LookupResult {
+            id: resumed, outcome: LookupOutcome::DrillDown(Box::new(presentation_of("鳥"))),
+        }).contains(&Command::PushPopup));
+        c.handle(placed(POPUP, 200, 200));
+        let hovered = hover_request(&mut c, "魚");
+        c.handle(Event::PopupLookupCancelled);
+        assert!(c.handle(Event::LookupResult {
+            id: hovered, outcome: LookupOutcome::DrillDown(Box::new(presentation_of("魚"))),
+        }).is_empty());
+        assert_eq!(c.popup_depth(), 1);
+        let restarted = hover_request(&mut c, "魚");
+        assert!(c.handle(Event::LookupResult {
+            id: restarted, outcome: LookupOutcome::DrillDown(Box::new(presentation_of("魚"))),
+        }).contains(&Command::PushPopup));
+    }
+
+    #[test]
+    fn stationary_hover_keeps_the_shortcut_profile_child() {
+        let mut c = test_controller(cfg());
+        shown(&mut c);
+        let (_, _, session) = nested_test_sessions();
+        let id = popup_shortcut(&mut c, 0, session.clone(), "犬");
+        let local = PhysPoint { x: 50, y: 70 };
+        c.handle(Event::PopupHoverAt { depth: 0, local, query: Some("犬".into()) });
+        c.handle(Event::LookupResult {
+            id, outcome: LookupOutcome::DrillDown(Box::new(presentation_of("犬"))),
+        });
+        c.handle(placed(POPUP, 200, 200));
+        c.handle(Event::PopupHoverAt { depth: 0, local, query: Some("犬".into()) });
+        for _ in 0..20 { c.handle(Event::GestureTick); }
+        assert_eq!(c.popup_depth(), 1);
+        assert_eq!(c.popup().unwrap().session, &session);
+    }
+
+    #[test]
+    fn popup_shortcuts_cross_profiles_without_hover_or_a_depth_limit() {
+        let root_cfg = ControllerConfig { sub_popups: false, ..cfg() };
+        let mut c = test_controller(root_cfg);
+        shown_sized(&mut c, 700, 200);
+        c.handle(Event::Scrolled { notches: -2 });
+        let root = c.popup().unwrap().session.clone();
+        let (_, child, grandchild) = nested_test_sessions();
+        for depth in 0..20 {
+            let session = if depth % 2 == 0 { child.clone() } else { grandchild.clone() };
+            let id = popup_shortcut(&mut c, depth, session.clone(), "犬");
+            c.handle(Event::PopupHover {
+                local: PhysPoint { x: 51, y: 70 }, query: None,
+            });
+            let commands = c.handle(Event::LookupResult {
+                id, outcome: LookupOutcome::DrillDown(Box::new(presentation_of("犬"))),
+            });
+            assert!(commands.contains(&Command::PushPopup));
+            c.handle(placed(POPUP, 200, 200));
+            assert_eq!(c.popup().unwrap().session, &session);
+            assert_eq!(c.popup_depth(), depth + 1);
+        }
+        assert_eq!(c.parent_popup(0).unwrap().session, &root);
+        assert_eq!(c.parent_popup(0).unwrap().scroll, 96);
+        let id = popup_shortcut(&mut c, 0, grandchild.clone(), "鳥");
+        assert_eq!(c.popup_depth(), 0);
+        c.handle(Event::LookupResult {
+            id, outcome: LookupOutcome::DrillDown(Box::new(presentation_of("鳥"))),
+        });
+        c.handle(placed(POPUP, 200, 200));
+        assert_eq!(c.popup_depth(), 1);
+        assert_eq!(c.popup().unwrap().session, &grandchild);
+        c.handle(Event::BackRequested);
+        assert_eq!(c.popup().unwrap().session, &root);
+        assert_eq!(c.popup().unwrap().scroll, 96);
+    }
+
+    #[test]
+    fn popup_shortcuts_can_repeat_the_same_word_and_profile() {
+        let mut c = test_controller(cfg());
+        shown(&mut c);
+        let session = c.popup().unwrap().session.clone();
+        let id = popup_shortcut(&mut c, 0, session, "猫");
+        let commands = c.handle(Event::LookupResult {
+            id, outcome: LookupOutcome::DrillDown(Box::new(presentation_of("猫"))),
+        });
+        assert!(commands.contains(&Command::PushPopup));
+        assert_eq!(c.popup_depth(), 1);
+    }
+
+    #[test]
+    fn popup_shortcut_misses_keep_parents_and_navigation_rejects_stale_results() {
+        let mut c = test_controller(cfg());
+        shown(&mut c);
+        let session = c.popup().unwrap().session.clone();
+        let id = popup_shortcut(&mut c, 0, session.clone(), "犬");
+        c.handle(Event::LookupResult {
+            id, outcome: LookupOutcome::DrillDown(Box::new(presentation_of("犬"))),
+        });
+        c.handle(placed(POPUP, 200, 200));
+        let miss = popup_shortcut(&mut c, 1, session.clone(), "見つからない");
+        c.handle(Event::LookupResult { id: miss, outcome: LookupOutcome::Hide });
+        assert_eq!(c.popup_depth(), 1);
+        assert_eq!(c.popup().unwrap().presentation.top.as_ref().unwrap().written.as_deref(), Some("犬"));
+        let old = popup_shortcut(&mut c, 1, session.clone(), "鳥");
+        let new = popup_shortcut(&mut c, 1, session.clone(), "魚");
+        assert!(c.handle(Event::LookupResult {
+            id: old, outcome: LookupOutcome::DrillDown(Box::new(presentation_of("鳥"))),
+        }).is_empty());
+        c.handle(Event::BackRequested);
+        assert!(c.handle(Event::LookupResult {
+            id: new, outcome: LookupOutcome::DrillDown(Box::new(presentation_of("魚"))),
+        }).is_empty());
+        assert_eq!(c.popup_depth(), 0);
+        assert_eq!(c.popup().unwrap().presentation.top.as_ref().unwrap().written.as_deref(), Some("猫"));
+        assert!(c.handle(Event::PopupLookupRequested {
+            depth: 0, local: PhysPoint { x: 0, y: 0 }, query: None, session: session.clone(),
+        }).is_empty());
+        let dismissed = popup_shortcut(&mut c, 0, session, "犬");
+        c.handle(Event::DismissRequested);
+        assert!(c.handle(Event::LookupResult {
+            id: dismissed, outcome: LookupOutcome::DrillDown(Box::new(presentation_of("犬"))),
+        }).is_empty());
+        assert!(!c.is_shown());
+    }
+
+    #[test]
+    fn popup_shortcuts_preserve_root_trigger_ownership() {
+        for mode in [TriggerMode::Press, TriggerMode::HoldKey, TriggerMode::Toggle] {
+            let mut c = test_controller(press_cfg());
+            bind_down(&mut c, "root", mode, PhysPoint { x: 110, y: 110 });
+            shown(&mut c);
+            let (_, session, _) = nested_test_sessions();
+            let id = popup_shortcut(&mut c, 0, session.clone(), "犬");
+            bind_up(&mut c, "child");
+            assert_eq!(c.active_bind_id(), Some("root"));
+            assert_eq!(c.trigger_mode(), mode);
+            c.handle(Event::LookupResult {
+                id, outcome: LookupOutcome::DrillDown(Box::new(presentation_of("犬"))),
+            });
+            c.handle(placed(POPUP, 200, 200));
+            assert_eq!(c.popup().unwrap().session, &session);
+            assert_eq!(c.popup_depth(), 1);
+            if mode == TriggerMode::HoldKey {
+                assert!(bind_up(&mut c, "root").contains(&Command::HidePopup));
+            } else {
+                assert!(bind_up(&mut c, "child").is_empty());
+                assert_eq!(c.popup_depth(), 1);
+            }
+        }
+    }
+
     #[test]
     fn hover_parent_reentry_restores_the_correct_level_and_preserves_state() {
         let mut c = test_controller(cfg());
@@ -2843,6 +3076,75 @@ mod tests {
         assert_eq!(c.popup_depth(), 1);
         c.handle(Event::PopupEntered { depth: 1 });
         assert!(c.handle(Event::PopupEntered { depth: 0 }).contains(&Command::RestorePopup { depth: 0 }));
+    }
+
+    #[test]
+    fn screen_cursor_samples_do_not_override_popup_entry() {
+        let mut c = test_controller(cfg());
+        shown(&mut c);
+        hover_child(&mut c, "犬");
+        let child = c.popup().unwrap().popup;
+        c.handle(Event::PopupEntered { depth: usize::MAX });
+        c.handle(Event::PopupEntered { depth: 1 });
+        for pos in [
+            PhysPoint { x: child.x + 10, y: child.y - 2 },
+            PhysPoint { x: child.x + 10, y: child.y - 1 },
+            PhysPoint { x: child.x + 10, y: child.y },
+        ] {
+            let commands = c.handle(Event::CursorMoved { pos });
+            assert!(!commands.iter().any(|command| matches!(command,
+                Command::RestorePopup { .. } | Command::HidePopup | Command::RequestLookup { .. }
+            )), "{pos:?}: {commands:?}");
+            assert_eq!(c.popup_depth(), 1);
+            assert_eq!(c.popup().unwrap().presentation.top.as_ref().unwrap().written.as_deref(), Some("犬"));
+        }
+        c.handle(Event::PopupEntered { depth: usize::MAX });
+        assert!(c.handle(Event::PopupEntered { depth: 0 })
+            .contains(&Command::RestorePopup { depth: 0 }));
+        assert_eq!(c.popup_depth(), 0);
+    }
+
+    #[test]
+    fn crossing_parent_text_to_a_child_keeps_the_child_open() {
+        for (child, points) in [
+            (PhysRect { x: 150, y: 271, w: 300, h: 200 },
+                [(160, 240), (175, 250), (180, 265), (180, 272)]),
+            (PhysRect { x: -150, y: -11, w: 300, h: 200 },
+                [(140, 220), (135, 205), (130, 195), (130, 185)]),
+        ] {
+            let mut c = test_controller(cfg());
+            shown(&mut c);
+            let session = c.popup().unwrap().session.clone();
+            let id = popup_shortcut(&mut c, 0, session.clone(), "犬");
+            c.handle(Event::LookupResult {
+                id, outcome: LookupOutcome::DrillDown(Box::new(presentation_of("犬"))),
+            });
+            c.handle(placed(child, 200, 200));
+            for (x, y) in points {
+                let point = PhysPoint { x, y };
+                let mut commands = c.handle(Event::CursorMoved { pos: point });
+                if child.contains(point) {
+                    commands.extend(c.handle(Event::PopupEntered { depth: 1 }));
+                } else {
+                    commands.extend(c.handle(Event::PopupHoverAt {
+                        depth: 0, local: PhysPoint { x: x - POPUP.x, y: y - POPUP.y },
+                        query: Some("別の言葉".into()),
+                    }));
+                }
+                for _ in 0..20 {
+                    commands.extend(c.handle(Event::Tick { cursor: point, button_h: 0 }));
+                }
+                assert!(!commands.iter().any(|command| matches!(command,
+                    Command::RestorePopup { .. } | Command::RequestLookup { .. }
+                    | Command::RequestDrillDown { .. } | Command::HidePopup
+                )), "{point:?}: {commands:?}");
+                assert_eq!(c.popup_depth(), 1);
+                assert_eq!(c.popup().unwrap().presentation.top.as_ref().unwrap().written.as_deref(), Some("犬"));
+                assert_eq!(c.popup().unwrap().session, &session);
+            }
+            assert!(c.handle(Event::PopupEntered { depth: 0 })
+                .contains(&Command::RestorePopup { depth: 0 }));
+        }
     }
 
     #[test]
@@ -3041,6 +3343,7 @@ mod tests {
         assert_eq!(c.popup_depth(), 1);
         assert!(c.handle(Event::PopupHoverAt { depth: 0, local, query: None }).is_empty());
         assert_eq!(c.popup_depth(), 1);
+        let local = PhysPoint { x: 10, y: 10 };
         assert!(c.handle(Event::PopupHoverAt { depth: 0, local, query: Some("鳥".into()) })
             .contains(&Command::RestorePopup { depth: 0 }));
         assert_eq!(c.popup_depth(), 0);
@@ -3194,14 +3497,12 @@ mod tests {
     }
 
     #[test]
-    fn hover_depth_is_bounded_and_dismiss_retires_every_descendant() {
+    fn hover_chain_can_exceed_sixteen_levels_and_dismiss_retires_every_descendant() {
         let mut c = test_controller(cfg());
         shown(&mut c);
-        for depth in 0..16 { hover_child(&mut c, &format!("語{depth}")); }
-        let id = hover_request(&mut c, "限界");
-        assert!(c.handle(Event::LookupResult { id, outcome: LookupOutcome::DrillDown(Box::new(presentation_of("限界"))) }).is_empty());
-        assert_eq!(c.popup_depth(), 16);
-        assert_eq!(c.popup_rects().len(), 17);
+        for depth in 0..20 { hover_child(&mut c, &format!("語{depth}")); }
+        assert_eq!(c.popup_depth(), 20);
+        assert_eq!(c.popup_rects().len(), 21);
         assert!(c.handle(Event::DismissRequested).contains(&Command::HidePopup));
         assert!(c.popup_rects().is_empty());
         assert_eq!(c.popup_depth(), 0);

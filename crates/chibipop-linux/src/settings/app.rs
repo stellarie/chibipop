@@ -1713,7 +1713,7 @@ fn popup_page(app: &App) -> Element<'_, Message> {
     column![
         card("Appearance", column![
             checkbox(app.form.cfg.popup.sub_popups)
-                .label("Look up words inside the popup")
+                .label("Hover over popup text to open sub-popups")
                 .on_toggle(Message::SubPopups),
             labeled(
                 "Theme",
