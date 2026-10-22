@@ -145,7 +145,6 @@ fn the_asset_extracts_to_a_tree_the_binary_can_find_its_models_in() {
         std::fs::metadata(root_dir.join(rel)).unwrap().permissions().mode() & 0o777
     };
     assert_eq!(0o755, mode("chibipop"));
-    assert_eq!(0o644, mode("data/deconjugator.json"));
     assert_eq!(0o644, mode("extras/chibipop.service"));
 
     std::fs::remove_dir_all(&root).ok();

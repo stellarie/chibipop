@@ -512,7 +512,7 @@ pub fn run(paths: Paths, mode: SearchMode, initial: Option<String>, saved: Confi
     let database_signature = file_signature(&database);
     let ipc = Arc::new(SearchIpcServer::bind(&paths, &identity, &display)?);
     let (worker, session) = Worker::new(
-        database.clone(), data_file("data/deconjugator.json"), saved, identity.profile_id.clone(),
+        database.clone(), saved, identity.profile_id.clone(),
     )?;
     let resource_watch = ResourceWatch::new(
         database.clone(), paths.config_file.clone(), database_signature, &session,
@@ -646,13 +646,13 @@ type WorkerReply = iced::futures::channel::oneshot::Sender<std::result::Result<B
 struct Worker { sender: mpsc::Sender<(Job, WorkerReply)> }
 
 impl Worker {
-    fn new(database: PathBuf, deconjugator: PathBuf, saved: Config, profile_id: String)
+    fn new(database: PathBuf, saved: Config, profile_id: String)
         -> Result<(Self, ProfileSession)> {
         let (sender, receiver) = mpsc::channel::<(Job, WorkerReply)>();
         let (startup_sender, startup_receiver) = mpsc::channel::<Result<ProfileSession>>();
         thread::Builder::new().name("search-worker".into()).spawn(move || {
             let (service, session) = match SearchService::open_catalog(
-                &database, &deconjugator, &saved, &profile_id,
+                &database, None, &saved, &profile_id,
             ) {
                 Ok(opened) => opened,
                 Err(error) => {
@@ -1179,13 +1179,6 @@ fn view(search: &Search, id: window::Id) -> Element<'_, Message> {
         }).into()
 }
 
-fn data_file(relative: &str) -> PathBuf {
-    let beside = chibipop::paths::beside_exe(relative);
-    if beside.is_file() { return beside; }
-    let shared = chibipop::paths::beside_exe(&format!("../share/chibipop/{relative}"));
-    if shared.is_file() { return shared; }
-    chibipop::paths::data_file(relative)
-}
 mod focus {
     use std::fs::{File, TryLockError};
     use std::io;

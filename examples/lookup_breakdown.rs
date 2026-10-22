@@ -159,8 +159,7 @@ fn hover_inputs(terms: &[String], prose: &[String], chars: usize) -> Vec<String>
 }
 
 fn engine() -> Result<(LookupEngine, Deconjugator)> {
-    let p = Path::new(env!("CARGO_MANIFEST_DIR")).join("data/deconjugator.json");
-    let rules = load_rules(&p)?;
+    let rules = load_rules(None)?;
     Ok((LookupEngine::new(Deconjugator::new(rules.clone())), Deconjugator::new(rules)))
 }
 

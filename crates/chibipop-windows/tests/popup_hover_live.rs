@@ -32,7 +32,6 @@ impl Fixture {
         connection.execute("UPDATE entry SET glossary = ?1 WHERE entry_id IN (SELECT entry_id FROM term WHERE written = '猫')",
             [r#"[{"type":"structured-content","content":[{"tag":"ruby","content":["食",{"tag":"rt","content":"た"}]},"べる"]}]"#]).unwrap();
         drop(connection);
-        std::fs::copy(repo.join("data/deconjugator.json"), root.join("data/deconjugator.json")).unwrap();
         std::fs::copy(env!("CARGO_BIN_EXE_chibipop"), root.join("chibipop.exe")).unwrap();
         let mut config = Config::default();
         let mut profile = config.resolve("default").unwrap();

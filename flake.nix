@@ -119,8 +119,6 @@
                 buildInputs = libraries;
 
                 postInstall = ''
-                  install -Dm644 data/deconjugator.json \
-                    "$out/share/chibipop/data/deconjugator.json"
                   install -Dm644 data/ipadic/system.dic data/ipadic/COPYING \
                     data/ipadic/NOTICE data/ipadic/SHA256SUMS.txt \
                     -t "$out/share/chibipop/data/ipadic"

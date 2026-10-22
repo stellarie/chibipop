@@ -24,13 +24,14 @@ The zip contains:
 ```
 chibipop-vX.Y.Z-windows-x64/
   chibipop.exe                 the application
-  data/deconjugator.json       required at runtime
   README.md
   LICENSE
   plugins/meikiocr/plugin.toml
   plugins/meikiocr/adapter.py
   plugins/meikiocr/config.toml
 ```
+
+Both binaries embed the default deconjugation rules. Neither release asset needs an external rules file.
 
 **The dictionary database is deliberately not in it.** It is 232 MiB, and it
 is built from dictionaries we have no right to redistribute — 大辞林 is
@@ -54,7 +55,6 @@ installation:
 ```
 chibipop-vX.Y.Z-linux-x64/
   chibipop                     the application
-  data/deconjugator.json       required at runtime
   README.md
   LICENSE
   models/meiki/                the OCR engine's three ONNX models, ~46 MiB
@@ -155,25 +155,25 @@ models are committed, so neither package downloads anything but its own
 source.
 
 Both install one layout, and it is not free-form: `/usr/bin/chibipop`
-resolves its data by walking up from its own directory
-(`models::LAYOUTS`, and the daemon's rules search one directory over).
+resolves its models by walking up from its own directory
+(`models::LAYOUTS`).
 
 ```
 /usr/bin/chibipop
-/usr/share/chibipop/data/deconjugator.json           required at runtime
 /usr/share/chibipop/models/meiki/                    the three ONNX models
 /usr/share/applications/chibipop.desktop
 /usr/lib/systemd/user/chibipop.service               a *user* unit
 /usr/share/icons/hicolor/scalable/apps/chibipop.svg  the .desktop entry's Icon=
 /usr/share/doc/chibipop/{README.md,extras/}          snippets, not config
 /usr/share/licenses/<pkgname>/{LICENSE,LICENSE.models.md}
+
 ```
 
-Move either of the first two and the package still installs, then refuses
-to OCR or stops resolving conjugated forms — so
+Move `models/meiki` or its digest files, and the package still installs.
+The binary then refuses to start OCR.
 `crates/chibipop-linux/tests/aur_packaging.rs` runs each PKGBUILD's own
-`package()` over a stub `$srcdir` and asks the binary's search where the
-models are in the `$pkgdir` that comes out. It needs no `makepkg`
+`package()` over a stub `$srcdir` and asks the binary's model search where
+the models are in the `$pkgdir` that comes out. It needs no `makepkg`
 (`package()` is a shell function over `install`), so it runs on a CI runner
 like any other test.
 

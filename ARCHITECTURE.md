@@ -400,6 +400,7 @@ Worker: capture -> mask -> OCR -> lookup -> present --result--> Controller
 ## Dictionary and lookup
 
 - Direct search uses the existing lookup engine and presentation rules without capture or OCR.
+- Default matching uses rules embedded in both binaries. Windows `--rules FILE` explicitly loads a file and reports invalid or missing files.
 - Search displays candidates before a selected definition. Definitions reuse `PopupScene` and the existing native painters.
 - Sentence search derives UTF-8 word ranges from enabled dictionary matches through the normal lookup engine, including Japanese inflections and Chinese text.
 - Clicks request candidates for the selected word and its shorter internal matches, within the normal result cap.
@@ -445,7 +446,8 @@ Worker: capture -> mask -> OCR -> lookup -> present --result--> Controller
   the part-of-speech row. The separator is ` « ` (U+00AB). An empty chain draws no row,
   so no geometry golden changes.
 - The design rejects an outermost-first display (weikipop's order), a relabel table in
-  code (the labels come from `data/deconjugator.json`), and a setting that hides the row.
+  code (the labels come from embedded rules compiled from `data/deconjugator.json`),
+  and a setting that hides the row.
 
 ## Verification
 

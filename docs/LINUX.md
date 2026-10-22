@@ -92,9 +92,9 @@ Cache write failures do not prevent library access.
 Three routes. All three carry the OCR models, so none of them downloads
 anything on first run.
 
-**The tarball.** One `tar xzf` is the whole installation. The binary, the
-deconjugation rules, the three ONNX models and the `extras/` snippets come
-out in one folder, and the binary finds the models beside itself.
+**The tarball.** One `tar xzf` extracts the installation. The binary, the three
+ONNX models, and the `extras/` snippets share one folder. The binary finds
+the models beside itself. Deconjugation rules are embedded in the binary.
 
 ```bash
 tar xzf chibipop-vX.Y.Z-linux-x64.tar.gz

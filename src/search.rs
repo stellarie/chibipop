@@ -137,7 +137,7 @@ pub fn selected_presentation(result: &SearchResult, index: usize) -> Option<Pres
 }
 
 impl SearchService {
-    pub fn open(database: &Path, rules: &Path, config: &ResolvedConfig) -> Result<Self> {
+    pub fn open(database: &Path, rules: Option<&Path>, config: &ResolvedConfig) -> Result<Self> {
         let dictionary = SqliteDictionary::open(database)?;
         let dicts = dictionary.dicts()?;
         Ok(Self {
@@ -148,7 +148,7 @@ impl SearchService {
         })
     }
 
-    pub fn open_catalog(database: &Path, rules: &Path, config: &Config, profile_id: &str)
+    pub fn open_catalog(database: &Path, rules: Option<&Path>, config: &Config, profile_id: &str)
         -> Result<(Self, ProfileSession)> {
         let dictionary = SqliteDictionary::open(database)?;
         let dicts = dictionary.dicts()?;
@@ -407,7 +407,6 @@ mod tests {
         impl Drop for Cleanup { fn drop(&mut self) { let _ = std::fs::remove_file(&self.0); } }
         let _cleanup = Cleanup(database.clone());
         crate::dict::build::build(&[root.join("tests/fixtures/yomitan/terms.zip")], &[], &database, &|_| {}).unwrap();
-        let rules = root.join("data/deconjugator.json");
         let mut saved = Config::default();
         let root_id = saved.default_profile.clone();
         let mut root_settings = saved.resolve(&root_id).unwrap();
@@ -422,7 +421,7 @@ mod tests {
         root_settings.nested_profile = Some(child_id.clone());
         saved.update_profile(&root_id, &root_settings).unwrap();
 
-        let (service, session) = SearchService::open_catalog(&database, &rules, &saved, &root_id).unwrap();
+        let (service, session) = SearchService::open_catalog(&database, None, &saved, &root_id).unwrap();
         let nested = session.nested();
         assert_eq!(nested.id(), child_id);
         assert!(matches!(service.search_in(&session, "猫").unwrap(), SearchResult::Found(_)));
@@ -431,7 +430,7 @@ mod tests {
     }
     #[test]
     fn missing_database_reports_an_error() {
-        assert!(SearchService::open(Path::new("missing-search.sqlite"), Path::new("missing-rules.json"),
+        assert!(SearchService::open(Path::new("missing-search.sqlite"), None,
             &ResolvedConfig::default()).is_err());
     }
 
@@ -446,11 +445,10 @@ mod tests {
         let _cleanup = Cleanup(database.clone());
         crate::dict::build::build(&[root.join("tests/fixtures/yomitan/terms.zip")],
             &[root.join("tests/fixtures/yomitan/freq.zip")], &database, &|_| {}).unwrap();
-        let rules = root.join("data/deconjugator.json");
         let mut config = ResolvedConfig::default();
         config.dictionaries.terms = vec!["FixtureTerms".into()];
         {
-            let service = SearchService::open(&database, &rules, &config).unwrap();
+            let service = SearchService::open(&database, None, &config).unwrap();
             let tokens = service.sentence_tokens("猫は食べました。").unwrap();
             assert_eq!(sentence_token_at(&tokens, 9).unwrap().text, "食べました");
             assert_eq!(service.search("　").unwrap(), SearchResult::Empty);
@@ -472,16 +470,16 @@ mod tests {
             assert_eq!(service.search("食べました").unwrap(), first);
         }
         config.dictionaries.terms_disabled = std::mem::take(&mut config.dictionaries.terms);
-        let service = SearchService::open(&database, &rules, &config).unwrap();
+        let service = SearchService::open(&database, None, &config).unwrap();
         assert_eq!(service.search("猫").unwrap(), SearchResult::Miss);
         drop(service);
         config.dictionaries.terms = std::mem::take(&mut config.dictionaries.terms_disabled);
-        let service = SearchService::open(&database, &rules, &config).unwrap();
+        let service = SearchService::open(&database, None, &config).unwrap();
         assert!(matches!(service.search("猫").unwrap(), SearchResult::Found(_)));
         drop(service);
         let connection = rusqlite::Connection::open(&database).unwrap();
         connection.execute("DROP TABLE term", []).unwrap();
-        let service = SearchService::open(&database, &rules, &config).unwrap();
+        let service = SearchService::open(&database, None, &config).unwrap();
         assert!(service.search("猫").is_err());
     }
 }

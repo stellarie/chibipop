@@ -1875,10 +1875,9 @@ while the built-in engine remains selected.
 
 **Setup.** Seed a **scratch** folder — never `Documents\chibipop-latest`,
 `chibipop-nightly` or `chibipop-nightly-jp`. Copy `chibipop.exe`,
-`data/deconjugator.json`, `README.md`, `LICENSE` and the whole
-`plugins/meikiocr/` folder into an empty directory. Do not create or hand-edit
-`chibipop.toml` first: the point is the true first-run path, before any config
-exists.
+`README.md`, `LICENSE` and the whole `plugins/meikiocr/` folder into an empty
+directory. Do not create or hand-edit `chibipop.toml` first: the point is the
+true first-run path, before any config exists.
 
 1. `<folder>\chibipop.exe run` starts with no errors or plugin warnings. The
    built-in engine remains selected, so discovery leaves saved enablement

@@ -48,12 +48,7 @@ stage="$out/$name"
 rm -rf -- "$stage"
 mkdir -p -- "$stage/data" "$stage/data/ipadic" "$stage/models/meiki" "$stage/extras"
 
-# The Windows zip's shape, mirrored: the binary, the deconjugator table it
-# needs at runtime, README, LICENSE. The dictionary database is not here
-# and never will be - 232 MiB built from archives that are not ours to
-# redistribute (docs/RELEASING.md).
 install -m755 -- "$binary" "$stage/chibipop"
-install -m644 -- "$repo/data/deconjugator.json" "$stage/data/"
 install -m644 -- "$repo/README.md" "$repo/LICENSE" "$stage/"
 # The offline-first runtime needs the decoded IPADIC model. Keep its license
 # files beside the model. The script checks the staged files with the same

@@ -192,7 +192,7 @@ pub struct SearchWindow {
     state: Box<State>,
     session: ProfileSession,
     database: PathBuf,
-    rules: PathBuf,
+    rules: Option<PathBuf>,
     resource_config_path: Option<PathBuf>,
     resource_policy: Option<SharedPolicy>,
     resource_check: Instant,
@@ -241,11 +241,11 @@ pub fn is_foreground() -> bool {
 }
 
 impl SearchWindow {
-    pub fn open(database: &Path, rules: &Path, session: ProfileSession) -> Result<Self> {
+    pub fn open(database: &Path, rules: Option<&Path>, session: ProfileSession) -> Result<Self> {
         Self::open_mode(database, rules, session, SearchMode::Dictionary, None)
     }
 
-    pub fn open_mode(database: &Path, rules: &Path, session: ProfileSession,
+    pub fn open_mode(database: &Path, rules: Option<&Path>, session: ProfileSession,
         mode: SearchMode, text: Option<&str>) -> Result<Self> {
         let state = Box::new(State {
             input: Cell::default(), results: Cell::default(), button: Cell::default(),
@@ -280,7 +280,7 @@ impl SearchWindow {
         let (requests, inbox) = mpsc::channel::<SearchRequest>();
         let (outbox, replies) = mpsc::channel();
         let db = database.to_path_buf();
-        let rules_path = rules.to_path_buf();
+        let rules_path = rules.map(Path::to_path_buf);
         if let Err(error) = std::thread::Builder::new().name("dictionary-search".into()).spawn(move || {
             let mut service = None;
             while let Ok(first) = inbox.recv() {
@@ -293,7 +293,7 @@ impl SearchWindow {
                 let reply = if let Some(service) = &service {
                     search(service, &query)
                 } else {
-                    match SearchService::open(&db, &rules_path, query.session.config()) {
+                    match SearchService::open(&db, rules_path.as_deref(), query.session.config()) {
                         Ok(opened) => {
                             let reply = search(&opened, &query);
                             service = Some(opened);
@@ -310,7 +310,7 @@ impl SearchWindow {
             return Err(error).context("starting search worker");
         }
         let mut window = Self { hwnd, state, session, database: database.to_path_buf(),
-            rules: rules.to_path_buf(), resource_config_path: None, resource_policy: None,
+            rules: rules.map(Path::to_path_buf), resource_config_path: None, resource_policy: None,
             resource_check: Instant::now(), database_signature: file_signature(database),
             generation: 0, click_generation: 0, click_parent: None, requests, replies, result: SearchResult::Empty,
             tokens: Vec::new(), definitions: Vec::new(), hover: None };
@@ -507,7 +507,7 @@ impl SearchWindow {
         };
         let policy = SharedPolicy::from(&saved);
         if self.resource_policy.as_ref().is_some_and(|current| current == &policy) { return false; }
-        match SearchService::open_catalog(&self.database, &self.rules, &saved, &saved.default_profile) {
+        match SearchService::open_catalog(&self.database, self.rules.as_deref(), &saved, &saved.default_profile) {
             Ok((_, latest)) => {
                 let changed = latest.catalog.config.dictionaries != self.session.catalog.config.dictionaries
                     || latest.catalog.config.plugins != self.session.catalog.config.plugins;
@@ -1358,7 +1358,6 @@ mod tests {
         let database = std::env::temp_dir()
             .join(format!("chibipop-native-search-{}-{n}.sqlite", std::process::id()));
         chibipop::dict::build::build(&[root.join("tests/fixtures/yomitan/terms.zip")], &[], &database, &|_| {}).unwrap();
-        let rules = root.join("data/deconjugator.json");
         let mut saved = Config::default();
         let root_id = saved.default_profile.clone();
         let mut root_settings = saved.resolve(&root_id).unwrap();
@@ -1370,8 +1369,8 @@ mod tests {
             data: ProfileData::Full { settings: Box::new(nested_settings) } });
         root_settings.nested_profile = Some(nested_id);
         saved.update_profile(&root_id, &root_settings).unwrap();
-        let (_, session) = SearchService::open_catalog(&database, &rules, &saved, &root_id).unwrap();
-        let window = SearchWindow::open(&database, &rules, session).unwrap();
+        let (_, session) = SearchService::open_catalog(&database, None, &saved, &root_id).unwrap();
+        let window = SearchWindow::open(&database, None, session).unwrap();
         (window, Fixture(database), guard)
     }
 

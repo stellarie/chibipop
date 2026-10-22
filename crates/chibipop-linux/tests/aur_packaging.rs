@@ -89,11 +89,6 @@ fn mode(path: &Path) -> u32 {
 }
 
 /// Check every package requirement against a real `$pkgdir`.
-///
-/// Check the two path rules first. A `/usr/bin` install finds its models through
-/// the second `models::LAYOUTS` entry (`../share/chibipop/models`). The daemon
-/// finds its rules in the same relative location. If either path is wrong, the
-/// package can still install.
 fn assert_installed_tree(pkgdir: &Path) {
     let bin_dir = pkgdir.join("usr/bin");
     // `beside` returns a path that contains `..`. Compare the canonical paths to
@@ -105,10 +100,6 @@ fn assert_installed_tree(pkgdir: &Path) {
         found.canonicalize().unwrap(),
         "/usr/bin/chibipop resolves its models somewhere else: {}",
         found.display()
-    );
-    assert!(
-        pkgdir.join("usr/share/chibipop/data/deconjugator.json").is_file(),
-        "no deconjugation rules under ../share/chibipop - every conjugated form would stop resolving"
     );
 
     for (name, _) in models::ALL {
@@ -145,7 +136,6 @@ fn assert_installed_tree(pkgdir: &Path) {
     // Make only the binary executable. An executable data file can make a package
     // look like malware.
     assert_eq!(0o755, mode(&pkgdir.join("usr/bin/chibipop")));
-    assert_eq!(0o644, mode(&pkgdir.join("usr/share/chibipop/data/deconjugator.json")));
     assert_eq!(0o644, mode(&pkgdir.join("usr/lib/systemd/user/chibipop.service")));
 }
 

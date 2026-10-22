@@ -47,7 +47,6 @@ impl ProcessFixture {
         std::fs::copy(repo.join("tests/fixtures/yomitan/terms.zip"), &archive).unwrap();
         let database = root.join("data/chibipop.sqlite");
         chibipop::dict::build::build(&[archive], &[], &database, &|_| {}).unwrap();
-        std::fs::copy(repo.join("data/deconjugator.json"), root.join("data/deconjugator.json")).unwrap();
         let executable = root.join("chibipop.exe");
         std::fs::copy(env!("CARGO_BIN_EXE_chibipop"), &executable).unwrap();
         let mut config = Config::default();

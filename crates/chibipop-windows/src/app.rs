@@ -462,7 +462,7 @@ pub fn settings_only(
                 Ok(session) => open_search_window_mode(
                     &mut search_windows,
                     dict_path,
-                    &crate::paths::data_file("data/deconjugator.json"),
+                    None,
                     session,
                     config_path,
                     mode,
@@ -1614,7 +1614,7 @@ fn sync_runtime_status(
 /// Capture and OCR objects stay on the Worker thread. Only their status crosses back.
 fn worker_open(
     dict_path: PathBuf,
-    rules_path: PathBuf,
+    rules_path: Option<PathBuf>,
     language: String,
     guard: CaptureGuard,
     // The value is "builtin" or a plugin name.
@@ -1640,7 +1640,7 @@ fn worker_open(
                 dict_path.display()
             )
         })?;
-        let rules = load_rules(&rules_path)?;
+        let rules = load_rules(rules_path.as_deref())?;
         let engine = LookupEngine::new(Deconjugator::new(rules));
         ui.monitor.publish(&active_engine, &active_language, true);
         Ok(WorkerParts {
@@ -1660,15 +1660,15 @@ fn worker_open(
     }
 }
 /// Runs the Windows message loop until the user quits.
-pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path) -> Result<()> {
-    // The Dictionary or rules file does not exist yet.
-    if !dict_path.exists() || !rules_path.exists() {
+pub fn run(mut cfg: Config, dict_path: &Path, rules_path: Option<&Path>, config_path: &Path) -> Result<()> {
+    // The Dictionary does not exist yet.
+    if !dict_path.exists() {
         return settings_only(cfg, &[], config_path, dict_path);
     }
 
     let library = library_dir();
     let db_path = dict_path.to_path_buf();
-    let rules_path = rules_path.to_path_buf();
+    let rules_path = rules_path.map(Path::to_path_buf);
     // One-off OCR pixels for OCR-to-clipboard. Lookup requests use core channels.
     let (ocr_tx, ocr_request_rx) = mpsc::channel::<crate::action::OcrRequest>();
     let capture_guard_active = Arc::new(AtomicBool::new(false));
@@ -2227,7 +2227,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                 open_search_window_mode(
                     &mut search_windows,
                     &db_path,
-                    &rules_path,
+                    rules_path.as_deref(),
                     session,
                     config_path,
                     mode,
@@ -2373,7 +2373,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                         open_search_window_mode(
                             &mut search_windows,
                             &db_path,
-                            &rules_path,
+                            rules_path.as_deref(),
                             bind_session,
                             config_path,
                             mode,
@@ -2529,7 +2529,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                                     open_search_window_mode(
                                         &mut search_windows,
                                         &db_path,
-                                        &rules_path,
+                                        rules_path.as_deref(),
                                         session.clone(),
                                         config_path,
                                         chibipop::search::SearchMode::Sentence,
@@ -2563,7 +2563,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                 open_search_window_mode(
                     &mut search_windows,
                     &db_path,
-                    &rules_path,
+                    rules_path.as_deref(),
                     session,
                     config_path,
                     chibipop::search::SearchMode::Sentence,
@@ -3087,7 +3087,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                     open_search_window_mode(
                         &mut search_windows,
                         &db_path,
-                        &rules_path,
+                        rules_path.as_deref(),
                         catalog.session(None)?,
                         config_path,
                         chibipop::search::SearchMode::Dictionary,
@@ -4404,7 +4404,7 @@ fn search_windows_handle_message(
 fn open_search_window_mode(
     windows: &mut Vec<crate::ui::search_window::SearchWindow>,
     database: &Path,
-    rules: &Path,
+    rules: Option<&Path>,
     session: ProfileSession,
     config_path: &Path,
     mode: chibipop::search::SearchMode,
@@ -4695,14 +4695,13 @@ mod tests {
             .unwrap();
 
         let database = Path::new("missing-search-session.sqlite");
-        let rules = Path::new("missing-search-session-rules.json");
         let config_path = Path::new("missing-search-session-config.toml");
         let mode = chibipop::search::SearchMode::Dictionary;
         let mut windows = Vec::new();
         open_search_window_mode(
             &mut windows,
             database,
-            rules,
+            None,
             original_session.clone(),
             config_path,
             mode,
@@ -4711,7 +4710,7 @@ mod tests {
         open_search_window_mode(
             &mut windows,
             database,
-            rules,
+            None,
             updated_session.clone(),
             config_path,
             mode,
@@ -4728,7 +4727,7 @@ mod tests {
         open_search_window_mode(
             &mut windows,
             database,
-            rules,
+            None,
             updated_session,
             config_path,
             mode,
@@ -4744,7 +4743,7 @@ mod tests {
         open_search_window_mode(
             &mut windows,
             database,
-            rules,
+            None,
             original_session,
             config_path,
             chibipop::search::SearchMode::Sentence,
@@ -4777,7 +4776,6 @@ mod tests {
         let plugin = std::env::var_os("CHIBIPOP_BENCH_PLUGIN").map(PathBuf::from);
         let db = install.join("data/chibipop.sqlite");
         let worker_db = db.clone();
-        let rules = install.join("data/deconjugator.json");
         let (worker, dicts) = Worker::spawn(worker_settings(&live, &[]), move || {
             let ocr: Box<dyn chibipop::text::OcrEngine> = match plugin {
                 Some(dir) => {
@@ -4789,7 +4787,7 @@ mod tests {
             Ok(WorkerParts {
                 capture: Box::new(WinCapture::new(None)?), ocr,
                 dict: Box::new(SqliteDictionary::open(&worker_db)?),
-                engine: LookupEngine::new(Deconjugator::new(load_rules(&rules)?)),
+                engine: LookupEngine::new(Deconjugator::new(load_rules(None)?)),
                 reopen_dict: None, serve: None,
             })
         }, || {})?;

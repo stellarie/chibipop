@@ -730,8 +730,8 @@ first run.
 
 Run chibipop directly from the flake. The flake builds the Linux binary for
 `x86_64-linux` and `aarch64-linux`. The package includes the OCR models,
-the Japanese analysis model, the deconjugation rules, a desktop entry, and
-a systemd user unit. It does not include dictionaries.
+the Japanese analysis model, a desktop entry, and a systemd user unit.
+The binary embeds the deconjugation rules. The package does not include dictionaries.
 
 ```bash
 nix run github:stellarie/chibipop -- run
