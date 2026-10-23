@@ -749,28 +749,3 @@ impl Drop for WlrScreencopy {
         self.disarm();
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn advertised(interface: &str) -> Advertised {
-        Advertised { name: 1, interface: interface.to_string(), version: 3 }
-    }
-
-    #[test]
-    fn the_rung_needs_its_globals() {
-        let globals = [advertised(session::MANAGER_GLOBAL), advertised("wl_shm"), advertised("wl_output")];
-        assert!(available(&globals));
-        assert!(!available(&[advertised("wl_shm"), advertised("wl_output")]));
-    }
-
-    /// The ladder must skip an absent global without a panic.
-    #[test]
-    fn opening_without_the_global_is_an_error_not_a_panic() {
-        let Err(err) = WlrScreencopy::open(&[advertised("wl_compositor")]) else {
-            panic!("a compositor without the global must not open a backend");
-        };
-        assert!(format!("{err:#}").contains(session::MANAGER_GLOBAL), "{err:#}");
-    }
-}

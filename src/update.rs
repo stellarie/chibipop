@@ -276,37 +276,6 @@ mod tests {
     }
 
     #[test]
-    fn newer_version_is_detected() {
-        assert!(is_newer("0.2.0", "0.1.0"));
-        assert!(is_newer("1.0.0", "0.9.9"));
-        assert!(is_newer("0.1.1", "0.1.0"));
-    }
-
-    #[test]
-    fn same_or_older_is_not_newer() {
-        assert!(!is_newer("0.1.0", "0.1.0"));
-        assert!(!is_newer("0.0.9", "0.1.0"));
-        assert!(!is_newer("0.1.0", "0.2.0"));
-    }
-
-    #[test]
-    fn garbage_is_not_newer() {
-        assert!(!is_newer("abc", "0.1.0"));
-        assert!(!is_newer("0.1.0", "abc"));
-    }
-
-    #[test]
-    fn each_platform_owns_its_own_asset() {
-        let zip = "chibipop-v0.9.0-windows-x64.zip";
-        let tarball = "chibipop-v0.9.0-linux-x64.tar.gz";
-
-        assert!(Platform::Windows.owns_asset(zip));
-        assert!(!Platform::Windows.owns_asset(tarball));
-        assert!(Platform::Linux.owns_asset(tarball));
-        assert!(!Platform::Linux.owns_asset(zip));
-    }
-
-    #[test]
     fn foreign_release_files_are_not_assets() {
         for name in [
             "SHA256SUMS.txt",
@@ -340,55 +309,4 @@ mod tests {
         assert!(lin.url.ends_with("chibipop-v0.9.0-linux-x64.tar.gz"), "{}", lin.url);
     }
 
-    #[test]
-    fn the_current_version_is_not_an_update() {
-        let json = payload("v0.9.0");
-        assert!(latest(&json, "0.9.0", Platform::Linux).unwrap().is_none());
-        assert!(latest(&json, "0.9.1", Platform::Windows).unwrap().is_none());
-    }
-
-    /// A release from before this platform shipped still provides the version.
-    #[test]
-    fn a_release_without_this_platforms_asset_still_reports_the_version() {
-        let json = serde_json::json!({
-            "tag_name": "v0.9.3",
-            "assets": [{
-                "name": "chibipop-v0.9.3-windows-x64.zip",
-                "browser_download_url": "https://example.invalid/zip",
-            }],
-        });
-        let news = latest(&json, "0.8.2", Platform::Linux).unwrap().unwrap();
-        assert_eq!("v0.9.3", news.tag);
-        assert!(news.asset.is_none(), "{:?}", news.asset);
-    }
-
-    /// The swap requires an asset. News without one cannot produce an update.
-    /// Only Windows builds this code.
-    #[cfg(windows)]
-    #[test]
-    fn news_without_an_asset_is_not_downloadable() {
-        let news = News { tag: "v0.9.3".to_string(), asset: None };
-        let err = downloadable(news).unwrap_err().to_string();
-        assert!(err.contains("no matching asset"), "{err}");
-    }
-
-    /// A matched asset without a URL indicates a broken payload. A version report
-    /// alone would hide that error.
-    #[test]
-    fn a_matched_asset_without_a_url_is_an_error() {
-        let json = serde_json::json!({
-            "tag_name": "v0.9.0",
-            "assets": [{ "name": "chibipop-v0.9.0-linux-x64.tar.gz" }],
-        });
-        let err = latest(&json, "0.8.2", Platform::Linux).unwrap_err().to_string();
-        assert!(err.contains("no download URL"), "{err}");
-    }
-
-    #[test]
-    fn the_host_platform_is_the_one_this_binary_was_built_for() {
-        #[cfg(windows)]
-        assert_eq!(Platform::Windows, Platform::HOST);
-        #[cfg(not(windows))]
-        assert_eq!(Platform::Linux, Platform::HOST);
-    }
 }

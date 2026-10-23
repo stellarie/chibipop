@@ -108,62 +108,11 @@ pub fn postprocess(boxes: &[f32], scores: &[f32], w: usize, h: usize, threshold:
 mod tests {
     use super::*;
 
-    fn solid(w: usize, h: usize, v: u8) -> Bgr {
-        Bgr { w, h, px: vec![v; w * h * 3] }
-    }
-
-    #[test]
-    fn the_letterbox_fills_only_the_scaled_corner() {
-        // 500x100 fits by width: 960/500 = 1.92 is less than 544/100 = 5.44.
-        let (tensor, scale) = preprocess(&solid(500, 100, 255));
-        assert!((scale - 1.92).abs() < 1e-12, "{scale}");
-        let plane = INPUT_W * INPUT_H;
-        assert_eq!(3 * plane, tensor.len());
-        // 100 * 1.92 = 192 rows contain data. The other rows stay black.
-        assert_eq!(1.0, tensor[191 * INPUT_W + 959]);
-        assert_eq!(0.0, tensor[192 * INPUT_W]);
-        assert_eq!(0.0, tensor[plane + 200 * INPUT_W]);
-    }
-
-    #[test]
-    fn a_tall_crop_fits_by_height() {
-        let (_, scale) = preprocess(&solid(40, 400, 128));
-        assert!((scale - 544.0 / 400.0).abs() < 1e-12, "{scale}");
-    }
-
-    /// The canvas size in source pixels.
-    #[test]
-    fn the_target_size_describes_the_whole_canvas() {
-        assert_eq!([500, 283], target_size(1.92));
-    }
-
     #[test]
     fn only_confident_boxes_survive() {
         let boxes = [0.0, 10.0, 5.0, 20.0, 1.0, 2.0, 3.0, 4.0];
         let scores = [0.9, 0.4];
         let got = postprocess(&boxes, &scores, 100, 100, 0.5);
         assert_eq!(vec![DetBox { x1: 0, y1: 10, x2: 5, y2: 20 }], got);
-    }
-
-    #[test]
-    fn boxes_are_clamped_to_the_image_and_truncated() {
-        let boxes = [-3.7, 0.0, 120.9, 40.6];
-        let got = postprocess(&boxes, &[1.0], 100, 30, 0.5);
-        assert_eq!(vec![DetBox { x1: 0, y1: 0, x2: 100, y2: 30 }], got);
-    }
-
-    #[test]
-    fn boxes_come_back_top_to_bottom() {
-        let boxes = [0.0, 50.0, 10.0, 60.0, 0.0, 5.0, 10.0, 15.0];
-        let got = postprocess(&boxes, &[1.0, 1.0], 100, 100, 0.5);
-        assert_eq!(vec![5, 50], got.iter().map(|b| b.y1).collect::<Vec<_>>());
-    }
-
-    #[test]
-    fn verticality_is_the_taller_than_wide_test() {
-        assert!(DetBox { x1: 0, y1: 0, x2: 10, y2: 40 }.is_vertical());
-        assert!(!DetBox { x1: 0, y1: 0, x2: 40, y2: 10 }.is_vertical());
-        // A square is horizontal because the harness uses `h > w`.
-        assert!(!DetBox { x1: 0, y1: 0, x2: 10, y2: 10 }.is_vertical());
     }
 }

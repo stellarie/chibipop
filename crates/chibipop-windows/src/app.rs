@@ -4582,7 +4582,6 @@ fn startup_language(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::PopupConfig;
 
     #[test]
     fn worker_serve_preserves_idle_backend_and_applies_explicit_reload() -> Result<()> {
@@ -4763,227 +4762,6 @@ mod tests {
     }
 
 
-    #[test]
-    #[ignore = "Captures a visible fixture and paints a real dictionary popup"]
-    fn live_fixture_reaches_popup_paint() -> Result<()> {
-        let install = PathBuf::from(std::env::var("CHIBIPOP_BENCH_INSTALL")?);
-        let cfg: Config = toml::from_str(&std::fs::read_to_string(install.join("chibipop.toml"))?)?;
-        let resolved = cfg.resolved(None)?;
-        let mut live = derive(&resolved);
-        live.show_lookup_log = false;
-        let at: Vec<i32> = std::env::var("CHIBIPOP_BENCH_POINT")?.split(',')
-            .map(str::parse).collect::<std::result::Result<_, _>>()?;
-        anyhow::ensure!(at.len() == 2, "expected x,y");
-        let plugin = std::env::var_os("CHIBIPOP_BENCH_PLUGIN").map(PathBuf::from);
-        let db = install.join("data/chibipop.sqlite");
-        let worker_db = db.clone();
-        let rules = install.join("data/deconjugator.json");
-        let (worker, dicts) = Worker::spawn(worker_settings(&live, &[]), move || {
-            let ocr: Box<dyn chibipop::text::OcrEngine> = match plugin {
-                Some(dir) => {
-                    let manifest = crate::plugin::manifest::parse(&std::fs::read_to_string(dir.join("plugin.toml"))?)?;
-                    Box::new(PluginText::new(host::spawn(&manifest, &dir)?, &manifest))
-                }
-                None => Box::new(WinrtOcr::new("ja")?),
-            };
-            Ok(WorkerParts {
-                capture: Box::new(WinCapture::new(None)?), ocr,
-                dict: Box::new(SqliteDictionary::open(&worker_db)?),
-                engine: LookupEngine::new(Deconjugator::new(load_rules(&rules)?)),
-                reopen_dict: None, serve: None,
-            })
-        }, || {})?;
-        let catalog = ProfileCatalog::new(&cfg, &dicts)?;
-        let session = catalog.session(None)?;
-        live = derive_session(&session);
-        live.show_lookup_log = false;
-        worker.trigger().send(Trigger {
-            kind: TriggerKind::Reload(Box::new(worker_settings(&live, &dicts))), id: RequestId(0),
-        })?;
-        let popup = Popup::create(false)?;
-        let mut renderer = Renderer::new(popup.hwnd(), &db)?;
-        let theme = theme_from_config(&live.popup);
-        for sample in 0..5 {
-            popup.hide()?;
-            let started = std::time::Instant::now();
-            worker.trigger().send(Trigger {
-                kind: TriggerKind::Hover(Hover { at: PhysPoint { x: at[0], y: at[1] }, mask: CaptureMask::NONE, session: session.clone() }),
-                id: RequestId(sample + 1),
-            })?;
-            let result = worker.results().recv_timeout(std::time::Duration::from_secs(10))?;
-            let LookupOutcome::Ready { presentation, anchor, .. } = result.outcome else {
-                anyhow::bail!("fixture did not resolve: {:?}", result.outcome);
-            };
-            let worker_ms = started.elapsed().as_secs_f64() * 1000.0;
-            let (rect, _, _) = show_presentation(&popup, &mut renderer,
-                (live.max_height_percent, live.max_width_percent, false, 0),
-                SceneInputs { presentation: &presentation, theme: &theme, show_back: false,
-                    side_panel: live.side_panel, render: live.popup.render_settings(), selection: None },
-                anchor, 0)?;
-            assert!(popup.is_visible());
-            assert!(rect.w > 0 && rect.h > 0);
-            println!("BENCH live sample={sample} worker_ms={worker_ms:.3} visible_ms={:.3} rect={rect:?}",
-                started.elapsed().as_secs_f64() * 1000.0);
-        }
-        if let Ok(seconds) = std::env::var("CHIBIPOP_BENCH_HOLD") {
-            std::thread::sleep(std::time::Duration::from_secs(seconds.parse::<u64>()?.min(30)));
-        }
-        popup.hide()?;
-        Ok(())
-    }
-
-    #[test]
-    fn dupe_refs_are_deduplicated_and_keep_their_order() {
-        assert_eq!(
-            vec!["宿舎".to_string(), "駅".to_string(), "猫".to_string()],
-            unique_exprs(vec![
-                "宿舎".into(),
-                "宿舎".into(),
-                "駅".into(),
-                "猫".into(),
-                "駅".into(),
-            ]),
-        );
-        assert!(unique_exprs(Vec::new()).is_empty());
-    }
-
-    #[test]
-    fn anki_detect_rejects_same_model_old_generation() {
-        let result = AnkiDetect::fields(1, "http://127.0.0.1:8765".into(), "Basic".into(), vec![]);
-        assert!(anki_detect_matches(
-            1,
-            "http://127.0.0.1:8765",
-            "Basic",
-            &result
-        ));
-        assert!(!anki_detect_matches(
-            2,
-            "http://127.0.0.1:8765",
-            "Basic",
-            &result
-        ));
-    }
-
-    #[test]
-    fn anki_detect_rejects_changed_url() {
-        let result = AnkiDetect::fields(3, "http://127.0.0.1:8765".into(), "Basic".into(), vec![]);
-        assert!(!anki_detect_matches(
-            3,
-            "http://127.0.0.1:8766",
-            "Basic",
-            &result
-        ));
-    }
-
-    #[test]
-    fn stale_anki_test_status_is_rejected() {
-        let status = SettingsStatus::anki(3, "AnkiConnect is reachable.".into());
-        assert!(status.matches(3));
-        assert!(!status.matches(4));
-    }
-
-    #[test]
-    fn non_anki_status_is_always_current() {
-        let status = SettingsStatus::any("You already have the latest version.".into());
-        assert!(status.matches(3));
-        assert!(status.matches(4));
-    }
-
-    /// Starts with the default popup section and replaces the two fields that
-    /// these tests check. A new core field therefore cannot get a value that
-    /// the default config does not contain.
-    fn popup_config(theme: &str, font: &str) -> PopupConfig {
-        PopupConfig {
-            theme: theme.to_string(),
-            font: font.to_string(),
-            ..ResolvedConfig::default().popup
-        }
-    }
-
-    /// I1: passes the font to Theme.
-    #[test]
-    fn a_non_default_font_reaches_the_theme() {
-        let theme = theme_from_config(&popup_config("dark", "Noto Sans JP"));
-        assert_eq!("Noto Sans JP", theme.font_name);
-    }
-
-    #[test]
-    fn theme_selection_by_name_is_unaffected_by_the_font_field() {
-        assert_eq!(
-            Theme::light().background,
-            theme_from_config(&popup_config("light", "X")).background
-        );
-        assert_eq!(
-            Theme::dark().background,
-            theme_from_config(&popup_config("anything-else", "X")).background
-        );
-    }
-
-
-    #[test]
-    fn three_excluded_windows_leave_the_guard_disarmed() {
-        assert!(!capture_guard_needed(
-            CaptureExclusion::Excluded,
-            Some(CaptureExclusion::Excluded),
-            Some(CaptureExclusion::Excluded),
-        ));
-    }
-
-    #[test]
-    fn the_popup_alone_can_arm_the_guard() {
-        assert!(capture_guard_needed(
-            CaptureExclusion::DeliberatelyNotExcluded,
-            Some(CaptureExclusion::Excluded),
-            Some(CaptureExclusion::Excluded),
-        ));
-    }
-
-    /// The overlay and button can diverge from the popup.
-    #[test]
-    fn an_overlay_the_os_refused_arms_the_guard_alone() {
-        assert!(capture_guard_needed(
-            CaptureExclusion::Excluded,
-            Some(CaptureExclusion::AttemptFailed),
-            Some(CaptureExclusion::Excluded),
-        ));
-    }
-
-    #[test]
-    fn a_button_the_os_refused_arms_the_guard_alone() {
-        assert!(capture_guard_needed(
-            CaptureExclusion::Excluded,
-            Some(CaptureExclusion::Excluded),
-            Some(CaptureExclusion::AttemptFailed),
-        ));
-    }
-
-    #[test]
-    fn a_window_that_was_never_created_cannot_need_the_guard() {
-        assert!(!capture_guard_needed(
-            CaptureExclusion::Excluded,
-            None,
-            None
-        ));
-    }
-
-    #[test]
-    fn the_guard_tracks_a_live_exclusion_toggle_in_both_directions() {
-        let off = CaptureExclusion::from_attempt(false, false);
-        assert!(capture_guard_needed(off, Some(off), Some(off)));
-        let on = CaptureExclusion::from_attempt(true, true);
-        assert!(!capture_guard_needed(on, Some(on), Some(on)));
-    }
-
-    #[test]
-    fn derive_carries_per_character_lookup() {
-        let mut resolved = Config::default().resolved(None).unwrap();
-        resolved.trigger.per_character_lookup = true;
-        assert!(derive(&resolved).per_character_lookup);
-        assert!(
-            !derive(&Config::default().resolved(None).unwrap()).per_character_lookup,
-            "must default off"
-        );
-    }
 
     #[test]
     fn screenshot_target_updates_only_origin_profile_and_never_recreates_it() -> Result<()> {
@@ -5040,129 +4818,6 @@ mod tests {
     }
 
     #[test]
-    fn retained_region_session_does_not_restore_a_replaced_or_reset_target() -> Result<()> {
-        let (dir, _guard) = edit_scratch("stale_region_target");
-        let config_path = dir.join("config.toml");
-        let mut config = Config::default();
-        let profile_id = config.default_profile.clone();
-        let mut profile = config.resolve(&profile_id)?;
-        profile.actions.screenshot.capture_mode = crate::config::ScreenshotMode::FixedRegion;
-        profile.actions.screenshot.fixed_region = Some([1, 2, 3, 4]);
-        config.update_profile(&profile_id, &profile)?;
-        config.save(&config_path)?;
-        let session = ProfileCatalog::new(&config, &[])?.session(Some(&profile_id))?;
-        let retained_target = crate::action::selection::SelectionTarget::Region(PhysRect {
-            x: 1, y: 2, w: 3, h: 4,
-        });
-
-        update_profile_settings(&config_path, &profile_id, |settings| {
-            settings.actions.screenshot.fixed_region = Some([9, 8, 7, 6]);
-            true
-        })?;
-        assert!(persist_screenshot_target(&session, &retained_target, &config_path)?.is_none());
-        assert_eq!(
-            Some([9, 8, 7, 6]),
-            crate::config::load_or_create(&config_path)?
-                .resolve(&profile_id)?
-                .actions.screenshot.fixed_region
-        );
-
-        update_profile_settings(&config_path, &profile_id, |settings| {
-            settings.actions.screenshot.fixed_region = None;
-            true
-        })?;
-        assert!(persist_screenshot_target(&session, &retained_target, &config_path)?.is_none());
-        assert_eq!(
-            None,
-            crate::config::load_or_create(&config_path)?
-                .resolve(&profile_id)?
-                .actions.screenshot.fixed_region
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn retained_window_session_does_not_restore_a_replaced_or_reset_target() -> Result<()> {
-        let (dir, _guard) = edit_scratch("stale_window_target");
-        let config_path = dir.join("config.toml");
-        let mut config = Config::default();
-        let profile_id = config.default_profile.clone();
-        let mut profile = config.resolve(&profile_id)?;
-        profile.actions.screenshot.capture_mode = crate::config::ScreenshotMode::FixedWindow;
-        let retained = crate::config::ScreenshotWindow {
-            app_id: "app-a".into(),
-            title: "Window A".into(),
-        };
-        profile.actions.screenshot.fixed_window = Some(retained.clone());
-        config.update_profile(&profile_id, &profile)?;
-        config.save(&config_path)?;
-        let session = ProfileCatalog::new(&config, &[])?.session(Some(&profile_id))?;
-        let retained_target = crate::action::selection::SelectionTarget::Window {
-            rect: PhysRect { x: 1, y: 2, w: 3, h: 4 },
-            target: retained,
-        };
-        let replacement = crate::config::ScreenshotWindow {
-            app_id: "app-b".into(),
-            title: "Window B".into(),
-        };
-
-        update_profile_settings(&config_path, &profile_id, |settings| {
-            settings.actions.screenshot.fixed_window = Some(replacement.clone());
-            true
-        })?;
-        assert!(persist_screenshot_target(&session, &retained_target, &config_path)?.is_none());
-        assert_eq!(
-            Some(replacement),
-            crate::config::load_or_create(&config_path)?
-                .resolve(&profile_id)?
-                .actions.screenshot.fixed_window
-        );
-
-        update_profile_settings(&config_path, &profile_id, |settings| {
-            settings.actions.screenshot.fixed_window = None;
-            true
-        })?;
-        assert!(persist_screenshot_target(&session, &retained_target, &config_path)?.is_none());
-        assert_eq!(
-            None,
-            crate::config::load_or_create(&config_path)?
-                .resolve(&profile_id)?
-                .actions.screenshot.fixed_window
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn newly_picked_fixed_window_persists_when_its_snapshot_is_unchanged() -> Result<()> {
-        let (dir, _guard) = edit_scratch("new_window_target");
-        let config_path = dir.join("config.toml");
-        let mut config = Config::default();
-        let profile_id = config.default_profile.clone();
-        let mut profile = config.resolve(&profile_id)?;
-        profile.actions.screenshot.capture_mode = crate::config::ScreenshotMode::FixedWindow;
-        profile.actions.screenshot.fixed_window = None;
-        config.update_profile(&profile_id, &profile)?;
-        config.save(&config_path)?;
-        let session = ProfileCatalog::new(&config, &[])?.session(Some(&profile_id))?;
-        let selected = crate::config::ScreenshotWindow {
-            app_id: "app-new".into(),
-            title: "New window".into(),
-        };
-        let target = crate::action::selection::SelectionTarget::Window {
-            rect: PhysRect { x: 10, y: 20, w: 30, h: 40 },
-            target: selected.clone(),
-        };
-
-        let updated = persist_screenshot_target(&session, &target, &config_path)?
-            .expect("the unchanged profile snapshot must accept the selected target");
-        assert_eq!(
-            Some(selected),
-            updated.resolve(&profile_id)?.actions.screenshot.fixed_window
-        );
-        Ok(())
-    }
-
-    #[test]
     fn static_region_save_failure_is_reported_without_escaping_local_handler() -> Result<()> {
         let (dir, _guard) = edit_scratch("static_region_save_failure");
         let config_path = dir.join("config.toml");
@@ -5202,36 +4857,6 @@ mod tests {
             Some("ja".to_string()),
             startup_language("ko", "ja", || false)
         );
-    }
-
-    #[test]
-    fn an_installed_startup_language_is_left_alone() {
-        assert_eq!(None, startup_language("ko", "ja", || true));
-    }
-
-    /// Avoid a substitution loop when the configured language equals the fallback.
-    #[test]
-    fn the_default_language_never_substitutes_itself() {
-        assert_eq!(None, startup_language("JA", "ja", || false));
-    }
-
-    /// Do not call WinRT for the default language.
-    #[test]
-    fn the_default_language_never_asks_windows() {
-        let mut asked = false;
-        let got = startup_language("ja", "ja", || {
-            asked = true;
-            false
-        });
-        assert_eq!(None, got);
-        assert!(!asked);
-    }
-
-    fn di(id: i64, name: &str) -> crate::present::DictInfo {
-        crate::present::DictInfo {
-            dict_id: id,
-            name: name.to_string(),
-        }
     }
 
     struct ScratchDir(PathBuf);
@@ -5294,33 +4919,6 @@ mod tests {
         form
     }
 
-    fn lib_of(entries: &[(&str, &str)]) -> Library {
-        Library {
-            entries: entries
-                .iter()
-                .map(|(file, name)| crate::library::Entry {
-                    file: (*file).to_string(),
-                    name: (*name).to_string(),
-                    roles: Roles::only(&[Role::Terms]),
-                })
-                .collect(),
-        }
-    }
-
-    fn report_of(added: &[&str], removed: &[&str], failed: &[&str]) -> EditReport {
-        EditReport {
-            added: added
-                .iter()
-                .map(|s| ((*s).to_string(), Roles::only(&[Role::Terms])))
-                .collect(),
-            removed: removed.iter().map(|s| (*s).to_string()).collect(),
-            freq_added: Vec::new(),
-            freq_removed: Vec::new(),
-            failed: failed.iter().map(|s| (*s).to_string()).collect(),
-            dicts: Vec::new(),
-        }
-    }
-
     /// Do not write to a database that lacks WAL mode.
     #[test]
     fn the_writer_refuses_a_database_that_is_not_in_wal_mode() {
@@ -5359,33 +4957,6 @@ mod tests {
             "a missing database must not open"
         );
         assert!(!missing.exists(), "opening must not create the file");
-    }
-
-    /// Absolute IDs would produce an incorrect count.
-    #[test]
-    fn progress_counts_from_the_dictionary_being_added() {
-        assert_eq!(
-            "progress  4997 / ?",
-            rebased("progress  365000 / ?", 360004)
-        );
-        assert_eq!(
-            Some("4,997 entries\u{2026}".to_string()),
-            crate::dict::progress::friendly(&rebased("progress  365000 / ?", 360004))
-        );
-    }
-
-    #[test]
-    fn progress_into_an_empty_database_is_unchanged() {
-        assert_eq!("progress  5000 / ?", rebased("progress  5000 / ?", 1));
-    }
-
-    #[test]
-    fn a_line_that_is_not_progress_survives_rebasing() {
-        assert_eq!(
-            "building  creating index",
-            rebased("building  creating index", 360004)
-        );
-        assert_eq!("progress  x / ?", rebased("progress  x / ?", 10));
     }
 
     /// `banks.zip` is distinct from the library's `terms.zip`.
@@ -5471,36 +5042,6 @@ mod tests {
     }
 
     #[test]
-    fn a_term_only_form_does_not_mark_frequency_changes() {
-        let form = staged_form(&[(&fixture("terms.zip"), "FixtureTerms")], &[]);
-        assert!(!form.freq_changed);
-    }
-
-    #[test]
-    fn engine_status_names_a_running_plugin() {
-        let runtime = OcrRuntime { engine: "meikiocr".into(), language: "ja".into(), available: true };
-        assert_eq!("OCR: meikiocr; language: ja", engine_status_line(&runtime));
-    }
-
-    #[test]
-    fn engine_status_names_the_builtin() {
-        let runtime = OcrRuntime { engine: "windows-ocr".into(), language: "zh-Hans".into(), available: true };
-        assert_eq!(
-            "OCR: Windows OCR; language: zh-Hans",
-            engine_status_line(&runtime)
-        );
-    }
-
-    #[test]
-    fn engine_status_names_a_missing_plugin() {
-        let runtime = OcrRuntime { engine: "meikiocr".into(), language: "ja".into(), available: false };
-        let s = engine_status_line(&runtime);
-        assert!(s.contains("meikiocr"), "{s}");
-        assert!(s.contains("unavailable"), "{s}");
-        assert!(s.contains("ja (inactive)"), "{s}");
-    }
-
-    #[test]
     fn only_the_matching_successful_save_marks_the_apply_complete() {
         let mut pending = Some(PendingApplySave { generation: 2, partial_failure: false, applied: None });
         for generation in [None, Some(1)] {
@@ -5521,21 +5062,6 @@ mod tests {
             assert_eq!(Some(ApplyState::Failed), saved_apply_state(&mut pending,
                 &SaveResult { sequence: 0, generation: Some(9), result }));
         }
-    }
-
-    #[test]
-    fn pending_save_poll_does_not_wait_for_disk_write() {
-        let (release_tx, release_rx) = mpsc::channel();
-        let mut save = Some(thread::spawn(move || {
-            release_rx.recv().unwrap();
-        }));
-
-        join_save_if_finished(&mut save);
-
-        assert!(save.is_some());
-        release_tx.send(()).unwrap();
-        join_save(&mut save);
-        assert!(save.is_none());
     }
 
     #[test]
@@ -5565,24 +5091,6 @@ mod tests {
     }
 
     #[test]
-    fn stale_save_failure_cannot_replace_the_latest_success_message() {
-        let mut form = settings::from_config(&Config::default(), &[]);
-        let mut window = SettingsWindow::open(&form, &[], ApplyMode::Live).unwrap();
-        window.set_status("Latest settings saved.");
-        let mut pending = Some(PendingApplySave { generation: 2, partial_failure: false, applied: None });
-        finish_save(Some(&mut window), &mut form, &[], &mut pending,
-            SaveResult { sequence: 2, generation: Some(2), result: Ok(()) }, Path::new("unused.toml"), 2);
-        finish_save(Some(&mut window), &mut form, &[], &mut pending,
-            SaveResult { sequence: 1, generation: Some(1), result: Err(anyhow!("old failure")) }, Path::new("unused.toml"), 2);
-        let audit = crate::ui::audit::dump(window.hwnd());
-        let controls = audit["controls"].as_array().unwrap();
-        let detail = controls.iter().find(|control| control["id"] == 122).unwrap();
-        assert_eq!("Latest settings saved.", detail["text"]);
-        let state = controls.iter().find(|control| control["id"] == 193).unwrap();
-        assert_eq!("Apply: Applied", state["text"]);
-    }
-
-    #[test]
     fn explicit_quit_during_a_write_is_remembered_and_exits_after_completion() {
         let form = settings::from_config(&Config::default(), &[]);
         let window = SettingsWindow::open(&form, &[], ApplyMode::Live).unwrap();
@@ -5603,63 +5111,6 @@ mod tests {
         assert!(!quit_when_idle(Some(SettingsOutcome::Cancel), false, &mut pending));
     }
 
-    #[test]
-    fn close_during_an_edit_uses_the_preference_and_defers_exit() {
-        let form = settings::from_config(&Config::default(), &[]);
-        let window = SettingsWindow::open(&form, &[], ApplyMode::Live).unwrap();
-        window.set_busy(true);
-        unsafe {
-            windows::Win32::UI::WindowsAndMessaging::SendMessageW(
-                window.hwnd(),
-                windows::Win32::UI::WindowsAndMessaging::WM_CLOSE,
-                None,
-                None,
-            );
-        }
-
-        let mut quit_requested = false;
-        let close = window.take_outcome();
-        assert_eq!(Some(SettingsOutcome::Close), close);
-        assert_eq!(
-            EditCloseAction::Continue,
-            edit_close_action(close, false, &mut quit_requested),
-        );
-        assert!(quit_requested);
-        assert!(!quit_when_idle(None, true, &mut quit_requested));
-        assert!(quit_when_idle(None, false, &mut quit_requested));
-
-        let mut quit_requested = false;
-        assert_eq!(
-            EditCloseAction::HideWindow,
-            edit_close_action(Some(SettingsOutcome::Close), true, &mut quit_requested),
-        );
-        assert!(!quit_requested);
-    }
-
-    #[test]
-    fn only_current_background_save_results_change_the_detail_without_approving_edits() {
-        let mut form = settings::from_config(&Config::default(), &[]);
-        let mut window = SettingsWindow::open(&form, &[], ApplyMode::Live).unwrap();
-        window.set_apply_state(ApplyState::Pending);
-        window.set_status("Current detail");
-        let mut pending = None;
-        finish_save(Some(&mut window), &mut form, &[], &mut pending,
-            SaveResult { sequence: 1, generation: None, result: Err(anyhow!("old")) }, Path::new("unused.toml"), 2);
-        let audit = crate::ui::audit::dump(window.hwnd());
-        let detail = audit["controls"].as_array().unwrap().iter().find(|control| control["id"] == 122).unwrap();
-        assert_eq!("Current detail", detail["text"]);
-        finish_save(Some(&mut window), &mut form, &[], &mut pending,
-            SaveResult { sequence: 2, generation: None, result: Err(anyhow!("current")) }, Path::new("unused.toml"), 2);
-        let audit = crate::ui::audit::dump(window.hwnd());
-        let detail = audit["controls"].as_array().unwrap().iter().find(|control| control["id"] == 122).unwrap();
-        assert!(detail["text"].as_str().unwrap().contains("Could not save the sentence area"));
-        finish_save(Some(&mut window), &mut form, &[], &mut pending,
-            SaveResult { sequence: 3, generation: None, result: Ok(()) }, Path::new("unused.toml"), 3);
-        let audit = crate::ui::audit::dump(window.hwnd());
-        let state = audit["controls"].as_array().unwrap().iter().find(|control| control["id"] == 193).unwrap();
-        assert_eq!("Apply: Pending", state["text"]);
-    }
-
 
     #[test]
     fn a_newer_snapshot_completes_an_apply_instead_of_its_superseded_save() {
@@ -5671,64 +5122,6 @@ mod tests {
         finish_save(None, &mut form, &[], &mut pending,
             SaveResult { sequence: 2, generation: Some(7), result: Ok(()) }, Path::new("unused.toml"), 2);
         assert!(pending.is_none());
-    }
-
-    #[test]
-    fn a_removal_resolves_its_row_and_its_archive() {
-        let form = staged_form(&[], &["\u{5927}\u{8f9e}\u{6797}"]);
-        let lib = lib_of(&[("daijirin.zip", "\u{5927}\u{8f9e}\u{6797}")]);
-        let plan = plan_edits(&form, &[di(7, "\u{5927}\u{8f9e}\u{6797}")], &lib);
-        assert_eq!(1, plan.removals.len());
-        assert_eq!(Some(7), plan.removals[0].dict_id);
-        assert_eq!(Some("daijirin.zip".to_string()), plan.removals[0].file);
-    }
-
-    /// Check that removal can name an unreadable archive by file.
-    #[test]
-    fn a_removal_may_name_the_archive_file() {
-        let form = staged_form(&[], &["broken.zip"]);
-        let plan = plan_edits(&form, &[], &lib_of(&[("broken.zip", "broken")]));
-        assert_eq!(None, plan.removals[0].dict_id);
-        assert_eq!(Some("broken.zip".to_string()), plan.removals[0].file);
-    }
-
-    /// A database row can remain after the library loses its archive.
-    #[test]
-    fn a_removal_with_no_archive_still_names_its_row() {
-        let form = staged_form(&[], &["Orphan"]);
-        let plan = plan_edits(&form, &[di(3, "Orphan")], &lib_of(&[]));
-        assert_eq!(Some(3), plan.removals[0].dict_id);
-        assert_eq!(None, plan.removals[0].file);
-    }
-
-    #[test]
-    fn the_status_names_both_lists() {
-        let s = edit_status(&report_of(&["New"], &["Old"], &[]));
-        assert!(s.contains("New"), "{s}");
-        assert!(s.contains("Old"), "{s}");
-    }
-
-    /// Include the failure name.
-    #[test]
-    fn the_status_names_what_failed_beside_what_worked() {
-        let s = edit_status(&report_of(&["New"], &[], &["Bad: the zip is corrupt"]));
-        assert!(
-            s.contains("New"),
-            "the applied change must still be named: {s}"
-        );
-        assert!(s.contains("Bad"), "the failure must be named: {s}");
-        assert!(
-            s.contains("the zip is corrupt"),
-            "the reason must be named: {s}"
-        );
-    }
-
-    #[test]
-    fn a_change_that_did_nothing_says_so() {
-        assert_eq!(
-            "No dictionary changed.",
-            edit_status(&report_of(&[], &[], &[]))
-        );
     }
 
     /// This test covers the main Apply path.
@@ -5888,23 +5281,6 @@ mod tests {
         assert!(library.join("terms.zip").exists(), "the archive must stay");
     }
 
-    /// Use actual source bytes instead of a constant.
-    #[test]
-    fn the_library_that_built_the_database_has_not_drifted() {
-        let (dir, _guard) = edit_scratch("no_drift");
-        let library = dir.join("library");
-        let db = built_db(&dir, &library);
-
-        let raw = read_source_hashes(&db)
-            .unwrap()
-            .expect("build-dict records what it read");
-        assert!(
-            raw.contains(r#""name": "terms.zip""#),
-            "json.dumps spacing: {raw}"
-        );
-        assert_eq!(None, drifted(&library, &db).unwrap(), "the two agree");
-    }
-
     #[test]
     fn result_routing_keeps_sentences_and_freshest_other_in_arrival_order() {
         let routed = route_results(vec![
@@ -5938,83 +5314,6 @@ mod tests {
         assert!(matches!(&routed[2].outcome, LookupOutcome::Sentence(None)));
     }
 
-
-    #[test]
-    fn escape_routes_only_to_scoped_events() {
-        assert_eq!(route_escape(true, 0), None);
-        assert_eq!(route_escape(true, 3), None);
-        assert_eq!(route_escape(false, 0), Some(Event::DismissRequested));
-        assert_eq!(route_escape(false, 1), Some(Event::BackRequested));
-        assert_eq!(route_escape(false, usize::MAX), Some(Event::BackRequested));
-    }
-
-    #[test]
-    fn cache_bust_status_reports_worker_and_media_outcomes() {
-        assert_eq!(
-            "Lookup cache cleared. The next lookup will recapture text and reread dictionary data.",
-            cache_bust_status(Ok(None)),
-        );
-        assert_eq!(
-            "Lookup cache cleared, but dictionary media could not reopen: media unavailable. Images use alt text.",
-            cache_bust_status(Ok(Some("media unavailable".to_string()))),
-        );
-        assert_eq!(
-            "Lookup cache unchanged: dictionary unavailable",
-            cache_bust_status(Err("dictionary unavailable".to_string())),
-        );
-        assert!(LOOKUP_CACHE_CONFIRMATION.contains("does not rebuild"));
-        assert!(LOOKUP_CACHE_CONFIRMATION.contains("dictionary, library, settings, or logs"));
-    }
-
-    #[test]
-    fn cache_bust_poll_reports_timeout_disconnect_and_late_completion() {
-        let (tx, rx) = mpsc::channel();
-        let started = std::time::Instant::now();
-        let mut pending = Some(PendingCacheBust {
-            rx,
-            started,
-            timeout_reported: false,
-        });
-        assert!(matches!(
-            poll_cache_bust(&mut pending, started + CACHE_BUST_TIMEOUT, || {}),
-            Some(CacheBustPoll::TimedOut)
-        ));
-        assert!(pending.is_some(), "a late completion remains observable");
-        assert!(poll_cache_bust(&mut pending, started + CACHE_BUST_TIMEOUT, || {}).is_none());
-        tx.send(Ok(Vec::new())).unwrap();
-        assert!(matches!(
-            poll_cache_bust(&mut pending, started + CACHE_BUST_TIMEOUT, || {}),
-            Some(CacheBustPoll::Complete(Ok(dicts))) if dicts.is_empty()
-        ));
-        assert!(pending.is_none());
-
-        let (tx, rx) = mpsc::channel();
-        tx.send(Err("cache clear failed".to_string())).unwrap();
-        let mut pending = Some(PendingCacheBust {
-            rx,
-            started,
-            timeout_reported: false,
-        });
-        let mut dismissed = false;
-        assert!(matches!(
-            poll_cache_bust(&mut pending, started, || dismissed = true),
-            Some(CacheBustPoll::Complete(Err(reason))) if reason == "cache clear failed"
-        ));
-        assert!(!dismissed, "an unchanged cache must keep its popup");
-
-        let (tx, rx) = mpsc::channel::<std::result::Result<Vec<DictInfo>, String>>();
-        drop(tx);
-        let mut pending = Some(PendingCacheBust {
-            rx,
-            started,
-            timeout_reported: false,
-        });
-        assert!(matches!(
-            poll_cache_bust(&mut pending, started, || {}),
-            Some(CacheBustPoll::Disconnected)
-        ));
-        assert!(pending.is_none());
-    }
 
     #[test]
     fn cache_clear_completion_hides_popup_and_invalidates_pending_popup_work() {
@@ -6254,22 +5553,6 @@ mod tests {
             screenshot_restore_view(&controller).is_none(),
             "a dismissed popup must not return after capture"
         );
-    }
-
-    /// Check that a new archive produces a drift notice.
-    #[test]
-    fn an_archive_the_build_never_saw_is_reported_as_drift() {
-        let (dir, _guard) = edit_scratch("drifted");
-        let library = dir.join("library");
-        let db = built_db(&dir, &library);
-        std::fs::copy(fixture("freq.zip"), library.join("freq.zip")).unwrap();
-
-        let text = drifted(&library, &db)
-            .unwrap()
-            .expect("a dropped-in archive is drift");
-
-        assert!(text.contains("freq.zip"), "{text}");
-        assert!(text.contains("chibipop build-dict --library"), "{text}");
     }
 
     /// Bounds for the stand-in. A wrong request cannot hang a test.

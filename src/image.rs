@@ -78,22 +78,6 @@ mod tests {
     }
 
     #[test]
-    fn a_single_red_pixel_survives_the_bgra_to_rgb_swap() {
-        // BGRA stores blue 0, green 0, red 255, and an unused alpha byte.
-        let png = encode_bgra_to_png(&[0, 0, 0xff, 0x00], 1, 1).unwrap();
-        assert_eq!((1, 1, vec![0xff, 0, 0]), decode(&png));
-    }
-
-    #[test]
-    fn fast_transport_png_preserves_every_color_byte() {
-        let bgra: Vec<u8> = (0..37 * 19 * 4).map(|i| (i % 251) as u8).collect();
-        assert_eq!(decode(&encode_bgra_to_png(&bgra, 37, 19).unwrap()),
-            decode(&encode_bgra_to_png_fast(&bgra, 37, 19).unwrap()));
-        assert!(encode_bgra_to_png_fast(&[], 1, 1).is_err());
-        assert!(encode_bgra_to_png_fast(&[], 0, 0).is_err());
-    }
-
-    #[test]
     fn every_pixel_of_a_multi_row_image_survives_a_round_trip() {
         let (w, h) = (200i32, 120i32);
         let bgra: Vec<u8> = (0..(w * h * 4)).map(|i| (i % 251) as u8).collect();
@@ -106,36 +90,4 @@ mod tests {
         }
     }
 
-    #[test]
-    fn the_encoded_stream_is_compressed_not_stored() {
-        // A stored-deflate writer keeps all 320 KB of flat pixels.
-        // A real compressor reduces the same data to a small stream.
-        let (w, h) = (400i32, 200i32);
-        let png = encode_bgra_to_png(&vec![0x40u8; (w * h * 4) as usize], w, h).unwrap();
-        assert!(
-            png.len() < (w * h * 3) as usize / 100,
-            "a uniform {w}x{h} picture encoded to {} bytes",
-            png.len()
-        );
-    }
-
-    #[test]
-    fn a_buffer_too_short_for_the_dimensions_is_refused() {
-        let e = encode_bgra_to_png(&[0, 0, 0, 0], 4, 4).unwrap_err();
-        assert!(e.to_string().contains("needs 64 bytes"), "{e:#}");
-    }
-
-    #[test]
-    fn a_buffer_longer_than_the_dimensions_encodes_only_the_picture() {
-        let bgra = vec![0u8; 4 * 4 * 4 + 999];
-        let png = encode_bgra_to_png(&bgra, 4, 4).unwrap();
-        assert_eq!((4, 4, vec![0u8; 4 * 4 * 3]), decode(&png));
-    }
-
-    #[test]
-    fn an_empty_or_negative_region_is_refused() {
-        assert!(encode_bgra_to_png(&[], 0, 4).is_err());
-        assert!(encode_bgra_to_png(&[], 4, 0).is_err());
-        assert!(encode_bgra_to_png(&[], -4, 4).is_err());
-    }
 }

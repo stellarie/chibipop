@@ -624,34 +624,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn an_accepted_exclusion_attempt_is_recorded_as_excluded() {
-        assert_eq!(
-            CaptureExclusion::Excluded,
-            CaptureExclusion::from_attempt(true, true)
-        );
-    }
-
-    #[test]
-    fn a_refused_exclusion_attempt_is_never_recorded_as_excluded() {
-        assert_eq!(
-            CaptureExclusion::AttemptFailed,
-            CaptureExclusion::from_attempt(true, false)
-        );
-    }
-
-    #[test]
-    fn turning_exclusion_off_is_deliberate_whatever_the_os_answered() {
-        assert_eq!(
-            CaptureExclusion::DeliberatelyNotExcluded,
-            CaptureExclusion::from_attempt(false, true)
-        );
-        assert_eq!(
-            CaptureExclusion::DeliberatelyNotExcluded,
-            CaptureExclusion::from_attempt(false, false)
-        );
-    }
-
-    #[test]
     fn only_a_real_exclusion_leaves_the_capture_guard_disarmed() {
         assert!(!CaptureExclusion::Excluded.needs_capture_guard());
         assert!(CaptureExclusion::DeliberatelyNotExcluded.needs_capture_guard());

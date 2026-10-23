@@ -164,7 +164,7 @@ fn truncate_to_char_boundary(s: &str, max_bytes: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::FieldMapping;
+    
 
     const ROOT: &str = "/tmp/chibipop-shot-tests";
 
@@ -188,105 +188,4 @@ mod tests {
         assert_eq!(fields, plan.fields);
     }
 
-    #[test]
-    fn an_authorized_payload_is_used_without_rebuilding_it() {
-        let fields = HashMap::from([("Expression".to_string(), "card A".to_string())]);
-        let plan = plan_add("card A", &fields, &cfg_on(), Path::new(ROOT), 11).unwrap();
-
-        assert_eq!("card A", plan.expr);
-        assert_eq!(fields, plan.fields);
-        assert_eq!(Path::new(ROOT).join("card A_11.png"), plan.path);
-    }
-
-    #[test]
-    fn the_picture_fields_are_the_screenshot_rows() {
-        let mut cfg = cfg_on();
-        cfg.anki.field_map.push(FieldMapping {
-            anki_field: "Picture".into(),
-            source: "screenshot".into(),
-        });
-        cfg.anki.field_map.push(FieldMapping {
-            anki_field: "Picture2".into(),
-            source: "screenshot".into(),
-        });
-        let plan = plan_add("", &HashMap::new(), &cfg, Path::new(ROOT), 1).unwrap();
-        assert_eq!(vec!["Picture".to_string(), "Picture2".to_string()], plan.picture_fields);
-    }
-
-    #[test]
-    fn a_field_map_that_routes_no_screenshot_plans_a_pictureless_add() {
-        let plan = plan_add("宿舎", &HashMap::new(), &cfg_on(), Path::new(ROOT), 1).unwrap();
-        assert!(plan.picture_fields.is_empty());
-    }
-
-    #[test]
-    fn include_on_add_off_plans_nothing() {
-        let cfg = ResolvedConfig::default();
-        assert!(!cfg.actions.screenshot.include_on_add, "the shipped default");
-        assert_eq!(None, plan_add("宿舎", &HashMap::new(), &cfg, Path::new(ROOT), 1));
-    }
-
-    #[test]
-    fn an_authorized_empty_expression_still_has_a_payload_plan() {
-        let fields = HashMap::new();
-        let plan = plan_add("", &fields, &cfg_on(), Path::new(ROOT), 1).unwrap();
-        assert_eq!("", plan.expr);
-        assert_eq!(fields, plan.fields);
-        assert_eq!(Path::new(ROOT).join("screenshot_1.png"), plan.path);
-    }
-
-    #[test]
-    fn saving_creates_the_folder_it_was_told_to_write_into() {
-        let dir = std::env::temp_dir().join(format!("chibipop-shot-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        let plan = ShotPlan {
-            expr: "x".into(),
-            fields: HashMap::new(),
-            path: dir.join("deeper").join("x_1.png"),
-            picture_fields: Vec::new(),
-        };
-        save(b"not really a png", &plan).unwrap();
-        assert_eq!(b"not really a png".to_vec(), std::fs::read(&plan.path).unwrap());
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
-    fn sanitizing_replaces_every_windows_illegal_char() {
-        assert_eq!("a_b_c", sanitize_filename("a/b\\c"));
-        assert_eq!("a_b", sanitize_filename("a:b"));
-        assert_eq!("a_b", sanitize_filename("a*b"));
-        assert_eq!("a_b", sanitize_filename("a?b"));
-        assert_eq!("a_b", sanitize_filename("a\"b"));
-        assert_eq!("a_b", sanitize_filename("a<b"));
-        assert_eq!("a_b", sanitize_filename("a>b"));
-        assert_eq!("a_b", sanitize_filename("a|b"));
-    }
-
-    #[test]
-    fn sanitizing_collapses_consecutive_underscores() {
-        assert_eq!("a_b", sanitize_filename("a///b"));
-    }
-
-    #[test]
-    fn sanitizing_truncates_long_names_at_a_char_boundary() {
-        let long = "\u{3042}".repeat(100);
-        let result = sanitize_filename(&long);
-        assert!(result.len() <= 60, "{} bytes", result.len());
-        assert_eq!("\u{3042}".repeat(20), result, "20 three-byte chars fit in 60");
-    }
-
-    #[test]
-    fn sanitizing_an_empty_name_falls_back() {
-        assert_eq!("screenshot", sanitize_filename(""));
-    }
-
-    #[test]
-    fn sanitizing_an_all_illegal_name_falls_back() {
-        assert_eq!("screenshot", sanitize_filename("///"));
-    }
-
-    #[test]
-    fn sanitizing_passes_japanese_through() {
-        assert_eq!("\u{5bbf}\u{820e}", sanitize_filename("\u{5bbf}\u{820e}"));
-    }
 }

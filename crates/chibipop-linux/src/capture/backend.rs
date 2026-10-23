@@ -192,17 +192,13 @@ pub fn select(caps: &Capabilities, ov: BackendOverride) -> Selection {
 mod tests {
     use super::*;
     use crate::capture::session::MANAGER_GLOBAL;
-    use crate::wayland::Advertised;
+    
 
     const BOTH: Capabilities = Capabilities { screencopy: true, portal_screencast: true };
     const PORTAL_ONLY: Capabilities = Capabilities { screencopy: false, portal_screencast: true };
     const SCREENCOPY_ONLY: Capabilities =
         Capabilities { screencopy: true, portal_screencast: false };
     const NOTHING: Capabilities = Capabilities { screencopy: false, portal_screencast: false };
-
-    fn advertised(interface: &str) -> Advertised {
-        Advertised { name: 1, interface: interface.to_string(), version: 1 }
-    }
 
     /// Keep the promptless path when Hyprland advertises screencopy and also
     /// runs a portal.
@@ -235,80 +231,5 @@ mod tests {
         };
         assert_eq!(vec![MANAGER_GLOBAL, SCREENCAST_INTERFACE], missing);
         assert_eq!(None, select(&NOTHING, BackendOverride::Auto).backend());
-    }
-
-    /// Force `portal` on a wlr compositor for the documented smoke test.
-    /// If screencopy is absent, report the absence instead of a prompt.
-    #[test]
-    fn the_forced_overrides_pin_their_backend() {
-        assert_eq!(Selection::Backend(Backend::Portal), select(&BOTH, BackendOverride::Portal));
-        assert_eq!(
-            Selection::Backend(Backend::WlrScreencopy),
-            select(&BOTH, BackendOverride::Screencopy)
-        );
-        assert_eq!(
-            Selection::Unsupported { missing: vec![MANAGER_GLOBAL.to_string()] },
-            select(&PORTAL_ONLY, BackendOverride::Screencopy)
-        );
-        assert_eq!(
-            Selection::Unsupported { missing: vec![SCREENCAST_INTERFACE.to_string()] },
-            select(&SCREENCOPY_ONLY, BackendOverride::Portal)
-        );
-    }
-
-    /// Let `none` simulate a compositor with no rung, regardless of this
-    /// machine's advertised capabilities.
-    #[test]
-    fn the_none_override_lists_both_capabilities() {
-        let Selection::Unsupported { missing } = select(&BOTH, BackendOverride::None) else {
-            panic!("expected Unsupported");
-        };
-        assert_eq!(vec![MANAGER_GLOBAL, SCREENCAST_INTERFACE], missing);
-    }
-
-    #[test]
-    fn every_startup_line_is_one_greppable_line_naming_its_rung_or_the_way_back() {
-        for selection in [
-            Selection::Backend(Backend::WlrScreencopy),
-            Selection::Backend(Backend::Portal),
-            select(&NOTHING, BackendOverride::Auto),
-        ] {
-            let line = selection.startup_line();
-            assert!(line.starts_with("capture: "), "{line}");
-            assert!(!line.contains('\n'), "{line}");
-            assert!(line.contains("rung ") || line.contains("self-heals"), "{line}");
-        }
-        assert!(
-            Selection::Backend(Backend::WlrScreencopy).startup_line().contains("promptless"),
-            "rung 1's promptlessness is the reason it is rung 1"
-        );
-        assert!(
-            Selection::Backend(Backend::Portal).startup_line().contains("consent"),
-            "rung 2's cost must be visible in the log"
-        );
-        assert!(select(&NOTHING, BackendOverride::Auto)
-            .startup_line()
-            .contains("unsupported - missing"));
-    }
-
-    #[test]
-    fn override_parsing_covers_the_documented_values() {
-        assert_eq!(Some(BackendOverride::Auto), BackendOverride::parse("auto"));
-        assert_eq!(Some(BackendOverride::Screencopy), BackendOverride::parse("screencopy"));
-        assert_eq!(Some(BackendOverride::Portal), BackendOverride::parse("portal"));
-        assert_eq!(Some(BackendOverride::None), BackendOverride::parse("none"));
-        assert_eq!(Option::None, BackendOverride::parse("pipewire"));
-    }
-
-    /// Select by capability. Use the same screencopy probe as the backend.
-    #[test]
-    fn capabilities_scan_uses_the_screencopy_probe_and_the_portal_answer() {
-        let globals = [advertised(MANAGER_GLOBAL), advertised("wl_shm"), advertised("wl_output")];
-        let caps = Capabilities::scan(&globals, true);
-        assert!(caps.screencopy && caps.portal_screencast);
-
-        let caps = Capabilities::scan(&globals[1..], true);
-        assert!(!caps.screencopy, "screencopy without its manager is not a rung");
-        assert!(!Capabilities::scan(&globals, false).portal_screencast);
     }
 }

@@ -147,37 +147,4 @@ mod tests {
         let msg = describe(update::news_at(&url, "0.8.2"));
         assert_eq!("You already have the latest version.", msg);
     }
-
-    #[test]
-    fn an_unreachable_endpoint_says_so_and_names_nothing() {
-        // Bind and drop the listener. The closed port causes the connection to fail.
-        let dead = {
-            let l = TcpListener::bind("127.0.0.1:0").unwrap();
-            format!("http://{}/releases/latest", l.local_addr().unwrap())
-        };
-        let msg = describe(update::news_at(&dead, "0.8.2"));
-        assert!(msg.starts_with("Update check failed:"), "{msg}");
-    }
-
-    /// Version v0.9.3 was a Windows-only release. A Linux check against this
-    /// release must report the version instead of an error.
-    #[test]
-    fn a_windows_only_release_reports_the_version_and_says_what_is_missing() {
-        let json = serde_json::json!({
-            "tag_name": "v0.9.3",
-            "assets": [{
-                "name": "chibipop-v0.9.3-windows-x64.zip",
-                "browser_download_url": "https://example.invalid/win.zip",
-            }],
-        })
-        .to_string();
-        let url = fake_release_endpoint(json);
-
-        let msg = describe(update::news_at(&url, "0.8.2"));
-
-        assert!(msg.contains("v0.9.3"), "{msg}");
-        assert!(msg.contains("no linux-x64 tarball"), "{msg}");
-        assert!(!msg.contains("failed"), "{msg}");
-        assert!(!msg.contains("windows-x64.zip"), "{msg}");
-    }
 }

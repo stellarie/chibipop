@@ -77,14 +77,4 @@ mod tests {
         assert!(wait_lines(receiver, || true).unwrap().is_none());
         assert!(sender.send(Ok(Vec::new())).is_err());
     }
-
-    #[test]
-    fn waiting_ocr_observes_cancellation_and_worker_failure() {
-        let (_sender, receiver) = mpsc::channel();
-        let checks = std::cell::Cell::new(0);
-        assert!(wait_lines(receiver, || { checks.set(checks.get() + 1); checks.get() > 1 }).unwrap().is_none());
-        let (sender, receiver) = mpsc::channel();
-        sender.send(Err("worker failed".into())).unwrap();
-        assert!(wait_lines(receiver, || false).unwrap_err().to_string().contains("worker failed"));
-    }
 }

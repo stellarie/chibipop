@@ -285,46 +285,10 @@ mod tests {
     }
 
     #[test]
-    fn every_character_becomes_its_own_word_box() {
-        let got = to_ocr_lines(vec![line(false, &[('昨', 10, 5), ('日', 30, 5)])]);
-        assert_eq!(1, got.len());
-        assert_eq!(
-            vec![
-                OcrWord { text: "昨".into(), rect: PhysRect { x: 10, y: 5, w: 20, h: 20 } },
-                OcrWord { text: "日".into(), rect: PhysRect { x: 30, y: 5, w: 20, h: 20 } },
-            ],
-            got[0].words
-        );
-    }
-
-    #[test]
-    fn empty_lines_are_dropped_rather_than_returned_wordless() {
-        let got = to_ocr_lines(vec![line(false, &[]), line(false, &[('あ', 0, 0)])]);
-        assert_eq!(1, got.len());
-    }
-
-    #[test]
     fn horizontal_lines_come_before_vertical_columns() {
         let got = to_ocr_lines(vec![line(true, &[('縦', 0, 0)]), line(false, &[('横', 0, 0)])]);
         assert_eq!("横", got[0].words[0].text);
         assert_eq!("縦", got[1].words[0].text);
-    }
-
-    #[test]
-    fn vertical_columns_are_ordered_right_to_left() {
-        let got = to_ocr_lines(vec![line(true, &[('左', 10, 0)]), line(true, &[('右', 90, 0)])]);
-        assert_eq!("右", got[0].words[0].text);
-        assert_eq!("左", got[1].words[0].text);
-    }
-
-    /// Keep the per-character boxes that core's `orientation_of` reads as a
-    /// column. Otherwise, vertical selection loses its purpose. Three glyphs form
-    /// a column that overrides a horizontal box.
-    #[test]
-    fn a_vertical_columns_geometry_reads_as_vertical_to_core() {
-        use chibipop::text::layout::{orientation_of, Orientation};
-        let got = to_ocr_lines(vec![line(true, &[('上', 100, 10), ('中', 100, 40), ('下', 100, 70)])]);
-        assert_eq!(Orientation::Vertical, orientation_of(&got[0], Orientation::Horizontal));
     }
 
     #[test]

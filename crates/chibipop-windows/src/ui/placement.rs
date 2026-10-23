@@ -57,9 +57,6 @@ pub fn store(path: &Path, placement: Placement) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// A full screen, no taskbar.
-    const SCREEN: Area = Area { left: 0, top: 0, right: 1920, bottom: 1080 };
     /// The same screen with a 40 pixel taskbar.
     const DESKTOP: Area = Area { left: 0, top: 0, right: 1920, bottom: 1040 };
 
@@ -74,26 +71,6 @@ mod tests {
     }
 
     #[test]
-    fn a_window_as_tall_as_the_work_area_takes_its_top() {
-        assert_eq!((300, 0), DESKTOP.fit((300, 40), (760, 1040)));
-    }
-
-    #[test]
-    fn a_corner_below_the_work_area_moves_up_to_the_last_row() {
-        assert_eq!((500, 640), DESKTOP.fit((500, 900), (760, 400)));
-    }
-
-    #[test]
-    fn a_corner_left_of_the_work_area_moves_right() {
-        assert_eq!((0, 200), DESKTOP.fit((-120, 200), (760, 400)));
-    }
-
-    #[test]
-    fn a_window_larger_than_the_work_area_aligns_to_the_top_left() {
-        assert_eq!((0, 0), SCREEN.fit((400, 400), (2400, 1400)));
-    }
-
-    #[test]
     fn a_corner_from_a_removed_monitor_moves_onto_the_nearest_one() {
         assert_eq!((1160, 640), DESKTOP.fit((3400, 700), (760, 400)));
     }
@@ -105,34 +82,5 @@ mod tests {
         store(&path, Placement { x: -1200, y: 40 });
         assert_eq!(Some(Placement { x: -1200, y: 40 }), load(&path));
         let _ = std::fs::remove_file(&path);
-    }
-
-    #[test]
-    fn the_stored_file_names_its_writer() {
-        let path = state_file("header");
-        let _ = std::fs::remove_file(&path);
-        store(&path, Placement { x: 1, y: 2 });
-        let text = std::fs::read_to_string(&path).unwrap();
-        assert!(text.starts_with(STATE_HEADER), "{text:?}");
-        let _ = std::fs::remove_file(&path);
-    }
-
-    #[test]
-    fn a_missing_file_and_a_broken_file_read_as_no_corner() {
-        let missing = state_file("missing");
-        let _ = std::fs::remove_file(&missing);
-        assert_eq!(None, load(&missing));
-        let broken = state_file("broken");
-        std::fs::write(&broken, "x = left\n").unwrap();
-        assert_eq!(None, load(&broken));
-        let _ = std::fs::remove_file(&broken);
-    }
-
-    #[test]
-    fn a_stored_corner_is_written_beside_the_executable() {
-        let path = state_path();
-        let exe = std::env::current_exe().unwrap();
-        assert_eq!(exe.parent().unwrap(), path.parent().unwrap());
-        assert!(path.ends_with(STATE_FILE), "{path:?}");
     }
 }

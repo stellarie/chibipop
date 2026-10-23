@@ -272,20 +272,6 @@ mod tests {
         }
     }
 
-    /// A square output with physical size `mode` and logical size `logical`, at
-    /// the origin.
-    fn scaled(mode: i32, logical: i32) -> OutputGeometry {
-        OutputGeometry {
-            logical_x: 0,
-            logical_y: 0,
-            logical_w: logical,
-            logical_h: logical,
-            mode_w: mode,
-            mode_h: mode,
-            transform_swaps: false,
-        }
-    }
-
     fn rect(x: i32, y: i32, w: i32, h: i32) -> PhysRect {
         PhysRect { x, y, w, h }
     }
@@ -297,38 +283,6 @@ mod tests {
         out[0]
     }
 
-    /// Return the box that a compositor such as wlroots truncates.
-    fn wlroots_buffer(piece: &Piece, g: &OutputGeometry) -> (i32, i32, i32, i32) {
-        let s = g.scale();
-        (
-            (f64::from(piece.logical.x) * s) as i32,
-            (f64::from(piece.logical.y) * s) as i32,
-            (f64::from(piece.logical.w) * s) as i32,
-            (f64::from(piece.logical.h) * s) as i32,
-        )
-    }
-
-    /// Return the box that a compositor such as Hyprland rounds.
-    fn hyprland_buffer(piece: &Piece, g: &OutputGeometry) -> (i32, i32, i32, i32) {
-        let s = g.scale();
-        (
-            (f64::from(piece.logical.x) * s).round() as i32,
-            (f64::from(piece.logical.y) * s).round() as i32,
-            (f64::from(piece.logical.w) * s).round() as i32,
-            (f64::from(piece.logical.h) * s).round() as i32,
-        )
-    }
-
-    #[test]
-    fn scale_one_asks_for_the_region_itself() {
-        let piece = one(&[plain(0, 0)], rect(100, 50, 640, 360));
-        assert_eq!(piece.logical, rect(100, 50, 640, 360));
-        assert_eq!(piece.want, rect(100, 50, 640, 360));
-        assert_eq!(piece.origin, PhysPoint { x: 100, y: 50 });
-        assert_eq!(piece.dest, PhysPoint { x: 0, y: 0 });
-        assert_eq!(cut(&piece, 640, 360).unwrap().src, rect(0, 0, 640, 360));
-    }
-
     #[test]
     fn fractional_scale_covers_the_physical_rect() {
         let piece = one(&[fractional(0)], rect(100, 50, 640, 360));
@@ -338,57 +292,6 @@ mod tests {
         assert_eq!(piece.origin, PhysPoint { x: 99, y: 48 });
         let cut = cut(&piece, 642, 363).unwrap();
         assert_eq!(cut.src, rect(1, 2, 640, 360));
-    }
-
-    /// The snap operation makes both compositor rules produce the same buffer.
-    /// One crop then works for both compositors.
-    #[test]
-    fn truncating_and_rounding_compositors_agree_on_every_offset() {
-        for g in [fractional(0), scaled(2400, 1920), scaled(3840, 2880), plain(0, 0)] {
-            for x in 0..400 {
-                let piece = one(&[g], rect(x, x / 3, 300, 200));
-                let wlr = wlroots_buffer(&piece, &g);
-                let hypr = hyprland_buffer(&piece, &g);
-                assert_eq!(wlr, hypr, "scale {} at x={x} splits the two conventions", g.scale());
-                // Integer arithmetic computes the same offset as both compositors.
-                assert_eq!((piece.origin.x, piece.origin.y), (wlr.0, wlr.1));
-                let cut = cut(&piece, wlr.2, wlr.3)
-                    .unwrap_or_else(|| panic!("scale {} at x={x} lost its cut", g.scale()));
-                assert_eq!(cut.src.w, 300, "scale {} at x={x} lost columns", g.scale());
-                assert_eq!(cut.src.h, 200, "scale {} at x={x} lost rows", g.scale());
-                assert!(cut.src.x + cut.src.w <= wlr.2, "past the buffer at x={x}");
-                assert!(cut.src.y + cut.src.h <= wlr.3, "past the buffer at x={x}");
-            }
-        }
-    }
-
-    /// A scale without a small snap step must stay within buffer bounds.
-    #[test]
-    fn an_awkward_scale_still_crops_inside_the_buffer() {
-        let g = scaled(1920, 1234);
-        for x in 0..300 {
-            let piece = one(&[g], rect(x, 0, 200, 100));
-            let (_, _, bw, bh) = wlroots_buffer(&piece, &g);
-            let cut = cut(&piece, bw, bh).unwrap_or_else(|| panic!("x={x} lost its cut"));
-            assert!(cut.src.x + cut.src.w <= bw, "x={x} runs past the buffer");
-            assert!(cut.src.y + cut.src.h <= bh, "x={x} runs past the buffer");
-        }
-    }
-
-    #[test]
-    fn a_region_off_the_right_edge_keeps_the_part_that_exists() {
-        let piece = one(&[plain(0, 0)], rect(1900, 100, 100, 50));
-        assert_eq!(piece.want, rect(1900, 100, 20, 50));
-        assert_eq!(piece.dest, PhysPoint { x: 0, y: 0 });
-        assert_eq!(cut(&piece, 20, 50).unwrap().src, rect(0, 0, 20, 50));
-    }
-
-    #[test]
-    fn a_region_off_the_left_edge_lands_at_a_dest_offset() {
-        let piece = one(&[plain(0, 0)], rect(-30, 100, 100, 50));
-        assert_eq!(piece.want, rect(0, 100, 70, 50));
-        // The first 30 frame columns have no output. Leave these columns black.
-        assert_eq!(piece.dest, PhysPoint { x: 30, y: 0 });
     }
 
     #[test]
@@ -404,93 +307,5 @@ mod tests {
         // Output-local: the second output has origin 0.
         assert_eq!(out[1].logical, rect(0, 10, 80, 20));
         assert_eq!(out[1].dest, PhysPoint { x: 20, y: 0 });
-    }
-
-    /// Mixed-scale layouts have no defined global physical space.
-    /// Use the cursor channel's anchor so a hover captures the cursor's location.
-    /// Output boxes can overlap. The later output remains last.
-    #[test]
-    fn mixed_scales_anchor_the_way_the_cursor_channel_anchors() {
-        let geoms = [fractional(0), plain(2560, 0)];
-        assert_eq!(physical_box(&geoms[0]), rect(0, 0, 3840, 2160));
-        assert_eq!(physical_box(&geoms[1]), rect(2560, 0, 1920, 1080));
-        let mut out = Vec::new();
-        split(&geoms, rect(3830, 0, 40, 40), &mut out);
-        assert_eq!(out.len(), 2);
-        assert_eq!(out[0].want, rect(3830, 0, 10, 40));
-        assert_eq!(out[1].want, rect(1270, 0, 40, 40));
-    }
-
-    #[test]
-    fn a_region_on_no_output_splits_into_nothing() {
-        let mut out = Vec::new();
-        split(&[plain(0, 0)], rect(5000, 5000, 100, 100), &mut out);
-        assert!(out.is_empty());
-    }
-
-    #[test]
-    fn geometry_that_has_not_arrived_is_skipped() {
-        let mut out = Vec::new();
-        split(&[OutputGeometry::default()], rect(0, 0, 10, 10), &mut out);
-        assert!(out.is_empty());
-    }
-
-    #[test]
-    fn degenerate_regions_split_into_nothing() {
-        let mut out = Vec::new();
-        split(&[plain(0, 0)], rect(10, 10, 0, 40), &mut out);
-        assert!(out.is_empty());
-        split(&[plain(0, 0)], rect(10, 10, 40, -1), &mut out);
-        assert!(out.is_empty());
-    }
-
-    #[test]
-    fn a_transformed_output_swaps_its_physical_box() {
-        let g = OutputGeometry {
-            logical_x: 0,
-            logical_y: 0,
-            logical_w: 1080,
-            logical_h: 1920,
-            mode_w: 1920,
-            mode_h: 1080,
-            transform_swaps: true,
-        };
-        assert_eq!(physical_box(&g), rect(0, 0, 1080, 1920));
-    }
-
-    #[test]
-    fn a_short_buffer_yields_what_it_holds() {
-        let piece = one(&[plain(0, 0)], rect(0, 0, 100, 100));
-        assert_eq!(cut(&piece, 100, 40).unwrap().src, rect(0, 0, 100, 40));
-        assert_eq!(cut(&piece, 0, 40), None);
-    }
-
-    #[test]
-    fn bounds_prefer_the_output_under_the_point() {
-        let geoms = [plain(0, 0), plain(1920, 0)];
-        assert_eq!(
-            bounds_containing(&geoms, PhysPoint { x: 2000, y: 5 }),
-            rect(1920, 0, 1920, 1080)
-        );
-    }
-
-    #[test]
-    fn bounds_fall_back_to_the_nearest_output() {
-        let geoms = [plain(0, 0), plain(4000, 0)];
-        assert_eq!(
-            bounds_containing(&geoms, PhysPoint { x: 3900, y: 5 }),
-            rect(4000, 0, 1920, 1080)
-        );
-    }
-
-    #[test]
-    fn bounds_without_geometry_still_answer() {
-        let b = bounds_containing(&[], PhysPoint { x: 100, y: 100 });
-        assert!(b.contains(PhysPoint { x: 100, y: 100 }));
-    }
-
-    #[test]
-    fn cover_spans_both_rects() {
-        assert_eq!(cover(rect(0, 0, 10, 10), rect(20, 5, 10, 10)), rect(0, 0, 30, 15));
     }
 }

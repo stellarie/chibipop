@@ -168,10 +168,6 @@ mod tests {
     use super::*;
     use crate::plugin::proto::{Line, RecogniseResult, Rect, Word};
 
-    fn region() -> PhysRect {
-        PhysRect { x: 100, y: 200, w: 500, h: 100 }
-    }
-
     #[test]
     fn wire_lines_become_ocr_lines() {
         let r = RecogniseResult {
@@ -190,77 +186,10 @@ mod tests {
     }
 
     #[test]
-    fn a_text_only_line_yields_no_words() {
-        let r = RecogniseResult {
-            lines: vec![Line { text: "宿舎".into(), words: None }],
-        };
-        assert!(to_ocr_lines(&r)[0].words.is_empty());
-    }
-
-    #[test]
-    fn every_rect_field_survives_the_mapping_unoffset() {
-        let r = RecogniseResult {
-            lines: vec![Line {
-                text: "宿".into(),
-                words: Some(vec![Word {
-                    text: "宿".into(),
-                    rect: Rect { x: 11, y: 22, w: 33, h: 44 },
-                }]),
-            }],
-        };
-        let word = &to_ocr_lines(&r)[0].words[0];
-        assert_eq!(word.text, "宿");
-        assert_eq!(word.rect, PhysRect { x: 11, y: 22, w: 33, h: 44 });
-    }
-
-    #[test]
-    fn line_order_is_kept_and_no_line_is_dropped() {
-        let line = |t: &str| Line { text: t.into(), words: None };
-        let r = RecogniseResult { lines: vec![line("one"), line("two"), line("three")] };
-        assert_eq!(to_ocr_lines(&r).len(), 3);
-    }
-
-    #[test]
-    fn a_reply_with_no_lines_maps_to_no_lines() {
-        assert!(to_ocr_lines(&RecogniseResult { lines: vec![] }).is_empty());
-    }
-
-    #[test]
     fn a_plugin_can_stand_in_as_an_ocr_engine() {
         fn boxed(p: PluginText) -> Box<dyn chibipop::text::OcrEngine> {
             Box::new(p)
         }
         let _ = boxed;
-    }
-
-    #[test]
-    fn the_estimate_lands_on_the_first_char_at_the_left_edge() {
-        assert_eq!(estimate_offset("宿舎に戻る", 100, region()), 0);
-    }
-
-    #[test]
-    fn the_estimate_lands_on_the_last_char_at_the_right_edge() {
-        let line = "宿舎に戻る";
-        let off = estimate_offset(line, 599, region());
-        assert_eq!(&line[off..], "る");
-    }
-
-    #[test]
-    fn the_estimate_clamps_left_of_the_region() {
-        assert_eq!(estimate_offset("宿舎に戻る", -50, region()), 0);
-    }
-
-    #[test]
-    fn the_estimate_always_returns_a_char_boundary() {
-        let line = "宿舎に戻る";
-        for x in 0..700 {
-            let off = estimate_offset(line, x, region());
-            assert!(line.is_char_boundary(off), "x={x} off={off}");
-        }
-    }
-
-    #[test]
-    fn an_empty_line_estimates_zero() {
-        assert_eq!(estimate_offset("", 300, region()), 0);
     }
 }

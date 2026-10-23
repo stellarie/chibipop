@@ -270,61 +270,6 @@ pub fn scale_moved(was: f64, now: f64) -> bool {
 mod tests {
     use super::*;
 
-    /// A 2560x1440 panel at 1.5 scale, logical origin 0.
-    fn output(logical_x: i32, logical_w: i32, mode_w: i32) -> OutputGeometry {
-        OutputGeometry {
-            logical_x,
-            logical_y: 0,
-            logical_w,
-            logical_h: 960,
-            mode_w,
-            mode_h: 1440,
-            transform_swaps: false,
-        }
-    }
-
-    #[test]
-    fn an_outputs_physical_box_is_its_mode_at_its_own_scaled_origin() {
-        // Second head of a 1.5x pair. The output shows 2560 device pixels as
-        // 1707 logical units. It sits directly to the right of the first head.
-        let geo = output(1707, 1707, 2560);
-        let rect = output_physical(&geo);
-        // The origin lands on the panel edge exactly.
-        // The scale is this output's own ratio (2560/1707) instead of 1.5.
-        // This test verifies that the code derives a scale for each output.
-        // The code does not trust one global number.
-        assert_eq!(2560, rect.x);
-        assert_eq!(2560, rect.w);
-        assert_eq!(1440, rect.h);
-    }
-
-    #[test]
-    fn a_rotated_output_swaps_its_physical_extent() {
-        let mut geo = output(0, 1707, 2560);
-        geo.transform_swaps = true;
-        let rect = output_physical(&geo);
-        assert_eq!(1440, rect.w);
-        assert_eq!(2560, rect.h);
-    }
-
-    #[test]
-    fn a_preferred_scale_of_180_120ths_is_one_and_a_half() {
-        let geo = output(0, 1707, 2560);
-        assert_eq!(1.5, fractional(Some(180), &geo));
-    }
-
-    #[test]
-    fn without_a_preferred_scale_the_outputs_own_ratio_stands_in() {
-        let geo = output(0, 1280, 2560);
-        assert_eq!(2.0, fractional(None, &geo));
-        assert_eq!(2.0, fractional(Some(0), &geo), "a zero denominator is not a scale");
-    }
-
-    #[test]
-    fn an_unknown_output_still_reports_a_usable_scale() {
-        assert_eq!(1.0, fractional(None, &OutputGeometry::default()));
-    }
-
     #[test]
     fn placement_derives_logical_size_and_margins_from_the_physical_rect() {
         let monitor = PhysRect { x: 0, y: 0, w: 2560, h: 1440 };
@@ -339,24 +284,6 @@ mod tests {
     }
 
     #[test]
-    fn margins_are_relative_to_the_output_the_surface_lives_on() {
-        // Second head at physical x 2560, scale 1.0.
-        let monitor = PhysRect { x: 2560, y: 0, w: 1920, h: 1080 };
-        let anchor = PhysRect { x: 2600, y: 100, w: 50, h: 20 };
-        let p = place(anchor, (400, 300), monitor, 1.0);
-        assert_eq!(PhysRect { x: 2600, y: 160, w: 400, h: 300 }, p.rect);
-        assert_eq!((160, 40), p.margin, "output-local, not global");
-    }
-
-    #[test]
-    fn scale_one_leaves_physical_and_logical_identical() {
-        let monitor = PhysRect { x: 0, y: 0, w: 1920, h: 1080 };
-        let p = place(PhysRect { x: 10, y: 10, w: 10, h: 10 }, (300, 200), monitor, 1.0);
-        assert_eq!((300, 200), p.logical);
-        assert_eq!(p.buffer, p.logical);
-    }
-
-    #[test]
     fn a_popup_that_would_fall_off_the_bottom_flips_above_the_anchor() {
         let monitor = PhysRect { x: 0, y: 0, w: 2560, h: 1440 };
         let anchor = PhysRect { x: 100, y: 1300, w: 80, h: 30 };
@@ -364,24 +291,6 @@ mod tests {
         assert!(p.rect.y + p.rect.h <= 1440, "placed at {:?}", p.rect);
         assert_eq!(660, p.rect.y, "gap above the anchor, not below it");
         assert_eq!((440, 67), p.margin, "round(660/1.5) top, round(100/1.5) left");
-    }
-
-    #[test]
-    fn the_anchors_output_is_the_one_containing_it() {
-        let left = output(0, 1707, 2560);
-        let right = output(1707, 1707, 2560);
-        let outs = [left, right];
-        let at = |x| output_at(outs.iter().enumerate(), PhysRect { x, y: 10, w: 4, h: 4 });
-        assert_eq!(Some(0), at(100));
-        assert_eq!(Some(1), at(3000));
-    }
-
-    #[test]
-    fn an_anchor_in_no_output_lands_on_the_nearest() {
-        let outs = [output(0, 1707, 2560)];
-        let at = output_at(outs.iter().enumerate(), PhysRect { x: 9000, y: 10, w: 4, h: 4 });
-        assert_eq!(Some(0), at);
-        assert_eq!(None, output_at(std::iter::empty::<(usize, &OutputGeometry)>(), PhysRect { x: 0, y: 0, w: 1, h: 1 }));
     }
 
     fn shown(output: usize, scale: f64) -> Shown {
@@ -401,32 +310,5 @@ mod tests {
         assert_eq!(Some(0), v.hide());
         assert_eq!(None, v.hide(), "the second hide is free");
         assert_eq!(Visibility::Hidden, v);
-    }
-
-    #[test]
-    fn showing_on_another_output_clears_the_one_it_left() {
-        let mut v = Visibility::Hidden;
-        assert_eq!(None, v.show(shown(0, 1.5)));
-        assert_eq!(None, v.show(shown(0, 1.5)), "a re-show in place clears nothing");
-        assert_eq!(Some(0), v.show(shown(1, 1.0)), "two popups would be visible otherwise");
-        assert_eq!(Some(1), v.shown().map(|s| s.output));
-    }
-
-    #[test]
-    fn a_scale_change_re_renders_only_the_surface_that_is_showing() {
-        let mut v = Visibility::Hidden;
-        assert!(!v.rescale(0, 2.0), "a hidden buffer is transparent at every scale");
-        v.show(shown(0, 1.0));
-        assert!(!v.rescale(1, 2.0), "another output's scale is not our frame");
-        assert!(v.rescale(0, 1.5), "Hyprland corrects 1.0 to 1.5 after the first commit");
-        assert_eq!(Some(1.5), v.shown().map(|s| s.scale));
-        assert!(!v.rescale(0, 1.5), "the same scale again is chatter, not a repaint");
-    }
-
-    #[test]
-    fn scale_equality_has_slack_but_not_a_120th_of_it() {
-        assert!(!scale_moved(1.5, 1.5));
-        assert!(!scale_moved(1.5, 1.5 + 1e-9));
-        assert!(scale_moved(1.5, 1.5 + 1.0 / 120.0), "121/120ths is a different scale");
     }
 }

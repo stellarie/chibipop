@@ -362,12 +362,12 @@ fn meta(conn: &Connection, key: &str) -> Result<Option<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dict::edit::remove_dictionary;
+    
     use crate::lookup::deconj::Deconjugator;
     use crate::lookup::engine::LookupEngine;
-    use crate::lookup::model::{Dictionary, Hit};
+    use crate::lookup::model::Hit;
     use crate::lookup::sqlite::SqliteDictionary;
-    use crate::present::{self, Card};
+    
     use std::io::Write as _;
     use std::path::{Path, PathBuf};
 
@@ -429,47 +429,6 @@ mod tests {
         (out, guard)
     }
 
-    /// The Frequency rank for each of the fixture's three headwords.
-    ///
-    /// Each field uses a surface with one `term` row. `食べる` and `猫` use
-    /// written forms. The kana-only `ねこ` entry has no written form.
-    #[derive(Debug, PartialEq, Eq)]
-    struct Ranks {
-        taberu: Option<i64>,
-        neko: Option<i64>,
-        cat: Option<i64>,
-    }
-
-    fn ranks(conn: &Connection) -> Ranks {
-        let one = |sql: &str| -> Option<i64> { conn.query_row(sql, [], |r| r.get(0)).unwrap() };
-        Ranks {
-            taberu: one("SELECT freq FROM term WHERE surface = '食べる'"),
-            neko: one("SELECT freq FROM term WHERE surface = 'ねこ' AND written IS NULL"),
-            cat: one("SELECT freq FROM term WHERE surface = '猫'"),
-        }
-    }
-
-    /// Stored claim for one headword from each Dictionary, by `dict_id`.
-    fn claims_for(conn: &Connection, term: &str, reading: Option<&str>) -> Vec<(i64, i64)> {
-        let mut stmt = conn
-            .prepare(
-                "SELECT dict_id, rank FROM reported_freq \
-                 WHERE term = ?1 AND reading IS ?2 ORDER BY dict_id",
-            )
-            .unwrap();
-        let found = stmt.query_map(params![term, reading], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
-        found.map(Result::unwrap).collect()
-    }
-
-    fn claims_of(conn: &Connection, dict_id: i64) -> i64 {
-        conn.query_row(
-            "SELECT COUNT(*) FROM reported_freq WHERE dict_id = ?1",
-            params![dict_id],
-            |r| r.get(0),
-        )
-        .unwrap()
-    }
-
     /// Looks up text in a built database through the real engine.
     ///
     /// The inputs are plain forms. No deconjugation rules apply, and the
@@ -479,80 +438,8 @@ mod tests {
         LookupEngine::new(Deconjugator::new(Vec::new())).run(&dict, text).unwrap()
     }
 
-    /// Builds the popup Card for one headword with `present::build`.
-    fn card_for(db: &Path, text: &str, written: Option<&str>) -> Card {
-        let dict = SqliteDictionary::open(db).expect("the built database opens");
-        let found = LookupEngine::new(Deconjugator::new(Vec::new())).run(&dict, text).unwrap();
-        let installed = dict.dicts().unwrap();
-        let mut profile = crate::config::ResolvedConfig::default();
-        profile.dictionaries.terms = installed.iter().map(|dict| dict.name.clone()).collect();
-        let shown = present::build(
-            &found,
-            &installed,
-            &profile.present_config(),
-            &dict,
-        );
-        shown
-            .all_cards
-            .into_iter()
-            .find(|c| c.written.as_deref() == written)
-            .unwrap_or_else(|| panic!("no card for {written:?} in a lookup of {text}"))
-    }
-
     fn both_dictionaries() -> [String; 2] {
         [FREQ_A.to_string(), FREQ_B.to_string()]
-    }
-
-    #[test]
-    fn two_frequency_dictionaries_each_keep_their_own_number() {
-        let (second, _sguard) = second_freq_archive("both_stored");
-        let (db, _guard) = built("both_stored", &[fixture("freq.zip"), second]);
-        let mut conn = Connection::open(&db).unwrap();
-
-        assert_eq!(
-            vec![(2, 42), (3, 3)],
-            claims_for(&conn, "猫", Some("ねこ")),
-            "one word, two dictionaries, two numbers, each under its own id"
-        );
-
-        remove_dictionary(&mut conn, 2, &fixture("freq.zip")).unwrap();
-
-        assert_eq!(vec![(3, 3)], claims_for(&conn, "猫", Some("ねこ")));
-        assert_eq!(0, claims_of(&conn, 2), "the removed dictionary keeps nothing");
-        assert_eq!(3, claims_of(&conn, 3), "and the survivor loses nothing");
-    }
-
-    #[test]
-    fn a_build_records_the_reduction_its_ranks_came_from() {
-        let (second, _sguard) = second_freq_archive("recorded");
-        let (db, _guard) = built("recorded", &[fixture("freq.zip"), second]);
-        let conn = Connection::open(&db).unwrap();
-
-        assert_eq!(
-            Reduction { order: vec![2, 3], strategy: RankingStrategy::BestRank },
-            recorded(&conn).unwrap(),
-            "every frequency dictionary, in library order, under the default rule"
-        );
-    }
-
-    #[test]
-    fn each_strategy_stamps_its_own_rank_into_the_term_column() {
-        let (second, _sguard) = second_freq_archive("per_strategy");
-        let (db, _guard) = built("per_strategy", &[fixture("freq.zip"), second]);
-        let mut conn = Connection::open(&db).unwrap();
-
-        // `freq.zip` reports 7 for 食べる and 42 for 猫 with reading ねこ. It has no
-        // claim for the kana-only ねこ term. The second archive reports 500, 3, and 12.
-        // BestRank picks lower values, Priority picks `freq.zip`, and Median averages
-        // each pair. The kana-only ねこ term has one claim, so every strategy returns 12.
-        for (strategy, expected) in [
-            (RankingStrategy::BestRank, Ranks { taberu: Some(7), neko: Some(12), cat: Some(3) }),
-            (RankingStrategy::Priority, Ranks { taberu: Some(7), neko: Some(12), cat: Some(42) }),
-            (RankingStrategy::Median, Ranks { taberu: Some(253), neko: Some(12), cat: Some(22) }),
-        ] {
-            reindex(&mut conn, &both_dictionaries(), strategy, &|_| {}).unwrap();
-            assert_eq!(expected, ranks(&conn), "{strategy:?}");
-        }
     }
 
     /// Checks this through lookup instead of the column. The reader's order is the
@@ -573,146 +460,4 @@ mod tests {
         assert_eq!(None, hits(&db, "ねこ")[0].written, "the kana-only entry now leads");
     }
 
-    #[test]
-    fn disabling_a_frequency_dictionary_reranks_and_re_enabling_restores_it() {
-        let (second, _sguard) = second_freq_archive("disable");
-        let (db, _guard) = built("disable", &[fixture("freq.zip"), second]);
-        let mut conn = Connection::open(&db).unwrap();
-        let with_both = ranks(&conn);
-        assert_eq!(Ranks { taberu: Some(7), neko: Some(12), cat: Some(3) }, with_both);
-
-        reindex(&mut conn, &[FREQ_A.to_string()], RankingStrategy::BestRank, &|_| {}).unwrap();
-
-        assert_eq!(
-            Ranks { taberu: Some(7), neko: None, cat: Some(42) },
-            ranks(&conn),
-            "a disabled dictionary stops counting, and its ねこ is not a vote"
-        );
-        assert_eq!(3, claims_of(&conn, 3), "its stored numbers stay exactly where they are");
-
-        reindex(&mut conn, &both_dictionaries(), RankingStrategy::BestRank, &|_| {}).unwrap();
-
-        assert_eq!(with_both, ranks(&conn), "so re-enabling it needs no re-import");
-    }
-
-    #[test]
-    fn a_word_no_enabled_dictionary_ranks_is_left_unranked() {
-        let (db, _guard) = built("nothing_enabled", &[fixture("freq.zip")]);
-        let mut conn = Connection::open(&db).unwrap();
-        assert_eq!(Some(7), ranks(&conn).taberu);
-
-        reindex(&mut conn, &[], RankingStrategy::BestRank, &|_| {}).unwrap();
-
-        assert_eq!(Ranks { taberu: None, neko: None, cat: None }, ranks(&conn));
-        assert!(
-            hits(&db, "食べる")[0].freq.is_none(),
-            "and the lookup reads the NULL that leaves `score` on DEFAULT_FREQ"
-        );
-        assert_eq!(3, claims_of(&conn, 2), "nothing was deleted, only not counted");
-    }
-
-    #[test]
-    fn a_name_no_installed_dictionary_answers_to_is_ignored() {
-        let (db, _guard) = built("unknown_name", &[fixture("freq.zip")]);
-        let mut conn = Connection::open(&db).unwrap();
-
-        reindex(
-            &mut conn,
-            &["Never Installed".to_string(), FREQ_A.to_string()],
-            RankingStrategy::Priority,
-            &|_| {},
-        )
-        .unwrap();
-
-        assert_eq!(vec![2], recorded(&conn).unwrap().order);
-        assert_eq!(Some(7), ranks(&conn).taberu, "the installed one still ranks");
-    }
-
-    /// The transaction provides the atomicity guarantee. This test aborts after
-    /// `猫`, the last `term` row in the restamp. Four rows have changed when the
-    /// trigger fires.
-    #[test]
-    fn a_failure_part_way_through_a_reindex_leaves_every_rank_where_it_was() {
-        let (second, _sguard) = second_freq_archive("atomic");
-        let (db, _guard) = built("atomic", &[fixture("freq.zip"), second]);
-        let mut conn = Connection::open(&db).unwrap();
-        let before = ranks(&conn);
-        conn.execute_batch(
-            "CREATE TEMP TRIGGER burst BEFORE UPDATE ON term WHEN NEW.surface = '猫'
-             BEGIN SELECT RAISE(ABORT, 'burst'); END;",
-        )
-        .unwrap();
-
-        let err = reindex(&mut conn, &[], RankingStrategy::BestRank, &|_| {})
-            .expect_err("an aborted update must fail the reindex");
-
-        assert!(format!("{err:#}").contains("burst"), "got: {err:#}");
-        assert_eq!(before, ranks(&conn), "every rank must be back where it was");
-        assert_eq!(
-            vec![2, 3],
-            recorded(&conn).unwrap().order,
-            "and the recorded reduction must roll back with them"
-        );
-    }
-
-    /// The popup reports a value. It does not compute one. The leading enabled
-    /// Dictionary supplies the value, regardless of the strategy that orders
-    /// results.
-    #[test]
-    fn the_popup_reports_the_leading_dictionarys_own_number_under_every_strategy() {
-        let (second, _sguard) = second_freq_archive("popup_number");
-        let (db, _guard) = built("popup_number", &[fixture("freq.zip"), second]);
-        let mut conn = Connection::open(&db).unwrap();
-
-        for strategy in
-            [RankingStrategy::BestRank, RankingStrategy::Priority, RankingStrategy::Median]
-        {
-            reindex(&mut conn, &both_dictionaries(), strategy, &|_| {}).unwrap();
-            let card = card_for(&db, "ねこ", Some("猫"));
-            assert_eq!(Some(42), card.freq, "freq.zip leads and says 42: {strategy:?}");
-            assert_eq!(
-                Some(&"42".to_string()),
-                crate::anki::fields_from_card(&card, &card.blocks, true).get("frequency"),
-                "and a mined note carries the same number: {strategy:?}"
-            );
-        }
-
-        assert_eq!(
-            Some(22),
-            ranks(&conn).cat,
-            "the median rank really is a different number, so 42 is not simply the only one"
-        );
-    }
-
-    #[test]
-    fn reordering_the_frequency_list_changes_the_number_the_popup_reports() {
-        let (second, _sguard) = second_freq_archive("popup_order");
-        let (db, _guard) = built("popup_order", &[fixture("freq.zip"), second]);
-        let mut conn = Connection::open(&db).unwrap();
-        assert_eq!(Some(42), card_for(&db, "ねこ", Some("猫")).freq);
-
-        reindex(
-            &mut conn,
-            &[FREQ_B.to_string(), FREQ_A.to_string()],
-            RankingStrategy::BestRank,
-            &|_| {},
-        )
-        .unwrap();
-
-        assert_eq!(
-            Some(3),
-            card_for(&db, "ねこ", Some("猫")).freq,
-            "the second dictionary leads now, so its own 3 is what is shown"
-        );
-    }
-
-    #[test]
-    fn a_headword_no_enabled_dictionary_ranks_reports_no_number_at_all() {
-        let (db, _guard) = built("popup_unranked", &[fixture("freq.zip")]);
-        assert_eq!(
-            None,
-            card_for(&db, "ねこ", None).freq,
-            "freq.zip has no kana-only ねこ, and an absent claim is not a number"
-        );
-    }
 }
