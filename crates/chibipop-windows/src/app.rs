@@ -4583,8 +4583,12 @@ fn startup_language(
 mod tests {
     use super::*;
 
+    // Capture and a native window crash together.
+    static NATIVE: Mutex<()> = Mutex::new(());
+
     #[test]
     fn worker_serve_preserves_idle_backend_and_applies_explicit_reload() -> Result<()> {
+        let _native = NATIVE.lock().unwrap_or_else(|error| error.into_inner());
         let mut config = Config::default();
         let mut alternate = config.resolve(&config.default_profile)?;
         alternate.ocr.engine = "meikiocr".into();
@@ -5092,6 +5096,7 @@ mod tests {
 
     #[test]
     fn explicit_quit_during_a_write_is_remembered_and_exits_after_completion() {
+        let _native = NATIVE.lock().unwrap_or_else(|error| error.into_inner());
         let form = settings::from_config(&Config::default(), &[]);
         let window = SettingsWindow::open(&form, &[], ApplyMode::Live).unwrap();
         window.set_busy(true);
