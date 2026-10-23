@@ -1740,36 +1740,6 @@ mod tests {
 
     // ---- promote a finished build over the live database ----
 
-    /// Holds the same database state that a daemon leaves behind: a sidecar log
-    /// has frames that the database does not yet contain.
-    ///
-    /// Every step matters. The reader starts its snapshot before the final
-    /// commit. The read-only reader cannot copy that commit, drain the log, or
-    /// delete it. The log outlives the writer with live frames.
-    /// A fully copied log is safe. Its index says that it has no frames to
-    /// replay, and a reader skips it.
-    #[cfg(unix)]
-    fn held_by_a_reader(out: &Path) -> Connection {
-        build(&[fixture("terms.zip")], &[], out, &|_| {}).expect("the first build");
-        let writer = Connection::open(out).unwrap();
-        writer
-            .execute_batch(
-                "INSERT INTO meta (k, v)
-                   WITH RECURSIVE s(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM s WHERE i < 120)
-                   SELECT 'pad' || i, hex(zeroblob(100)) FROM s;
-                 PRAGMA wal_checkpoint(TRUNCATE);",
-            )
-            .unwrap();
-        let reader = Connection::open_with_flags(out, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
-        reader.execute_batch("BEGIN; SELECT COUNT(*) FROM meta;").unwrap();
-        writer
-            .execute_batch("INSERT OR REPLACE INTO meta (k, v) VALUES ('marker', 'old');")
-            .unwrap();
-        drop(writer);
-        assert!(suffixed(out, "-wal").exists(), "a held-open reader keeps the log alive");
-        reader
-    }
-
 
     fn ints(conn: &Connection, sql: &str) -> Vec<i64> {
         let mut stmt = conn.prepare(sql).unwrap();
