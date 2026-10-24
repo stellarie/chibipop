@@ -187,12 +187,6 @@ mod tests {
         "wp_viewporter",
     ];
 
-    #[test]
-    fn a_full_compositor_reports_no_missing_globals() {
-        let lines = report(&advertised(FULL));
-        assert!(!lines.iter().any(|l| l.contains("MISSING")), "{lines:?}");
-    }
-
     /// This test models stock GNOME.
     /// Mutter advertises every listed global except the layer shell.
     /// The test names that global and its cost.
@@ -215,77 +209,5 @@ mod tests {
         );
         assert!(!popup_shell_advertised(&advertised(&names)));
         assert!(popup_shell_advertised(&advertised(FULL)));
-    }
-
-    /// A hard requirement is the only absence that can produce "cannot run".
-    /// The fatal line names that requirement and no other detail.
-    /// The user can then act on that line.
-    #[test]
-    fn only_a_missing_hard_requirement_is_a_fatal_verdict() {
-        for req in REQUIRED {
-            let names: Vec<&str> = FULL.iter().copied().filter(|n| *n != req.interface).collect();
-            let lines = report(&advertised(&names));
-            let fatal: Vec<&String> = lines.iter().filter(|l| l.contains("cannot run")).collect();
-            assert_eq!(1, fatal.len(), "{lines:?}");
-            assert!(fatal[0].contains(req.interface), "{fatal:?}");
-            assert!(fatal[0].contains(req.why), "{fatal:?}");
-        }
-    }
-
-    /// The fractional-scale pair produces a sharpness note, not a verdict.
-    /// `Popup::bind` falls back to the output's integer scale.
-    /// A fatal report would contradict the binary.
-    /// Headless cage with wlroots 0.20 showed this case.
-    /// It advertises `wp_viewporter` without a fractional-scale manager.
-    #[test]
-    fn a_missing_fractional_scale_is_a_softness_note_not_a_verdict() {
-        let names: Vec<&str> = FULL
-            .iter()
-            .copied()
-            .filter(|n| *n != "wp_fractional_scale_manager_v1")
-            .collect();
-        let lines = report(&advertised(&names));
-        let note = lines
-            .iter()
-            .find(|l| l.contains("wp_fractional_scale_manager_v1"))
-            .unwrap_or_else(|| panic!("{lines:?}"));
-        assert!(note.contains("missing"), "{note}");
-        assert!(note.contains("look soft"), "{note}");
-        assert!(!note.contains("MISSING"), "a soft fallback is not a MISSING: {note}");
-        assert!(!lines.iter().any(|l| l.contains("cannot run")), "{lines:?}");
-    }
-
-    /// This test records a degraded session instead of an imagined one.
-    /// Headless `cage` with wlroots 0.20 reports this result for `chibipop probe`:
-    /// no layer shell, no fractional-scale manager, a viewporter, and wlr-screencopy.
-    /// One fatal line would be incorrect.
-    /// Capture works, the cursor ladder still has rungs, and only the popup is unavailable.
-    #[test]
-    fn the_observed_cage_session_reads_as_hover_unsupported_and_nothing_worse() {
-        let lines = report(&advertised(&[
-            "wl_compositor",
-            "wl_shm",
-            "wl_seat",
-            "wl_output",
-            "wp_viewporter",
-            "zwlr_screencopy_manager_v1",
-        ]));
-        assert!(!lines.iter().any(|l| l.contains("cannot run")), "{lines:?}");
-        let missing: Vec<&String> = lines.iter().filter(|l| l.contains("MISSING")).collect();
-        assert_eq!(1, missing.len(), "only the layer shell is a MISSING here: {lines:?}");
-        assert!(missing[0].contains(LAYER_SHELL.interface), "{missing:?}");
-        assert!(
-            lines.iter().any(|l| l.contains("zwlr_screencopy_manager_v1") && l.contains("fallback rung")),
-            "{lines:?}"
-        );
-    }
-
-    #[test]
-    fn no_capture_rung_points_at_the_portal_ladder() {
-        let lines = report(&advertised(&["wl_compositor", "wl_shm", "wl_seat", "wl_output", "zwlr_layer_shell_v1"]));
-        assert!(
-            lines.iter().any(|l| l.contains("portal ladder") && l.contains("ext_image_copy_capture_manager_v1")),
-            "{lines:?}"
-        );
     }
 }

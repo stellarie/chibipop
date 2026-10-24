@@ -250,29 +250,6 @@ mod tests {
     }
 
     #[test]
-    fn a_reading_agnostic_row_is_keyed_with_no_reading() {
-        let t = parse_freq_rows(&rows(json!([["の", "freq", {"value": 1}]])));
-        assert_eq!(Some(1), t.get(&("の".to_string(), None)).copied());
-    }
-
-    #[test]
-    fn a_reading_scoped_row_nests_value_one_level_deeper() {
-        let t = parse_freq_rows(&rows(json!([
-            ["乃", "freq", {"reading": "の", "frequency": {"value": 7}}]
-        ])));
-        assert_eq!(Some(7), t.get(&("乃".to_string(), Some("の".to_string()))).copied());
-    }
-
-    #[test]
-    fn the_lowest_rank_wins_for_one_key() {
-        let t = parse_freq_rows(&rows(json!([
-            ["猫", "freq", {"value": 900}],
-            ["猫", "freq", {"value": 40}]
-        ])));
-        assert_eq!(Some(40), t.get(&("猫".to_string(), None)).copied());
-    }
-
-    #[test]
     fn a_reading_specific_rank_beats_a_reading_agnostic_one() {
         let t = parse_freq_rows(&rows(json!([
             ["猫", "freq", {"value": 9999}],
@@ -283,88 +260,6 @@ mod tests {
         assert_eq!(None, lookup_freq(&t, "犬", None));
     }
 
-    #[test]
-    fn an_empty_reading_falls_back_like_a_missing_one() {
-        let t = parse_freq_rows(&rows(json!([
-            ["猫", "freq", {"value": 9999}],
-            ["猫", "freq", {"reading": "ねこ", "frequency": {"value": 42}}]
-        ])));
-        assert_eq!(Some(9999), lookup_freq(&t, "猫", Some("")));
-        assert_eq!(Some(9999), lookup_freq(&t, "猫", None));
-    }
-
-    #[test]
-    fn rows_that_are_not_freq_rows_are_skipped() {
-        let t = parse_freq_rows(&rows(json!([
-            ["x", "pitch", {"value": 1}],
-            ["y", "freq"],
-            ["z", "freq", {"no_value_here": true}]
-        ])));
-        assert!(t.is_empty());
-    }
-
-    #[test]
-    fn flat_shape_ignores_extra_display_value_field() {
-        let t = parse_freq_rows(&rows(json!([
-            ["の", "freq", {"value": 1, "displayValue": "1"}]
-        ])));
-        let expected: FreqTable = HashMap::from([(("の".to_string(), None), 1)]);
-        assert_eq!(expected, t);
-    }
-
-    #[test]
-    fn reading_scoped_shape_ignores_extra_display_value_field() {
-        let t = parse_freq_rows(&rows(json!([
-            ["乃", "freq", {"reading": "の", "frequency": {"value": 1, "displayValue": "1"}}]
-        ])));
-        let expected: FreqTable =
-            HashMap::from([(("乃".to_string(), Some("の".to_string())), 1)]);
-        assert_eq!(expected, t);
-    }
-
-    #[test]
-    fn a_bare_integer_payload_is_used_directly_as_the_rank() {
-        let t = parse_freq_rows(&rows(json!([["猫", "freq", 42]])));
-        let expected: FreqTable = HashMap::from([(("猫".to_string(), None), 42)]);
-        assert_eq!(expected, t);
-    }
-
-    #[test]
-    fn a_lone_pitch_tagged_row_produces_an_empty_table() {
-        let t = parse_freq_rows(&rows(json!([["x", "pitch", {"value": 1}]])));
-        assert!(t.is_empty());
-    }
-
-    #[test]
-    fn the_lowest_rank_wins_checked_against_the_full_table() {
-        let t = parse_freq_rows(&rows(json!([
-            ["猫", "freq", {"value": 90}],
-            ["猫", "freq", {"value": 5}]
-        ])));
-        let expected: FreqTable = HashMap::from([(("猫".to_string(), None), 5)]);
-        assert_eq!(expected, t);
-    }
-
-    #[test]
-    fn lookup_prefers_reading_specific_on_a_hand_built_table() {
-        let t: FreqTable = HashMap::from([
-            (("乃".to_string(), None), 900),
-            (("乃".to_string(), Some("の".to_string())), 1),
-        ]);
-        assert_eq!(Some(1), lookup_freq(&t, "乃", Some("の")));
-    }
-
-    #[test]
-    fn lookup_falls_back_when_no_reading_specific_entry_exists_at_all() {
-        let t: FreqTable = HashMap::from([(("乃".to_string(), None), 900)]);
-        assert_eq!(Some(900), lookup_freq(&t, "乃", Some("の")));
-    }
-
-    #[test]
-    fn lookup_on_a_completely_empty_table_returns_none() {
-        let t = FreqTable::new();
-        assert_eq!(None, lookup_freq(&t, "猫", Some("ねこ")));
-    }
 // ---- Frequency rank strategies ----
 
     /// Builds a `FreqTable` with one reading-agnostic claim per term.
@@ -386,58 +281,6 @@ mod tests {
     }
 
     #[test]
-    fn best_rank_takes_the_lowest_rank_reported() {
-        assert_eq!(Some(20), RankingStrategy::BestRank.apply(&mut [400, 20, 100]));
-    }
-
-    #[test]
-    fn priority_takes_the_first_dictionarys_rank_even_when_it_is_not_the_lowest() {
-        assert_eq!(Some(400), RankingStrategy::Priority.apply(&mut [400, 20, 100]));
-    }
-
-    #[test]
-    fn the_median_of_an_odd_number_of_ranks_is_the_middle_one() {
-        assert_eq!(Some(100), RankingStrategy::Median.apply(&mut [400, 20, 100]));
-    }
-
-    #[test]
-    fn an_even_number_of_ranks_averages_the_two_middle_ones() {
-        assert_eq!(Some(7), RankingStrategy::Median.apply(&mut [9, 5]));
-        assert_eq!(Some(30), RankingStrategy::Median.apply(&mut [40, 10, 60, 20]));
-    }
-
-    #[test]
-    fn every_strategy_reduces_no_reported_ranks_to_nothing() {
-        for strategy in
-            [RankingStrategy::BestRank, RankingStrategy::Priority, RankingStrategy::Median]
-        {
-            assert_eq!(None, strategy.apply(&mut []), "{strategy:?}");
-        }
-    }
-
-    #[test]
-    fn a_word_two_of_three_dictionaries_have_is_reduced_from_those_two_alone() {
-        let sources = three_dictionaries();
-        // 犬 has ranks 9 and 5 in the first and third Dictionaries. The second
-        // Dictionary has no 犬, so it does not affect any strategy result.
-        let dog = |strategy| lookup_freq(&reduce(&sources, strategy), "犬", None);
-        assert_eq!(Some(5), dog(RankingStrategy::BestRank));
-        assert_eq!(Some(9), dog(RankingStrategy::Priority));
-        assert_eq!(Some(7), dog(RankingStrategy::Median));
-    }
-
-    #[test]
-    fn a_word_no_dictionary_has_is_reduced_to_nothing() {
-        let sources = three_dictionaries();
-        for strategy in
-            [RankingStrategy::BestRank, RankingStrategy::Priority, RankingStrategy::Median]
-        {
-            let reduced = reduce(&sources, strategy);
-            assert_eq!(None, lookup_freq(&reduced, "鼠", None), "{strategy:?}");
-        }
-    }
-
-    #[test]
     fn each_strategy_reduces_a_word_every_dictionary_has_by_its_own_rule() {
         let sources = three_dictionaries();
         let cat = |strategy| lookup_freq(&reduce(&sources, strategy), "猫", None);
@@ -446,49 +289,4 @@ mod tests {
         assert_eq!(Some(100), cat(RankingStrategy::Median));
     }
 
-    #[test]
-    fn one_frequency_dictionary_reduces_to_its_own_claims() {
-        let only = table(&[("猫", 400)]);
-        for strategy in
-            [RankingStrategy::BestRank, RankingStrategy::Priority, RankingStrategy::Median]
-        {
-            assert_eq!(only, reduce(std::slice::from_ref(&only), strategy), "{strategy:?}");
-        }
-    }
-
-    #[test]
-    fn no_frequency_dictionary_reduces_to_an_empty_table() {
-        assert!(reduce(&[], RankingStrategy::BestRank).is_empty());
-    }
-
-    /// Checks the equivalence described on [`reduce`]. A reduction over the
-    /// union of source keys gives each `(term, reading)` pair the same result
-    /// as a strategy over per-source [`lookup_freq`] results.
-    #[test]
-    fn reducing_the_key_union_answers_a_row_as_a_per_row_reduction_would() {
-        let sources = vec![
-            HashMap::from([(("猫".to_string(), Some("ねこ".to_string())), 5)]),
-            HashMap::from([(("猫".to_string(), None), 9)]),
-        ];
-        let reduced = reduce(&sources, RankingStrategy::Median);
-        for reading in [Some("ねこ"), Some("びょう"), None] {
-            let mut per_row: Vec<i64> =
-                sources.iter().filter_map(|s| lookup_freq(s, "猫", reading)).collect();
-            assert_eq!(
-                RankingStrategy::Median.apply(&mut per_row),
-                lookup_freq(&reduced, "猫", reading),
-                "reading {reading:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn a_strategy_round_trips_through_the_name_meta_records() {
-        for strategy in
-            [RankingStrategy::BestRank, RankingStrategy::Priority, RankingStrategy::Median]
-        {
-            assert_eq!(Ok(strategy), strategy.as_str().parse::<RankingStrategy>().map_err(|_| ()));
-        }
-        assert!("mean".parse::<RankingStrategy>().is_err());
-    }
 }

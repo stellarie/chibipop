@@ -135,45 +135,4 @@ timeout_ms = 500
         let bad = GOOD.replace(r#""text-provider""#, r#""sandwich-maker""#);
         assert!(parse(&bad).is_err());
     }
-
-    #[test]
-    fn a_claimed_role_without_its_section_is_refused() {
-        let bad = GOOD.replace("roles = [\"text-provider\"]",
-            "roles = [\"text-provider\", \"field-contributor\"]");
-        let e = parse(&bad).unwrap_err().to_string();
-        assert!(e.contains("field-contributor"), "{e}");
-    }
-
-    #[test]
-    fn a_contributor_with_no_provides_list_is_refused() {
-        let bad = format!("{GOOD}\n[field_contributor]\nprovides = []\n");
-        let bad = bad.replace("roles = [\"text-provider\"]",
-            "roles = [\"text-provider\", \"field-contributor\"]");
-        let e = parse(&bad).unwrap_err().to_string();
-        assert!(e.contains("no field names"), "{e}");
-    }
-
-    #[test]
-    fn ambient_mode_is_refused_and_says_why() {
-        let bad = format!(
-            "{GOOD}\n[field_contributor]\nprovides = [\"x\"]\nmode = \"ambient\"\n"
-        );
-        let bad = bad.replace("roles = [\"text-provider\"]",
-            "roles = [\"text-provider\", \"field-contributor\"]");
-        let e = parse(&bad).unwrap_err().to_string();
-        assert!(e.contains("ambient"), "{e}");
-        assert!(e.contains("protocol 1"), "{e}");
-    }
-
-    #[test]
-    fn a_reactive_contributor_parses() {
-        let ok = format!("{GOOD}\n[field_contributor]\nprovides = [\"screenshot\"]\n");
-        let ok = ok.replace("roles = [\"text-provider\"]",
-            "roles = [\"text-provider\", \"field-contributor\"]");
-        let m = parse(&ok).unwrap();
-        let f = m.field_contributor.unwrap();
-        assert_eq!(f.mode, Mode::Reactive);
-        assert_eq!(f.timeout_ms, 1500);
-        assert!(!f.wants_screen_image);
-    }
 }

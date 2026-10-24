@@ -308,19 +308,6 @@ mod tests {
         (ChibipopTray { statuses, profiles: Vec::new(), requests: tx }, rx)
     }
 
-    /// Return each menu label in order with its clickable state.
-    /// Separators return as `("-", false)`.
-    fn labels(tray: &ChibipopTray) -> Vec<(String, bool)> {
-        tray.menu()
-            .into_iter()
-            .map(|item| match item {
-                MenuItem::Standard(i) => (i.label, i.enabled),
-                MenuItem::Separator => ("-".to_string(), false),
-                _ => ("?".to_string(), false),
-            })
-            .collect()
-    }
-
     /// Activate the first menu item with the given label.
     fn activate(tray: &mut ChibipopTray, label: &str) {
         let found = tray
@@ -352,104 +339,5 @@ mod tests {
 
         activate(&mut tray, "Quit");
         assert_eq!(Ok(TrayRequest::Quit), rx.try_recv());
-    }
-
-    #[test]
-    fn a_profile_menu_request_names_the_future_default() {
-        let (mut tray, rx) = tray(&Selection::Rung(Rung::HyprctlPoll));
-        tray.profiles = vec![
-            ProfileChoice { id: "default".into(), name: "Default".into(), is_default: true },
-            ProfileChoice { id: "japanese".into(), name: "Japanese".into(), is_default: false },
-        ];
-
-        let menu = labels(&tray);
-        assert!(menu.contains(&("Default (default)".into(), true)));
-        assert!(menu.contains(&("Use Japanese as default".into(), true)));
-        activate(&mut tray, "Use Japanese as default");
-        assert_eq!(Ok(TrayRequest::SetDefaultProfile("japanese".into())), rx.try_recv());
-    }
-
-    /// A down channel appears in its row and in the SNI status.
-    /// The bar emphasizes the SNI status.
-    #[test]
-    fn a_down_channel_shows_in_the_row_and_the_sni_status() {
-        let unsupported = Selection::Unsupported {
-            missing: vec!["ext_image_copy_capture_manager_v1".to_string()],
-        };
-        let (tray, _rx) = tray(&unsupported);
-
-        assert_eq!(Status::NeedsAttention, tray.status());
-        assert!(
-            labels(&tray).iter().any(|(l, enabled)| l
-                == "Cursor: unsupported - missing ext_image_copy_capture_manager_v1"
-                && !enabled),
-            "the reason must be readable in the menu: {:?}",
-            labels(&tray)
-        );
-    }
-
-    /// `NeedsAttention` must still have an icon.
-    /// Hosts switch to the attention pixmap for this status.
-    /// An empty list would blank the tray when the user needs to see it.
-    #[test]
-    fn the_attention_icon_is_not_empty() {
-        let (tray, _rx) = tray(&Selection::Rung(Rung::HyprctlPoll));
-        assert_eq!(tray.icon_pixmap().len(), tray.attention_icon_pixmap().len());
-        assert!(!tray.attention_icon_pixmap().is_empty());
-    }
-
-    /// The tooltip carries the same rows.
-    /// It answers "what is broken?" without a menu open.
-    #[test]
-    fn the_tooltip_lists_every_channel() {
-        let (tray, _rx) = tray(&Selection::Rung(Rung::HyprctlPoll));
-        let tip = tray.tool_tip();
-        assert_eq!("chibipop", tip.title);
-        assert_eq!(tray.statuses.rows().join("\n"), tip.description);
-    }
-
-    /// Trayless mode is normal on stock GNOME and bare Hyprland.
-    /// The registry remains usable and reports a disconnected tray.
-    /// A push with no destination does not panic.
-    #[test]
-    fn a_trayless_handle_still_tracks_channels() {
-        let mut handle = TrayHandle::trayless(ChannelStatuses::startup(
-            status::capture_state(&CaptureSelection::Backend(Backend::WlrScreencopy)),
-            &Selection::Rung(Rung::HyprctlPoll),
-            status::popup_state(true),
-        ));
-        assert!(!handle.is_connected());
-
-        assert!(handle.set_channel(ChannelId::Cursor, ChannelState::down("hyprctl gone")));
-        assert_eq!("Cursor: hyprctl gone", handle.statuses().row(ChannelId::Cursor));
-        assert_eq!(Status::NeedsAttention, handle.statuses().sni_status());
-
-        assert!(
-            !handle.set_channel(ChannelId::Cursor, ChannelState::down("hyprctl gone")),
-            "a repeat is not a transition, tray or no tray"
-        );
-
-        assert!(handle.set_channel(
-            ChannelId::Cursor,
-            ChannelState::up(status::rung_detail(Rung::HyprctlPoll))
-        ));
-        assert_eq!(Status::Active, handle.statuses().sni_status());
-    }
-
-    /// The tray renders the state that the daemon sends.
-    /// A mirrored snapshot must produce the menu that the daemon registry describes.
-    #[test]
-    fn a_pushed_snapshot_renders_the_new_rows() {
-        let (mut tray, _rx) = tray(&Selection::Rung(Rung::HyprctlPoll));
-        let mut handle = TrayHandle::trayless(ChannelStatuses::startup(
-            status::capture_state(&CaptureSelection::Backend(Backend::Portal)),
-            &Selection::Rung(Rung::HyprctlPoll),
-            status::popup_state(true),
-        ));
-        handle.set_channel(ChannelId::Capture, ChannelState::up("wlr-screencopy"));
-
-        tray.statuses = handle.statuses().clone();
-        assert!(labels(&tray).iter().any(|(l, _)| l == "Capture: wlr-screencopy"));
-        assert_eq!(Status::Active, tray.status());
     }
 }

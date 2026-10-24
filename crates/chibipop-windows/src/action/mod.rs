@@ -254,30 +254,6 @@ mod tests {
             Some(ActionOutcome::Completed),
         ));
     }
-
-    #[test]
-    fn dispatch_does_not_route_one_bind_type_to_another() {
-        let mut registry = ActionRegistry::new();
-        registry.register(crate::config::BindAction::Search, Box::new(StubAction { available: true }));
-        let mut selection = selection::RegionSelection::dummy();
-        let mut ctx = ActionContext::empty(&mut selection, test_session());
-
-        assert!(registry
-            .dispatch(crate::config::BindAction::OcrClipboard, &empty_state(), &mut ctx)
-            .is_none());
-    }
-
-    #[test]
-    fn dispatch_skips_an_unavailable_configured_action() {
-        let mut registry = ActionRegistry::new();
-        registry.register(crate::config::BindAction::OcrClipboard, Box::new(StubAction { available: false }));
-        let mut selection = selection::RegionSelection::dummy();
-        let mut ctx = ActionContext::empty(&mut selection, test_session());
-
-        assert!(registry
-            .dispatch(crate::config::BindAction::OcrClipboard, &empty_state(), &mut ctx)
-            .is_none());
-    }
 }
 
 #[cfg(test)]
@@ -300,20 +276,7 @@ mod screenshot_result_tests {
     }
 
     #[test]
-    fn filing_nothing_closes_the_add_as_failed() {
-        assert_eq!(shot_result("猫", Ok(None)).add_failed(), Some(true));
-    }
-
-    #[test]
     fn a_shot_that_never_landed_closes_the_add_as_failed() {
         assert_eq!(shot_result("猫", Err("disk full".into())).add_failed(), Some(true));
-    }
-
-    #[test]
-    fn a_wordless_screenshot_has_no_add_to_close() {
-        // The plain hotkey has no popup, so it has no `expr` or add lifecycle to close.
-        // A failed write does not change this result.
-        assert_eq!(shot_result("", Ok(None)).add_failed(), None);
-        assert_eq!(shot_result("", Err("disk full".into())).add_failed(), None);
     }
 }

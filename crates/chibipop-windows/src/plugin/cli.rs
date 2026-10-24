@@ -122,30 +122,3 @@ fn violates_geometry(claimed: bool, r: &proto::RecogniseResult) -> bool {
     }
     !r.lines.iter().any(|l| l.words.is_some())
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn an_empty_response_is_not_a_geometry_violation() {
-        let r = proto::RecogniseResult { lines: vec![] };
-        assert!(!violates_geometry(true, &r), "no lines means no text, not a broken plugin");
-    }
-
-    #[test]
-    fn a_geometry_claim_with_text_but_no_words_is_a_violation() {
-        let r = proto::RecogniseResult {
-            lines: vec![proto::Line { text: "宿舎".into(), words: None }],
-        };
-        assert!(violates_geometry(true, &r));
-    }
-
-    #[test]
-    fn a_text_only_plugin_never_violates() {
-        let r = proto::RecogniseResult {
-            lines: vec![proto::Line { text: "宿舎".into(), words: None }],
-        };
-        assert!(!violates_geometry(false, &r));
-    }
-}

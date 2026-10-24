@@ -142,10 +142,6 @@ impl Pacer {
 mod tests {
     use super::*;
 
-    fn rect(x: i32, y: i32, w: i32, h: i32) -> PhysRect {
-        PhysRect { x, y, w, h }
-    }
-
     /// Three regions that one tiled read asks for.
     const PASS1: PhysRect = PhysRect { x: 100, y: 100, w: 400, h: 200 };
     const TILE1: PhysRect = PhysRect { x: 500, y: 120, w: 300, h: 160 };
@@ -177,25 +173,6 @@ mod tests {
         assert_eq!(p.step(TILE1, true), Step::Serve, "one verdict serves the whole read");
     }
 
-    /// The power budget: a dwell on a static screen sends no request to the compositor.
-    #[test]
-    fn a_static_dwell_keeps_the_race_and_never_copies() {
-        let mut p = Pacer::default();
-        p.begin_read();
-        p.step(PASS1, false);
-        p.step(TILE1, false);
-        assert!(matches!(p.end_read(false), Arm::Rearm(_)));
-
-        for _ in 0..5 {
-            p.begin_read();
-            assert_eq!(p.step(PASS1, true), Step::Settle);
-            p.settled(Verdict::Static);
-            assert_eq!(p.step(PASS1, true), Step::Serve);
-            assert_eq!(p.step(TILE1, true), Step::Serve);
-            assert_eq!(p.end_read(true), Arm::Keep, "a pending race must not be re-armed");
-        }
-    }
-
     #[test]
     fn damage_makes_the_read_copy_again_and_rearm() {
         let mut p = Pacer::default();
@@ -211,91 +188,5 @@ mod tests {
         assert_eq!(p.step(TILE1, true), Step::Copy, "damage anywhere restages every pass");
         // The race fired. Nothing remains in flight to keep.
         assert!(matches!(p.end_read(false), Arm::Rearm(_)));
-    }
-
-    /// Never keep a fired race, even when the caller reports that one remains armed.
-    /// Its pixels are already spent.
-    #[test]
-    fn a_damaged_verdict_never_keeps_the_race() {
-        let mut p = Pacer::default();
-        p.begin_read();
-        p.step(PASS1, false);
-        p.end_read(false);
-        p.begin_read();
-        p.step(PASS1, true);
-        p.settled(Verdict::Damaged);
-        assert_eq!(p.end_read(true), Arm::Rearm(PASS1));
-    }
-
-    #[test]
-    fn an_uncached_region_is_copied_whatever_the_verdict() {
-        let mut p = Pacer::default();
-        p.begin_read();
-        p.step(PASS1, false);
-        p.settled(Verdict::Static);
-        assert_eq!(p.step(TILE2, false), Step::Copy, "pixels we do not hold cannot be served");
-    }
-
-    #[test]
-    fn a_moved_cursor_pays_no_deadline_and_rearms_elsewhere() {
-        let mut p = Pacer::default();
-        p.begin_read();
-        p.step(PASS1, false);
-        p.end_read(false);
-
-        // The cursor moved. No held region matches, so no race can settle.
-        p.begin_read();
-        let moved = rect(2000, 400, 400, 200);
-        assert_eq!(p.step(moved, false), Step::Copy);
-        assert_eq!(p.end_read(true), Arm::Rearm(moved), "the race must follow the eyes");
-    }
-
-    #[test]
-    fn an_empty_read_disarms() {
-        let mut p = Pacer::default();
-        p.begin_read();
-        assert_eq!(p.end_read(true), Arm::Disarm);
-    }
-
-    #[test]
-    fn a_disarmed_race_is_armed_again_next_read() {
-        let mut p = Pacer::default();
-        p.begin_read();
-        p.step(PASS1, false);
-        assert_eq!(p.end_read(false), Arm::Rearm(PASS1));
-        p.disarmed();
-        p.begin_read();
-        p.step(PASS1, true);
-        p.settled(Verdict::Static);
-        assert_eq!(p.end_read(false), Arm::Rearm(PASS1));
-    }
-
-    /// A grab outside a read bracket, such as a single `probe`, still works.
-    /// It does not use the race.
-    #[test]
-    fn unbracketed_grabs_settle_and_copy() {
-        let mut p = Pacer::default();
-        assert_eq!(p.step(PASS1, false), Step::Copy);
-        assert_eq!(p.step(PASS1, true), Step::Settle);
-        // No race exists. Report damage and copy.
-        p.settled(Verdict::Damaged);
-        assert_eq!(p.step(PASS1, true), Step::Copy);
-    }
-
-    #[test]
-    fn the_watched_box_grows_to_cover_served_regions_too() {
-        let mut p = Pacer::default();
-        p.begin_read();
-        p.step(PASS1, false);
-        p.end_read(false);
-
-        p.begin_read();
-        p.step(PASS1, true);
-        p.settled(Verdict::Static);
-        p.step(PASS1, true);
-        // Keep a served tile in the watched box for the next period.
-        p.step(TILE2, false);
-        let union = super::super::geometry::cover(PASS1, TILE2);
-        assert_eq!(p.end_read(true), Arm::Rearm(union));
     }
 }

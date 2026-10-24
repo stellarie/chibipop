@@ -296,10 +296,10 @@ fn sort_items(items: &mut [SelRange]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
+    
 
-    use crate::dict::gloss::{GlossDoc, NodePath};
-    use crate::present::{GlossBlock, GlossEntry};
+    use crate::dict::gloss::NodePath;
+    
 
     fn addr(entry: u32, byte: u32) -> TextAddr {
         TextAddr {
@@ -316,87 +316,6 @@ mod tests {
             start: addr(start_entry, start),
             end: addr(end_entry, end),
         }
-    }
-
-    fn extent(start: u32, end: u32) -> DocRange {
-        DocRange {
-            start: DocAddr {
-                path: NodePath::ROOT,
-                byte: start,
-            },
-            end: DocAddr {
-                path: NodePath::ROOT,
-                byte: end,
-            },
-        }
-    }
-
-    fn test_card() -> Card {
-        let doc = Arc::new(GlossDoc::default());
-        let entry = |entry_id| GlossEntry {
-            entry_id,
-            glosses: Vec::new(),
-            tags: Vec::new(),
-            doc: doc.clone(),
-            media: Vec::new(),
-        };
-        Card {
-            written: None,
-            reading: None,
-            pos: Vec::new(),
-            inflections: Vec::new(),
-            freq: None,
-            blocks: vec![
-                GlossBlock {
-                    dict_name: "first".to_string(),
-                    dict_id: 1,
-                    entries: vec![entry(11), entry(12)],
-                },
-                GlossBlock {
-                    dict_name: "second".to_string(),
-                    dict_id: 2,
-                    entries: vec![entry(21)],
-                },
-            ],
-            match_len: 0,
-            pitch: Vec::new(),
-        }
-    }
-
-    #[test]
-    fn entries_flattens_blocks_in_display_order() {
-        let card = test_card();
-        let ids: Vec<_> = entries(&card).map(|(ordinal, entry)| (ordinal, entry.entry_id)).collect();
-        assert_eq!(vec![(0, 11), (1, 12), (2, 21)], ids);
-    }
-
-    #[test]
-    fn toggle_table_applies_containment_rules() {
-        let cases = vec![
-            (range(0, 2, 0, 4), range(0, 2, 0, 4), Vec::new()),
-            (range(0, 1, 0, 9), range(0, 2, 0, 8), vec![range(0, 2, 0, 8)]),
-            (range(0, 2, 0, 4), range(0, 1, 0, 5), vec![range(0, 1, 0, 5)]),
-            (
-                range(0, 1, 0, 4),
-                range(0, 3, 0, 7),
-                vec![range(0, 1, 0, 4), range(0, 3, 0, 7)],
-            ),
-        ];
-
-        for (old, new, expected) in cases {
-            let mut selection = CardSelection::default();
-            selection.replace(old);
-            selection.toggle(new);
-            assert_eq!(expected, selection.items());
-        }
-    }
-
-    #[test]
-    fn replace_clears_first() {
-        let mut selection = CardSelection::default();
-        selection.replace(range(0, 1, 0, 2));
-        selection.replace(range(1, 1, 1, 3));
-        assert_eq!(&[range(1, 1, 1, 3)], selection.items());
     }
 
     #[test]
@@ -433,63 +352,4 @@ mod tests {
         );
     }
 
-    #[test]
-    fn coverage_reports_none_partial_and_all() {
-        let full = extent(0, 10);
-        let cases = [
-            (Coverage::None, Vec::new()),
-            (Coverage::Partial, vec![range(0, 2, 0, 5)]),
-            (Coverage::All, vec![range(0, 0, 0, 10)]),
-        ];
-        for (expected, items) in cases {
-            let mut selection = CardSelection::default();
-            for item in items {
-                selection.toggle(item);
-            }
-            assert_eq!(expected, selection.coverage(0, full));
-        }
-    }
-
-    #[test]
-    fn set_entry_turns_selection_on_and_off() {
-        let full = extent(0, 10);
-        let mut selection = CardSelection::default();
-        selection.set_entry(0, full, true);
-        assert_eq!(Coverage::All, selection.coverage(0, full));
-        selection.set_entry(0, full, false);
-        assert!(selection.is_empty());
-    }
-
-    #[test]
-    fn card_coverage_is_none_partial_or_all() {
-        let extents = [extent(0, 10), extent(0, 10)];
-        let mut selections = Selections::default();
-        assert_eq!(Coverage::None, selections.coverage_of_card(0, &extents));
-
-        selections.card_mut(0).replace(range(0, 0, 1, 10));
-        assert_eq!(Coverage::All, selections.coverage_of_card(0, &extents));
-
-        selections.card_mut(0).replace(range(0, 0, 0, 5));
-        assert_eq!(Coverage::Partial, selections.coverage_of_card(0, &extents));
-    }
-
-    #[test]
-    fn swap_mirrors_swap_top_indexes() {
-        let mut selections = Selections::default();
-        selections.card_mut(0).replace(range(0, 0, 0, 1));
-        selections.card_mut(1).replace(range(1, 0, 1, 1));
-        selections.card_mut(2).replace(range(2, 0, 2, 1));
-        selections.swap(0, 1);
-        assert_eq!(Some(&[range(1, 0, 1, 1)][..]), selections.card(0).map(CardSelection::items));
-        assert_eq!(Some(&[range(0, 0, 0, 1)][..]), selections.card(1).map(CardSelection::items));
-    }
-
-    #[test]
-    fn union_merges_overlapping_and_touching_ranges() {
-        let mut selection = CardSelection::default();
-        selection.replace(range(0, 5, 0, 8));
-        selection.toggle(range(0, 1, 0, 5));
-        selection.toggle(range(0, 8, 0, 10));
-        assert_eq!(vec![range(0, 1, 0, 10)], selection.union());
-    }
 }

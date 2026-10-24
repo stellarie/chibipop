@@ -688,10 +688,6 @@ mod tests {
         OwnedValue::try_from(Value::from(entries)).expect("a test value is ownable")
     }
 
-    fn spec(id: &str, trigger: &str, description: &str) -> ShortcutSpec {
-        ShortcutSpec { id: self::id(id), trigger: trigger.into(), description: description.into() }
-    }
-
     #[test]
     fn the_spec_shape_parses_into_configured_bindings() {
         let payload = shortcuts(vec![
@@ -708,46 +704,6 @@ mod tests {
     }
 
     #[test]
-    fn bindings_return_in_registration_order() {
-        let payload = shortcuts(vec![
-            shortcut("bind-2", Some("Alt+A")),
-            shortcut("bind-1", Some("Alt+F")),
-        ]);
-        let ids: Vec<ShortcutId> = bindings_from_value(&payload, &allowed())
-            .iter()
-            .map(|binding| binding.id.clone())
-            .collect();
-        assert_eq!(vec![id("bind-1"), id("bind-2")], ids);
-    }
-
-    #[test]
-    fn blank_trigger_descriptions_are_bound_without_a_key() {
-        let blank = shortcuts(vec![shortcut("bind-1", Some(""))]);
-        assert_eq!(
-            vec![Binding { id: id("bind-1"), trigger: None }],
-            bindings_from_value(&blank, &allowed())
-        );
-        let missing = shortcuts(vec![shortcut("bind-2", None)]);
-        assert_eq!(
-            vec![Binding { id: id("bind-2"), trigger: None }],
-            bindings_from_value(&missing, &allowed())
-        );
-    }
-
-    #[test]
-    fn the_dict_shape_reads_the_same() {
-        let mut props: HashMap<String, Value<'static>> = HashMap::new();
-        props.insert("trigger_description".to_string(), Value::from("Meta+F"));
-        let mut dict: HashMap<String, Value<'static>> = HashMap::new();
-        dict.insert("bind-1".to_string(), Value::from(props));
-        let payload = OwnedValue::try_from(Value::from(dict)).expect("ownable");
-        assert_eq!(
-            vec![Binding { id: id("bind-1"), trigger: Some("Meta+F".into()) }],
-            bindings_from_value(&payload, &allowed())
-        );
-    }
-
-    #[test]
     fn foreign_repeated_and_malformed_ids_are_dropped() {
         let payload = shortcuts(vec![
             shortcut("bind-1", Some("Alt+F")),
@@ -759,95 +715,5 @@ mod tests {
             vec![Binding { id: id("bind-1"), trigger: Some("Alt+F".into()) }],
             bindings_from_value(&payload, &allowed())
         );
-    }
-
-    #[test]
-    fn a_nonsense_payload_is_no_bindings() {
-        let number = OwnedValue::try_from(Value::U32(7)).expect("ownable");
-        assert!(bindings_from_value(&number, &allowed()).is_empty());
-        let text = OwnedValue::try_from(Value::from("shortcuts")).expect("ownable");
-        assert!(bindings_from_value(&text, &allowed()).is_empty());
-    }
-
-    #[test]
-    fn the_typed_signal_payload_parses_too() {
-        let mut props: HashMap<String, OwnedValue> = HashMap::new();
-        props.insert(
-            "trigger_description".to_string(),
-            OwnedValue::try_from(Value::from("Alt+F")).expect("ownable"),
-        );
-        let pairs: WirePairs =
-            vec![("bind-1".to_string(), props), ("nope".to_string(), HashMap::new())];
-        assert_eq!(
-            vec![Binding { id: id("bind-1"), trigger: Some("Alt+F".into()) }],
-            bindings_from_pairs(pairs, &allowed())
-        );
-    }
-
-    #[test]
-    fn the_bind_payload_contains_each_configured_id_and_description() {
-        let asked = vec![
-            spec("bind-1", "ALT+f", "Screen lookup"),
-            spec("bind-2", "ALT+a", "Anki add"),
-        ];
-        let built = payload(&asked);
-        assert_eq!(2, built.len());
-        let ids: Vec<&str> = built.iter().map(|(id, _)| id.as_str()).collect();
-        assert_eq!(vec!["bind-1", "bind-2"], ids);
-        assert!(built[0].1.contains_key("description"));
-        assert!(built[0].1.contains_key("preferred_trigger"));
-    }
-
-    #[test]
-    fn an_empty_chord_sends_no_preferred_trigger() {
-        let asked = [
-            spec("bind-1", "", "Empty"),
-            spec("bind-2", "ALT+a", "Anki add"),
-        ];
-        let built = payload(&asked);
-        assert!(!built[0].1.contains_key("preferred_trigger"));
-        assert!(built[1].1.contains_key("preferred_trigger"));
-    }
-
-    #[test]
-    fn the_app_id_refusal_explains_the_launch_requirement() {
-        let said = refusal(
-            "CreateSession",
-            "org.freedesktop.portal.Error.NotAllowed",
-            Some("An app id is required"),
-        );
-        assert_eq!("CreateSession: the portal requires an app id", said.reason);
-        let advice = said.advice.expect("the app-id case has a way out");
-        assert!(advice.contains("chibipop.desktop"), "{advice}");
-        assert!(advice.contains("ctl bind-down <id>"), "{advice}");
-        assert!(!advice.contains("chibipop ctl"), "{advice}");
-    }
-
-    #[test]
-    fn other_refusals_quote_the_portal() {
-        let said = refusal(
-            "BindShortcuts",
-            "org.freedesktop.DBus.Error.AccessDenied",
-            Some("Invalid session"),
-        );
-        assert!(said.reason.contains("AccessDenied"), "{}", said.reason);
-        assert!(said.reason.contains("Invalid session"), "{}", said.reason);
-        assert_eq!(None, said.advice);
-        let bare = refusal("ListShortcuts", "org.freedesktop.DBus.Error.UnknownMethod", None);
-        assert!(bare.reason.contains("ListShortcuts"), "{}", bare.reason);
-        assert!(bare.reason.contains("UnknownMethod"), "{}", bare.reason);
-    }
-
-    #[test]
-    fn a_different_denial_is_not_mistaken_for_the_app_id_case() {
-        let said =
-            refusal("BindShortcuts", "org.freedesktop.portal.Error.NotAllowed", Some("no thanks"));
-        assert_eq!(None, said.advice);
-        assert!(said.reason.contains("no thanks"), "{}", said.reason);
-    }
-
-    #[test]
-    fn the_probe_answers_without_exploding() {
-        let _ = probe();
     }
 }

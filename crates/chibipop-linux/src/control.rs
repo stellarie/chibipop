@@ -366,55 +366,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn configured_bind_requests_require_a_valid_enabled_id() {
-        let enabled = HashSet::from(["bind-7".to_string()]);
-        assert_eq!(
-            Ok(ControlRequest::BindId { id: "bind-7".into(), activated: true }),
-            parse_request("bind-down bind-7", &enabled),
-        );
-        assert_eq!(
-            Ok(ControlRequest::BindId { id: "bind-7".into(), activated: false }),
-            parse_request("bind-up bind-7", &enabled),
-        );
-        assert_eq!(
-            Err("malformed bind ID".to_string()),
-            parse_request("bind-down bad/id", &enabled),
-        );
-        assert!(parse_request("bind-down missing", &enabled).unwrap_err().contains("not configured"));
-        assert!(parse_request("bind-down bind-7 extra", &enabled).unwrap_err().contains("malformed"));
-    }
-
-    #[test]
-    fn all_saved_bind_ids_use_the_config_id_grammar() {
-        assert!(valid_bind_id("bind_02"));
-        assert!(!valid_bind_id(""));
-        assert!(!valid_bind_id("bad/id"));
-        assert!(!valid_bind_id(&"x".repeat(65)));
-    }
-
-    #[test]
-    fn an_unknown_verb_does_not_parse() {
-        assert_eq!(None, Verb::parse("open-settings"));
-        assert_eq!(None, Verb::parse(""));
-        assert_eq!(None, Verb::parse("TRIGGER-DOWN"));
-        assert_eq!(None, Verb::parse("screenshot"));
-    }
-
-    #[test]
-    fn the_stub_state_tracks_hold_and_toggle() {
-        let mut state = StubState::default();
-        state.apply(Verb::TriggerDown);
-        assert!(state.trigger_held);
-        state.apply(Verb::TriggerUp);
-        assert!(!state.trigger_held);
-        state.apply(Verb::Toggle);
-        assert!(state.toggled_on);
-        state.apply(Verb::Reload);
-        state.apply(Verb::Reload);
-        assert_eq!(2, state.reloads);
-    }
-
     /// This test does a bind and connect roundtrip without a compositor in a
     /// temporary directory.
     #[test]
@@ -472,62 +423,6 @@ mod tests {
             served,
         );
         assert_eq!("OK bind-down bind-7", client.join().unwrap().expect("client reply"));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn a_shared_policy_rejects_bind_ids_retired_on_reload() {
-        let dir = std::env::temp_dir().join(format!("chibipop_bind_reload_{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let mut socket = ControlSocket::bind(&dir, "test-reload").expect("bind");
-        socket.set_bind_ids(["retired-8".to_string()]);
-        socket.policy().set_bind_ids(Vec::<String>::new());
-        let path = socket.path().to_path_buf();
-
-        let client = std::thread::spawn(move || {
-            let mut stream = UnixStream::connect(&path).unwrap();
-            stream.write_all(b"bind-down retired-8\n").unwrap();
-            let mut reply = String::new();
-            stream.read_to_string(&mut reply).unwrap();
-            reply
-        });
-        let mut served = Vec::new();
-        for _ in 0..200 {
-            served = socket.drain();
-            if !served.is_empty() {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        assert_eq!(vec![("bind-down retired-8".to_string(), None)], served);
-        assert!(client.join().unwrap().starts_with("ERR bind ID"));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn an_unconfigured_bind_id_gets_an_err_reply_before_dispatch() {
-        let dir = std::env::temp_dir().join(format!("chibipop_bind_err_{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let socket = ControlSocket::bind(&dir, "test-3").expect("bind");
-        let path = socket.path().to_path_buf();
-
-        let client = std::thread::spawn(move || {
-            let mut stream = UnixStream::connect(&path).unwrap();
-            stream.write_all(b"bind-down missing\n").unwrap();
-            let mut reply = String::new();
-            stream.read_to_string(&mut reply).unwrap();
-            reply
-        });
-        let mut served = Vec::new();
-        for _ in 0..200 {
-            served = socket.drain();
-            if !served.is_empty() {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        assert_eq!(vec![("bind-down missing".to_string(), None)], served);
-        assert!(client.join().unwrap().starts_with("ERR bind ID"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

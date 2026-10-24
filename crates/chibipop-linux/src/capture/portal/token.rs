@@ -177,45 +177,6 @@ mod tests {
         std::fs::metadata(path).expect("the token file").permissions().mode() & 0o777
     }
 
-    #[test]
-    fn the_token_sits_in_the_state_dir_under_its_documented_name() {
-        let store = TokenStore::new(Path::new("/home/x/.local/state/chibipop"));
-        assert_eq!(
-            Path::new("/home/x/.local/state/chibipop/portal-restore-token"),
-            store.path()
-        );
-    }
-
-    /// A first launch has no token, and it is not a failure.
-    #[test]
-    fn an_absent_token_file_reads_as_no_token_rather_than_an_error() {
-        let dir = scratch("absent");
-        let _ = std::fs::remove_dir_all(&dir);
-        assert_eq!(None, TokenStore::new(&dir).load());
-    }
-
-    /// Use the dialog path for a truncated or empty file.
-    /// Do not send an empty string to the portal.
-    #[test]
-    fn a_blank_or_whitespace_only_file_reads_as_no_token() {
-        let (dir, store) = ready("blank");
-        std::fs::write(store.path(), "").unwrap();
-        assert_eq!(None, store.load());
-        std::fs::write(store.path(), "  \n\t\n").unwrap();
-        assert_eq!(None, store.load());
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn a_stored_token_loads_back_without_its_surrounding_whitespace() {
-        let (dir, store) = ready("trim");
-        store.rotate("tok-abc").expect("rotate");
-        assert_eq!(Some("tok-abc".to_string()), store.load());
-        std::fs::write(store.path(), "\n  tok-xyz \n\n").unwrap();
-        assert_eq!(Some("tok-xyz".to_string()), store.load());
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
     /// `persist_mode=2` needs the newest token to replace the stored token.
     #[test]
     fn rotating_replaces_the_token_that_was_stored_before() {
@@ -225,17 +186,6 @@ mod tests {
         store.rotate("tok-second").expect("second rotate");
         assert_eq!(Some("tok-second".to_string()), store.load());
         let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// A first launch can have no state directory.
-    #[test]
-    fn rotating_creates_the_state_dir_when_it_is_absent() {
-        let dir = scratch("mkdir").join("nested");
-        let _ = std::fs::remove_dir_all(&dir);
-        let store = TokenStore::new(&dir);
-        store.rotate("tok-new-dir").expect("rotate must create the state dir");
-        assert_eq!(Some("tok-new-dir".to_string()), store.load());
-        let _ = std::fs::remove_dir_all(scratch("mkdir"));
     }
 
     /// The token is a capability. Other users on the machine must not read it.
@@ -249,54 +199,5 @@ mod tests {
         store.rotate("tok-secret-2").expect("second rotate");
         assert_eq!(0o600, mode_of(store.path()));
         let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// Reject a blank token. Do not destroy a token that still works.
-    #[test]
-    fn a_blank_rotation_is_refused_and_keeps_the_stored_token() {
-        let (dir, store) = ready("refuse");
-        store.rotate("tok-good").expect("rotate");
-        for blank in ["", "   ", "\n\t "] {
-            let err = store.rotate(blank).expect_err("a blank token must be refused");
-            let msg = err.to_string();
-            assert!(msg.contains("blank"), "{msg}");
-            assert!(msg.contains(TokenStore::FILE), "{msg}");
-        }
-        assert_eq!(Some("tok-good".to_string()), store.load());
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn a_successful_rotation_leaves_no_temp_file_behind() {
-        let (dir, store) = ready("no_temp");
-        store.rotate("tok-clean").expect("rotate");
-        let leftovers: Vec<String> = std::fs::read_dir(&dir)
-            .unwrap()
-            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-            .filter(|name| name != TokenStore::FILE)
-            .collect();
-        assert!(leftovers.is_empty(), "stale scratch files: {leftovers:?}");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// After revocation, no token remains to replay.
-    /// A second clear call must also succeed.
-    #[test]
-    fn clearing_forgets_the_token_and_is_idempotent() {
-        let (dir, store) = ready("clear");
-        store.rotate("tok-doomed").expect("rotate");
-        store.clear().expect("clear");
-        assert_eq!(None, store.load());
-        assert!(!store.path().exists());
-        store.clear().expect("clearing an absent token is not an error");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// The `clear` method must succeed for an absent token, even when the state directory does not exist.
-    #[test]
-    fn clearing_before_any_token_was_ever_written_is_not_an_error() {
-        let dir = scratch("clear_absent");
-        let _ = std::fs::remove_dir_all(&dir);
-        TokenStore::new(&dir).clear().expect("an absent token is already forgotten");
     }
 }

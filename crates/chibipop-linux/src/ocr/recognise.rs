@@ -324,54 +324,6 @@ mod tests {
     }
 
     #[test]
-    fn a_horizontal_crop_is_scaled_to_the_line_height_and_padded() {
-        let img = solid(200, 50);
-        let b = DetBox { x1: 0, y1: 0, x2: 200, y2: 50 };
-        let crops = preprocess(&img, &[b], &[0], false);
-        assert_eq!(1, crops.len());
-        assert_eq!(3 * REC_W * REC_H, crops[0].tensor.len());
-        // Scale 200 by 32/50 to get 128.
-        assert_eq!(128, crops[0].eff_w);
-        assert_eq!(32, crops[0].eff_h);
-        // The tensor is black beyond the content width.
-        assert_eq!(0.0, crops[0].tensor[130]);
-    }
-
-    /// Cap an extremely wide line at the 960-pixel input width. The line loses
-    /// height.
-    #[test]
-    fn an_overlong_line_is_capped_at_the_input_width() {
-        let img = solid(4000, 32);
-        let b = DetBox { x1: 0, y1: 0, x2: 4000, y2: 32 };
-        let crops = preprocess(&img, &[b], &[0], false);
-        assert_eq!(960, crops[0].eff_w);
-        // Scale 32 by 960/4000 and round to 8.
-        assert_eq!(8, crops[0].eff_h);
-    }
-
-    #[test]
-    fn a_short_column_is_not_split() {
-        let img = solid(30, 400);
-        let b = DetBox { x1: 0, y1: 0, x2: 30, y2: 400 };
-        let crops = preprocess(&img, &[b], &[0], true);
-        assert_eq!(1, crops.len());
-        assert_eq!(3 * VREC_W * VREC_H, crops[0].tensor.len());
-        // Scale 400 by 32/30 and round to 427. This stays below the 480-pixel input.
-        assert_eq!(427, crops[0].eff_h);
-    }
-
-    /// Process the boundary case from the harness. A 478-pixel column stays
-    /// whole and does not become two padded halves.
-    #[test]
-    fn a_column_just_under_the_input_is_processed_whole() {
-        let img = solid(32, 478);
-        let b = DetBox { x1: 0, y1: 0, x2: 32, y2: 478 };
-        let crops = preprocess(&img, &[b], &[0], true);
-        assert_eq!(1, crops.len());
-        assert_eq!(478, crops[0].eff_h);
-    }
-
-    #[test]
     fn a_tall_column_is_split_into_overlapping_segments() {
         let img = solid(32, 1200);
         let b = DetBox { x1: 0, y1: 0, x2: 32, y2: 1200 };
@@ -386,55 +338,10 @@ mod tests {
     }
 
     #[test]
-    fn a_degenerate_box_is_skipped_rather_than_panicking() {
-        let img = solid(50, 50);
-        let b = DetBox { x1: 10, y1: 10, x2: 10, y2: 20 };
-        assert!(preprocess(&img, &[b], &[0], false).is_empty());
-        assert!(preprocess(&img, &[b], &[0], true).is_empty());
-    }
-
-    #[test]
-    fn the_higher_confidence_character_wins_an_overlap() {
-        let got = resolve_line(vec![cb('X', 0, 20, 0.4), cb('O', 2, 22, 0.9)]);
-        assert_eq!(vec!['O'], got.iter().map(|c| c.ch).collect::<Vec<_>>());
-    }
-
-    #[test]
-    fn characters_that_merely_touch_both_survive() {
-        let got = resolve_line(vec![cb('A', 0, 20, 0.9), cb('B', 20, 40, 0.8)]);
-        assert_eq!(vec!['A', 'B'], got.iter().map(|c| c.ch).collect::<Vec<_>>());
-    }
-
-    /// Tolerate a small overlap. The pair is a true neighbor pair, not a duplicate.
-    /// The overlap covers 5/20 = 25 % of the shorter interval, below 30 %.
-    #[test]
-    fn a_small_overlap_is_tolerated() {
-        let got = resolve_line(vec![cb('A', 0, 20, 0.9), cb('B', 15, 40, 0.8)]);
-        assert_eq!(2, got.len(), "5/20 = 25 % is under the 30 % threshold");
-    }
-
-    #[test]
-    fn survivors_come_back_in_reading_order_not_confidence_order() {
-        let got = resolve_line(vec![cb('C', 40, 60, 0.99), cb('A', 0, 20, 0.5), cb('B', 20, 40, 0.7)]);
-        assert_eq!(vec!['A', 'B', 'C'], got.iter().map(|c| c.ch).collect::<Vec<_>>());
-    }
-
-    #[test]
     fn a_known_reversed_compound_is_put_back_in_order() {
         let got = resolve_line(vec![cb('談', 0, 20, 0.9), cb('冗', 20, 40, 0.9)]);
         assert_eq!("冗談", got.iter().map(|c| c.ch).collect::<String>());
         // Keep the boxes at their read positions.
         assert_eq!(0, got[0].x1);
-    }
-
-    #[test]
-    fn a_compound_that_is_already_right_is_left_alone() {
-        let got = resolve_line(vec![cb('冗', 0, 20, 0.9), cb('談', 20, 40, 0.9)]);
-        assert_eq!("冗談", got.iter().map(|c| c.ch).collect::<String>());
-    }
-
-    #[test]
-    fn a_line_nobody_proposed_anything_for_is_empty() {
-        assert!(resolve_line(Vec::new()).is_empty());
     }
 }

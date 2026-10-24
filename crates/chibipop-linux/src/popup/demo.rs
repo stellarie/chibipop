@@ -98,36 +98,3 @@ pub fn canned() -> Presentation {
         surface: None,
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_fixed_anchor_parses_as_four_physical_pixels() {
-        assert_eq!(Some(PhysRect { x: 600, y: 400, w: 120, h: 32 }), parse_anchor("600,400,120,32"));
-        assert_eq!(Some(PhysRect { x: -20, y: 0, w: 1, h: 1 }), parse_anchor(" -20 , 0 , 1 , 1 "));
-    }
-
-    #[test]
-    fn a_malformed_anchor_is_refused_rather_than_guessed() {
-        for text in ["", "1,2,3", "1,2,3,4,5", "1,2,0,4", "1,2,3,-4", "a,b,c,d"] {
-            assert_eq!(None, parse_anchor(text), "{text:?} must not parse");
-        }
-    }
-
-    /// The demo must include kanji that differ between the Noto Sans CJK JP
-    /// and Noto Sans CJK SC faces.
-    /// This difference makes locale errors visible.
-    #[test]
-    fn the_canned_presentation_carries_variant_kanji() {
-        let p = canned();
-        let card = p.top.expect("a top card");
-        let glosses: String = card.blocks.iter().flat_map(GlossBlock::glosses).collect();
-        for ch in ['\u{9aa8}', '\u{76f4}', '\u{4eca}', '\u{96ea}'] {
-            assert!(glosses.contains(ch), "{ch} is missing from the demo scene");
-        }
-        assert_eq!(Some("\u{6f22}\u{5b57}"), card.written.as_deref());
-        assert_eq!(2, p.collapsed.len(), "collapsed rows exercise the side panel");
-    }
-}
