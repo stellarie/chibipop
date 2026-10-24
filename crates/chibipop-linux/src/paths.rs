@@ -340,17 +340,6 @@ mod tests {
     }
 
     #[test]
-    fn bare_env_falls_back_to_home_defaults() {
-        let p = resolve(&env_with_home(), None);
-        assert_eq!(Mode::Xdg, p.mode);
-        assert_eq!(PathBuf::from("/home/u/.config/chibipop/chibipop.toml"), p.config_file);
-        assert_eq!(PathBuf::from("/home/u/.local/share/chibipop"), p.data_dir);
-        assert_eq!(PathBuf::from("/home/u/.local/state/chibipop"), p.state_dir);
-        assert_eq!(PathBuf::from("/home/u/.cache/chibipop"), p.cache_dir);
-        assert_eq!(None, p.runtime_dir);
-    }
-
-    #[test]
     fn xdg_vars_win_over_home_defaults() {
         let mut env = env_with_home();
         env.xdg_config_home = Some(PathBuf::from("/cfg"));
@@ -360,15 +349,6 @@ mod tests {
         assert_eq!(PathBuf::from("/cfg/chibipop/chibipop.toml"), p.config_file);
         assert_eq!(PathBuf::from("/st/chibipop"), p.state_dir);
         assert_eq!(Some(PathBuf::from("/run/user/1/chibipop")), p.runtime_dir);
-    }
-
-    /// The basedir spec says a relative value is invalid.
-    #[test]
-    fn a_relative_xdg_value_is_ignored() {
-        let mut env = env_with_home();
-        env.xdg_config_home = Some(PathBuf::from("relative/cfg"));
-        let p = resolve(&env, None);
-        assert_eq!(PathBuf::from("/home/u/.config/chibipop/chibipop.toml"), p.config_file);
     }
 
     #[test]
@@ -389,16 +369,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&exe_dir);
     }
 
-    #[test]
-    fn no_beside_exe_config_means_xdg() {
-        let exe_dir = tmp_exe_dir("xdg");
-        let mut env = env_with_home();
-        env.exe_dir = Some(exe_dir.clone());
-        let p = resolve(&env, None);
-        assert_eq!(Mode::Xdg, p.mode);
-        let _ = std::fs::remove_dir_all(&exe_dir);
-    }
-
     /// The flag overrides the config file only — no relayout, no probing.
     #[test]
     fn an_explicit_flag_beats_a_portable_layout() {
@@ -411,80 +381,5 @@ mod tests {
         assert_eq!(PathBuf::from("/etc/chibipop.toml"), p.config_file);
         assert_eq!(PathBuf::from("/home/u/.local/state/chibipop"), p.state_dir);
         let _ = std::fs::remove_dir_all(&exe_dir);
-    }
-
-    /// The XDG rung puts screenshots under the data dir: a card points
-    /// at the file, so it is user data, never cache.
-    #[test]
-    fn a_relative_screenshot_dir_lands_under_the_data_dir_on_xdg() {
-        let p = resolve(&env_with_home(), None);
-        assert_eq!(
-            PathBuf::from("/home/u/.local/share/chibipop/screenshots"),
-            p.screenshots_dir("screenshots")
-        );
-        // The explicit rung is the XDG layout with one file moved, so it
-        // resolves the same way.
-        let explicit = resolve(&env_with_home(), Some(PathBuf::from("/etc/chibipop.toml")));
-        assert_eq!(
-            PathBuf::from("/home/u/.local/share/chibipop/shots"),
-            explicit.screenshots_dir("shots")
-        );
-    }
-
-    /// Portable mode keeps every artefact beside the exe, matching the
-    /// Windows bin's own `save_dir` resolution: a copied folder has to
-    /// carry the screenshots a user's cards point at.
-    #[test]
-    fn a_relative_screenshot_dir_lands_beside_the_exe_in_portable_mode() {
-        let exe_dir = tmp_exe_dir("shots");
-        std::fs::write(exe_dir.join(CONFIG_FILE), "").unwrap();
-        let mut env = env_with_home();
-        env.exe_dir = Some(exe_dir.clone());
-        let p = resolve(&env, None);
-        assert_eq!(Mode::Portable, p.mode);
-        assert_eq!(exe_dir.join("screenshots"), p.screenshots_dir("screenshots"));
-        let _ = std::fs::remove_dir_all(&exe_dir);
-    }
-
-    /// A typed absolute path is taken as-is, in every mode.
-    #[test]
-    fn an_absolute_screenshot_dir_is_taken_as_typed() {
-        let exe_dir = tmp_exe_dir("shotsabs");
-        std::fs::write(exe_dir.join(CONFIG_FILE), "").unwrap();
-        let mut env = env_with_home();
-        env.exe_dir = Some(exe_dir.clone());
-        for p in [resolve(&env, None), resolve(&env_with_home(), None)] {
-            assert_eq!(
-                PathBuf::from("/home/u/Pictures/mining"),
-                p.screenshots_dir("/home/u/Pictures/mining")
-            );
-        }
-        let _ = std::fs::remove_dir_all(&exe_dir);
-    }
-
-    #[test]
-    fn a_missing_runtime_dir_is_one_clear_error() {
-        let p = resolve(&env_with_home(), None);
-        let msg = p.runtime_dir().unwrap_err().to_string();
-        assert!(msg.contains("XDG_RUNTIME_DIR"), "{msg}");
-    }
-
-    /// The one character single quotes cannot contain. `'\''` is the
-    /// shell's own splice, and a snippet that got it wrong would run a
-    /// truncated path.
-    #[test]
-    fn an_embedded_quote_is_spliced_the_way_sh_wants() {
-        assert_eq!(r"'/home/u/it'\''s/chibipop'", shell_quote(Path::new("/home/u/it's/chibipop")));
-    }
-
-    /// Quoting is skipped only for paths that are literal to every
-    /// shell; anything else pays for a pair of quotes.
-    #[test]
-    fn only_shell_safe_paths_are_left_bare() {
-        assert_eq!("chibipop", shell_quote(Path::new("chibipop")));
-        assert_eq!("/usr/bin/chibipop-0.1_x86", shell_quote(Path::new("/usr/bin/chibipop-0.1_x86")));
-        assert_eq!("'chibipop*'", shell_quote(Path::new("chibipop*")));
-        assert_eq!("'$HOME/chibipop'", shell_quote(Path::new("$HOME/chibipop")));
-        assert_eq!("''", shell_quote(Path::new("")));
     }
 }

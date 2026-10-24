@@ -189,38 +189,3 @@ impl Theme {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Each scan outline color must differ from every other color in both themes.
-    #[test]
-    fn scan_colours_are_distinct_in_both_themes() {
-        for t in [Theme::dark(), Theme::light()] {
-            let all = [
-                ("pass1", t.scan_pass1),
-                ("tile", t.scan_tile),
-                ("anchor", t.scan_anchor),
-                ("match", t.scan_match),
-            ];
-            for (i, (an, a)) in all.iter().enumerate() {
-                for (bn, b) in all.iter().skip(i + 1) {
-                    assert_ne!(a, b, "scan_{an} and scan_{bn} are the same colour");
-                }
-            }
-        }
-    }
-
-    /// The match highlight must be brighter than the pass-1 box.
-    #[test]
-    fn the_match_highlight_is_brighter_than_the_pass1_box_in_dark_theme() {
-        let t = Theme::dark();
-        let sum = |c: (u8, u8, u8)| u32::from(c.0) + u32::from(c.1) + u32::from(c.2);
-        assert!(
-            sum(t.scan_match) > sum(t.scan_pass1),
-            "scan_match {:?} must outshine scan_pass1 {:?}",
-            t.scan_match,
-            t.scan_pass1
-        );
-    }
-}

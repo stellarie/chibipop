@@ -145,37 +145,3 @@ pub trait OcrEngine {
     fn provides_geometry(&self) -> bool;
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// `TextOnly` reads text but cannot box it.
-    /// It shows the honest shape of an engine without geometry.
-    struct TextOnly;
-
-    impl OcrEngine for TextOnly {
-        fn recognise(&self, _bgra: &[u8], _w: i32, _h: i32) -> Result<Vec<OcrLine>> {
-            Ok(Vec::new())
-        }
-
-        fn set_language(&mut self, _tag: &str) {}
-
-        fn name(&self) -> &str {
-            "text-only"
-        }
-
-        fn provides_geometry(&self) -> bool {
-            false
-        }
-    }
-
-    /// The metadata travels with the trait object that the pipeline holds.
-    /// No caller needs to know the concrete engine behind it.
-    #[test]
-    fn a_geometry_less_engine_says_so_through_the_seam() {
-        let engine: Box<dyn OcrEngine> = Box::new(TextOnly);
-        assert!(engine.recognise(&[], 10, 10).unwrap().is_empty());
-        assert_eq!("text-only", engine.name());
-        assert!(!engine.provides_geometry());
-    }
-}

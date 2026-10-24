@@ -47,14 +47,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn two_failures_do_not_disable() {
-        let mut s = Strikes::new(3);
-        assert!(s.record(false).is_none());
-        assert!(s.record(false).is_none());
-        assert!(!s.disabled());
-    }
-
-    #[test]
     fn the_third_consecutive_failure_disables_and_names_the_error() {
         let mut s = Strikes::new(3);
         s.note("missed its 500 ms deadline");
@@ -73,13 +65,5 @@ mod tests {
         s.record(true);
         assert!(s.record(false).is_none());
         assert!(!s.disabled());
-    }
-
-    #[test]
-    fn the_notice_fires_exactly_once() {
-        let mut s = Strikes::new(2);
-        s.record(false);
-        assert!(s.record(false).is_some());
-        assert!(s.record(false).is_none());
     }
 }

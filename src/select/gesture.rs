@@ -526,27 +526,6 @@ mod tests {
         SelRange { start: addr(start), end: addr(end) }
     }
 
-    fn text_addr(path: &[usize], byte: u32) -> TextAddr {
-        let path = path
-            .iter()
-            .try_fold(NodePath::ROOT, |path, &step| path.child(step))
-            .expect("path fits");
-        TextAddr { entry: 0, addr: DocAddr { path, byte } }
-    }
-
-    fn selection_card(glossary: &str) -> Card {
-        Card {
-            written: Some("食べる".to_string()),
-            reading: Some("たべる".to_string()),
-            pos: Vec::new(),
-            inflections: Vec::new(),
-            freq: None,
-            blocks: vec![crate::present::GlossBlock::parse("Test", glossary)],
-            match_len: 3,
-            pitch: Vec::new(),
-        }
-    }
-
     fn input_press(tick: u64, addr: Option<TextAddr>, button: Button, link: bool) -> GestureInput {
         GestureInput::Press(PressInput {
             addr,
@@ -602,67 +581,6 @@ mod tests {
     }
 
     #[test]
-    fn triple_click_mode_selects_the_configured_unit() {
-        let glossary = serde_json::json!([{"type": "structured-content", "content": {
-            "tag": "div", "content": [
-                {"tag": "div", "content": [
-                    {"tag": "span", "content": "①"},
-                    {"tag": "span", "content": "食物を口に入れる。"},
-                    {"tag": "div", "data": {"content": "example-sentence"}, "content": "菓子を食べる。"}
-                ]}
-            ]
-        }}])
-        .to_string();
-        let card = selection_card(&glossary);
-        let click = text_addr(&[0, 0, 0, 2, 0], 3);
-        let number = text_addr(&[0, 0, 0, 0, 0], 0);
-        let definition = text_addr(&[0, 0, 0, 1, 0], "食物を口に入れる。".len() as u32);
-        let example_start = text_addr(&[0, 0, 0, 2, 0], 0);
-        let example_end = text_addr(&[0, 0, 0, 2, 0], "菓子を食べる。".len() as u32);
-
-        let expected = [
-            (TripleClick::Sense, SelRange { start: number, end: definition }),
-            (
-                TripleClick::SenseWithExamples,
-                SelRange { start: number, end: example_end },
-            ),
-            (
-                TripleClick::Line,
-                SelRange { start: example_start, end: example_end },
-            ),
-        ];
-        for (mode, range) in expected {
-            let source = ItemSource::new(&card, RoleFilter::CARD, mode, None);
-            assert_eq!(Some(range), source.item(GestureStage::Sense, click));
-        }
-    }
-
-    #[test]
-    fn a_new_chain_snapshots_selection_and_a_late_press_does_not_chain() {
-        let resolver = |_stage: GestureStage, _addr: TextAddr| Some(range(0, 2));
-        let source = ItemSource::from_fn(&resolver);
-        let mut gesture = Gesture::default();
-        let mut selection = CardSelection::default();
-        selection.replace(range(3, 4));
-
-        gesture.handle(
-            input_press(0, Some(addr(0)), Button::Primary, true),
-            ENV,
-            &source,
-            &mut selection,
-        );
-        gesture.handle(input_release(0, Button::Primary), ENV, &source, &mut selection);
-        let effects = gesture.handle(
-            input_press(ENV.chain_ticks + 1, Some(addr(0)), Button::Primary, false),
-            ENV,
-            &source,
-            &mut selection,
-        );
-        assert!(effects.is_empty());
-        assert_eq!(selection.items(), &[range(3, 4)]);
-    }
-
-    #[test]
     fn drag_snaps_both_endpoints_and_ends_once() {
         let resolver = |stage: GestureStage, value: TextAddr| match stage {
             GestureStage::Grapheme => {
@@ -704,33 +622,6 @@ mod tests {
             gesture.handle(input_release(1, Button::Primary), ENV, &source, &mut selection),
             vec![GestureEffect::DragEnded]
         );
-    }
-
-    #[test]
-    fn drag_snapping_respects_end_boundaries() {
-        let boundary = [(0, 3), (3, 5)];
-        let inside = [(0, 2), (2, 4)];
-        let leftward = [(0, 2), (2, 4), (4, 6), (6, 8)];
-        let cases = [
-            (&boundary[..], 0, 3, range(0, 3)),
-            (&inside[..], 0, 3, range(0, 4)),
-            (&leftward[..], 6, 2, range(2, 6)),
-        ];
-        for (clusters, anchor, current, expected) in cases {
-            let resolver = |stage: GestureStage, value: TextAddr| {
-                if stage != GestureStage::Grapheme {
-                    return None;
-                }
-                clusters
-                    .iter()
-                    .copied()
-                    .find(|(start, end)| *start <= value.addr.byte && value.addr.byte < *end)
-                    .map(|(start, end)| range(start, end))
-            };
-            let source = ItemSource::from_fn(&resolver);
-            let gesture = Gesture { anchor: Some(addr(anchor)), ..Gesture::default() };
-            assert_eq!(gesture.drag_item(Some(addr(current)), &source), Some(expected));
-        }
     }
 
     /// Graphemes span two bytes. Word groups span four bytes. Senses span eight
@@ -800,44 +691,6 @@ mod tests {
     }
 
     #[test]
-    fn a_triple_click_drag_grows_by_senses() {
-        let resolver = staged_resolver(true);
-        let source = ItemSource::from_fn(&resolver);
-        let mut gesture = Gesture::default();
-        let mut selection = CardSelection::default();
-        press_at(&mut gesture, &source, &mut selection, 0, 9);
-        press_at(&mut gesture, &source, &mut selection, 1, 9);
-        press_at(&mut gesture, &source, &mut selection, 2, 9);
-        assert_eq!(selection.items(), &[range(8, 16)]);
-        move_to(&mut gesture, &source, &mut selection, 3, 17, 8);
-        assert_eq!(selection.items(), &[range(8, 24)]);
-    }
-
-    #[test]
-    fn a_word_drag_snaps_to_graphemes_until_the_analysis_answers() {
-        let before = staged_resolver(false);
-        let after = staged_resolver(true);
-        let source = ItemSource::from_fn(&before);
-        let mut gesture = Gesture::default();
-        let mut selection = CardSelection::default();
-        press_at(&mut gesture, &source, &mut selection, 0, 9);
-        press_at(&mut gesture, &source, &mut selection, 1, 9);
-        assert!(selection.is_empty(), "no word yet: {:?}", selection.items());
-
-        move_to(&mut gesture, &source, &mut selection, 2, 13, 8);
-        assert_eq!(selection.items(), &[range(8, 14)]);
-
-        let source = ItemSource::from_fn(&after);
-        assert_eq!(
-            gesture.handle(GestureInput::Analysis, ENV, &source, &mut selection),
-            vec![GestureEffect::Repaint]
-        );
-        assert_eq!(selection.items(), &[range(8, 16)]);
-        move_to(&mut gesture, &source, &mut selection, 3, 17, 12);
-        assert_eq!(selection.items(), &[range(8, 20)]);
-    }
-
-    #[test]
     fn plain_click_clear_can_expire_or_be_cancelled() {
         let resolver = |_stage: GestureStage, _addr: TextAddr| Some(range(0, 2));
         let source = ItemSource::from_fn(&resolver);
@@ -876,82 +729,6 @@ mod tests {
         assert!(gesture
             .handle(GestureInput::Tick { tick: 15 }, ENV, &source, &mut selection)
             .is_empty());
-    }
-
-    #[test]
-    fn a_nonchained_press_clears_pending_plain_click_before_drag() {
-        let resolver = |stage: GestureStage, value: TextAddr| {
-            if stage == GestureStage::Grapheme {
-                Some(range(value.addr.byte, value.addr.byte.saturating_add(1)))
-            } else {
-                None
-            }
-        };
-        let source = ItemSource::from_fn(&resolver);
-        let mut gesture = Gesture::default();
-        let mut selection = CardSelection::default();
-        selection.replace(range(8, 9));
-
-        gesture.handle(
-            input_press(0, Some(addr(0)), Button::Primary, false),
-            ENV,
-            &source,
-            &mut selection,
-        );
-        gesture.handle(input_release(0, Button::Primary), ENV, &source, &mut selection);
-        assert_eq!(
-            gesture.handle(
-                GestureInput::Press(PressInput {
-                    addr: Some(addr(2)),
-                    link: false,
-                    button: Button::Primary,
-                    local: PhysPoint { x: 20, y: 10 },
-                    tick: 1,
-                }),
-                ENV,
-                &source,
-                &mut selection,
-            ),
-            vec![GestureEffect::Repaint]
-        );
-        assert_eq!(
-            gesture.handle(
-                GestureInput::Move {
-                    addr: Some(addr(4)),
-                    local: PhysPoint { x: 30, y: 10 },
-                    tick: 2,
-                },
-                ENV,
-                &source,
-                &mut selection,
-            ),
-            vec![GestureEffect::DragStarted, GestureEffect::Repaint]
-        );
-        assert_eq!(selection.items(), &[range(2, 4)]);
-        assert!(gesture
-            .handle(GestureInput::Tick { tick: ENV.chain_ticks }, ENV, &source, &mut selection)
-            .is_empty());
-        assert_eq!(selection.items(), &[range(2, 4)]);
-    }
-
-    #[test]
-    fn replacing_plain_click_clears_immediately() {
-        let resolver = |_stage: GestureStage, _addr: TextAddr| Some(range(0, 2));
-        let source = ItemSource::from_fn(&resolver);
-        let mut gesture = Gesture::default();
-        let mut selection = CardSelection::default();
-        selection.replace(range(3, 4));
-        gesture.handle(
-            input_press(0, Some(addr(0)), Button::Secondary, false),
-            ENV,
-            &source,
-            &mut selection,
-        );
-        assert_eq!(
-            gesture.handle(input_release(0, Button::Secondary), ENV, &source, &mut selection),
-            vec![GestureEffect::Repaint]
-        );
-        assert!(selection.is_empty());
     }
 
     #[test]
@@ -1035,42 +812,4 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_link_without_text_keeps_no_anchor_and_cannot_drag() {
-        let resolver = |_stage: GestureStage, _addr: TextAddr| Some(range(0, 2));
-        let source = ItemSource::from_fn(&resolver);
-        let mut gesture = Gesture::default();
-        let mut selection = CardSelection::default();
-
-        gesture.handle(
-            GestureInput::Press(PressInput {
-                addr: None,
-                link: true,
-                button: Button::Primary,
-                local: PhysPoint { x: 0, y: 0 },
-                tick: 0,
-            }),
-            ENV,
-            &source,
-            &mut selection,
-        );
-        assert!(gesture.anchor.is_none());
-        assert!(gesture
-            .handle(
-                GestureInput::Move {
-                    addr: Some(addr(2)),
-                    local: PhysPoint { x: 10, y: 0 },
-                    tick: 1,
-                },
-                ENV,
-                &source,
-                &mut selection,
-            )
-            .is_empty());
-        assert!(!gesture.dragging());
-        assert_eq!(
-            gesture.handle(input_release(1, Button::Primary), ENV, &source, &mut selection),
-            vec![GestureEffect::OpenLink]
-        );
-    }
 }

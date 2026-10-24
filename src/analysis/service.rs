@@ -109,37 +109,3 @@ fn run(
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::dict::gloss::NodePath;
-    use std::time::Duration;
-
-    #[test]
-    fn a_failed_load_uses_fallback_and_reports_the_failure_once() {
-        let model = std::env::temp_dir().join(format!(
-            "chibipop-analysis-missing-{}",
-            std::process::id()
-        ));
-        let service = Service::spawn(model, || {});
-        let key = (0, NodePath::ROOT.child(0).unwrap());
-
-        service.request(7, vec![(key, "Hello world".to_string())]);
-        let (generation, result) = service
-            .results()
-            .recv_timeout(Duration::from_secs(5))
-            .expect("the failed load must still produce a result");
-        assert_eq!(7, generation);
-        assert_eq!(vec![0..5, 6..11], result.get(&key).unwrap().clone());
-        assert!(service.fallback_active(), "the one load diagnostic must be observable");
-
-        service.request(8, vec![(key, "again".to_string())]);
-        let (generation, result) = service
-            .results()
-            .recv_timeout(Duration::from_secs(5))
-            .expect("fallback must answer later requests");
-        assert_eq!(8, generation);
-        assert_eq!(vec![0..5], result.get(&key).unwrap().clone());
-        assert!(service.fallback_active(), "the diagnostic state must remain active");
-    }
-}

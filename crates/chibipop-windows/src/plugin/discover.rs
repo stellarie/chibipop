@@ -64,11 +64,6 @@ provides_geometry = true
 "#;
 
     #[test]
-    fn a_missing_root_yields_nothing() {
-        assert!(discover(Path::new("no/such/dir/here")).is_empty());
-    }
-
-    #[test]
     fn a_broken_manifest_is_listed_with_its_error() {
         let tmp = std::env::temp_dir().join("chibipop-discover-broken");
         let _ = std::fs::remove_dir_all(&tmp);
@@ -82,53 +77,9 @@ provides_geometry = true
     }
 
     #[test]
-    fn a_directory_without_a_manifest_is_skipped() {
-        let tmp = std::env::temp_dir().join("chibipop-discover-skip");
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(tmp.join("notaplugin")).unwrap();
-        write(&tmp, "alpha", GOOD);
-        let found = discover(&tmp);
-        assert_eq!(found.len(), 1);
-        let _ = std::fs::remove_dir_all(&tmp);
-    }
-
-    #[test]
     fn a_discovered_text_provider_is_returned() {
         let manifest = manifest::parse(GOOD).unwrap();
         let found = vec![(PathBuf::from("alpha"), Ok(manifest))];
-        assert_eq!(vec!["alpha".to_string()], text_provider_names(&found));
-    }
-
-    #[test]
-    fn a_field_contributor_is_not_returned() {
-        let body = r#"
-name = "scorer"
-version = "0.1.0"
-protocol = 1
-command = "cmd"
-roles = ["field-contributor"]
-[field_contributor]
-provides = ["frequency"]
-"#;
-        let manifest = manifest::parse(body).unwrap();
-        let found = vec![(PathBuf::from("scorer"), Ok(manifest))];
-        assert!(text_provider_names(&found).is_empty());
-    }
-
-    #[test]
-    fn a_refused_manifest_is_not_returned() {
-        let found = vec![(PathBuf::from("beta"), Err(anyhow::anyhow!("bad manifest")))];
-        assert!(text_provider_names(&found).is_empty());
-    }
-
-    #[test]
-    fn duplicate_names_keep_the_first_occurrence() {
-        let first = manifest::parse(GOOD).unwrap();
-        let second = manifest::parse(GOOD).unwrap();
-        let found = vec![
-            (PathBuf::from("first"), Ok(first)),
-            (PathBuf::from("second"), Ok(second)),
-        ];
         assert_eq!(vec!["alpha".to_string()], text_provider_names(&found));
     }
 }

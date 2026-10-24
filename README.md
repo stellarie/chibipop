@@ -908,52 +908,13 @@ See [`ARCHITECTURE.md`](ARCHITECTURE.md#workspace-and-seams).
 The development shells are `nix develop` for CPU and `nix develop .#cuda`
 for CUDA.
 
-### The Linux regression suite
+### Tests
 
-The runner needs Python 3.9 or later and a working Docker or Podman installation.
-A full run needs network access to build the image and download dependencies.
-Run this command from the repository root:
-
-```bash
-python3 scripts/linux_container_regression.py
-```
-
-Use Podman explicitly, or repeat the complete schedule to find intermittent
-failures:
-
-```bash
-python3 scripts/linux_container_regression.py --runtime podman
-python3 scripts/linux_container_regression.py --loops 3
-```
-
-The runner mounts the repository read-only. Each loop copies the current
-Git workspace, including local non-ignored changes, into a new container.
-The runner builds an Ubuntu 24.04 image by default. `--image` sets the
-image tag. To use an existing image without rebuilding it, also pass
-`--skip-image-build`.
-
-After each loop, the runner removes only its own labeled container.
-`--keep-failed-container` keeps a failed container for inspection.
-
-Results go to `linux-regression-artifacts/`. The directory contains JSON
-and JUnit reports, command logs, package output, and compositor evidence.
-Use `--artifacts-dir <directory>` to choose another location.
-
-List the schedule:
-
-```bash
-python3 scripts/linux_container_regression.py --list
-```
-
-Inspect the generated commands without a container:
-
-```bash
-python3 scripts/linux_container_regression.py --dry-run
-```
-
-This suite tests Linux inside containers, not virtual machines. See
-[`docs/REGRESSION.md`](docs/REGRESSION.md) for the Windows checks and the
-manual checks.
+CI runs the automated gate on Windows and on Linux. Each gate has a ceiling on
+the pass count: 360 tests for each platform. Core holds at most 200 tests. Each
+platform crate holds at most 160. No automated test launches `chibipop` or needs
+a real desktop. Each feature gets a manual test instead. See
+[`docs/REGRESSION.md`](docs/REGRESSION.md) for the gate and the manual tests.
 
 ### The rest of the documentation
 
@@ -962,7 +923,7 @@ manual checks.
 | [`docs/REFERENCE.md`](docs/REFERENCE.md) | every setting, the diagnostics, the tests, and the measured limits |
 | [`docs/LINUX.md`](docs/LINUX.md) | the Linux build, in full |
 | [`docs/CSS-THEMING.md`](docs/CSS-THEMING.md) | every selector that you can style |
-| [`docs/REGRESSION.md`](docs/REGRESSION.md) | the checks that prove a build works, sorted by who can run them |
+| [`docs/REGRESSION.md`](docs/REGRESSION.md) | the automated gate and the manual tests that prove a build works |
 | [`docs/RELEASING.md`](docs/RELEASING.md) | how a release is made |
 | [`docs/BACKLOG.md`](docs/BACKLOG.md) | known problems and deferred work, with the evidence |
 | [`ARCHITECTURE.md`](ARCHITECTURE.md) | the architecture and every decision that the code cannot state itself |

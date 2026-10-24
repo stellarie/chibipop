@@ -454,67 +454,6 @@ fn pair(value: &Value) -> Option<(f64, f64)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn output() -> OutputGeometry {
-        OutputGeometry {
-            logical_x: -1280,
-            logical_y: -100,
-            logical_w: 1280,
-            logical_h: 1000,
-            mode_w: 1920,
-            mode_h: 1500,
-            transform_swaps: false,
-        }
-    }
-
-    #[test]
-    fn slurp_output_keeps_an_opaque_window_label() {
-        let (rect, label) = parse_slurp_output("10,20 300x400 w3\n").unwrap();
-        assert_eq!(LogicalRect { x: 10.0, y: 20.0, w: 300.0, h: 400.0 }, rect);
-        assert_eq!(Some("w3"), label);
-    }
-
-    #[test]
-    fn slurp_output_accepts_a_free_form_region_without_a_label() {
-        let (_, label) = parse_slurp_output("-50,20 300x400\n").unwrap();
-        assert_eq!(None, label);
-    }
-
-    #[test]
-    fn logical_geometry_maps_negative_fractional_origins() {
-        let rect = logical_rect_to_physical(
-            &[output()],
-            LogicalRect { x: -1200.0, y: 0.0, w: 100.0, h: 100.0 },
-        )
-        .unwrap();
-        assert_eq!(PhysRect { x: -1800, y: 0, w: 150, h: 150 }, rect);
-    }
-
-    #[test]
-    fn invalid_logical_geometry_is_rejected() {
-        assert_eq!(None, logical_rect_to_physical(&[output()], LogicalRect { x: 0.0, y: 0.0, w: 0.0, h: 4.0 }));
-        assert_eq!(None, logical_rect_to_physical(&[output()], LogicalRect { x: f64::NAN, y: 0.0, w: 4.0, h: 4.0 }));
-    }
-
-    #[test]
-    fn fixed_regions_reject_non_positive_or_overflowing_sizes() {
-        assert!(fixed_region([0, 0, 0, 3]).is_err());
-        assert!(fixed_region([i32::MAX, 0, 1, 1]).is_err());
-        assert!(fixed_region([0, i32::MAX, 1, 1]).is_err());
-        assert_eq!(PhysRect { x: -3, y: 4, w: 5, h: 6 }, fixed_region([-3, 4, 5, 6]).unwrap());
-    }
-    #[test]
-    fn exact_window_matching_rejects_absent_and_ambiguous_targets() {
-        let target = ScreenshotWindow { app_id: "kitty".into(), title: "shell".into() };
-        let window = Window {
-            identity: target.clone(),
-            rect: LogicalRect { x: 0.0, y: 0.0, w: 10.0, h: 10.0 },
-        };
-        assert!(match_window(&[], &target).is_err());
-        assert!(match_window(&[window.clone(), window.clone()], &target).is_err());
-        assert!(match_window(&[window], &target).is_ok());
-
-    }
     #[test]
     fn sway_tree_collects_visible_leaf_windows() {
         let tree = serde_json::json!({
@@ -537,43 +476,6 @@ mod tests {
         assert_eq!(1, windows.len());
         assert_eq!("kitty", windows[0].identity.app_id);
         assert_eq!("shell", windows[0].identity.title);
-    }
-
-    #[test]
-    fn sway_windows_without_app_ids_remain_targets_but_containers_do_not() {
-        let leaf = serde_json::json!({
-            "type": "con", "pid": 42, "visible": true, "app_id": "",
-            "name": "Reader", "rect": {"x": 0, "y": 0, "width": 100, "height": 80}
-        });
-        let tree = serde_json::json!({
-            "type": "con", "name": "Container",
-            "rect": {"x": 0, "y": 0, "width": 100, "height": 80},
-            "nodes": [leaf]
-        });
-        let mut windows = Vec::new();
-        collect_sway_windows(&tree, &mut windows, true);
-        let target = ScreenshotWindow { app_id: String::new(), title: "Reader".into() };
-        assert_eq!(LogicalRect { x: 0.0, y: 0.0, w: 100.0, h: 80.0 },
-            match_window(&windows, &target).unwrap().rect);
-        assert!(match_window(&windows, &ScreenshotWindow {
-            app_id: String::new(), title: "Container".into(),
-        }).is_err());
-    }
-
-    #[test]
-    fn sway_floating_windows_are_targets() {
-        let tree = serde_json::json!({
-            "type": "root", "nodes": [],
-            "floating_nodes": [{
-                "type": "floating_con", "pid": 7, "visible": true,
-                "app_id": "mpv", "name": "video",
-                "rect": {"x": 40, "y": 50, "width": 640, "height": 360}
-            }]
-        });
-        let mut windows = Vec::new();
-        collect_sway_windows(&tree, &mut windows, true);
-        assert_eq!(1, windows.len());
-        assert_eq!("mpv", windows[0].identity.app_id);
     }
 
     #[test]

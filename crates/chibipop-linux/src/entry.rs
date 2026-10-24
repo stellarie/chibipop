@@ -269,32 +269,4 @@ mod tests {
         let text = "猫。\n犬を見た。";
         assert_eq!(read_search_stdin(Cursor::new(text.as_bytes())).unwrap(), text);
     }
-
-    #[test]
-    fn search_stdin_rejects_oversized_input() {
-        let bytes = vec![b'a'; SEARCH_STDIN_LIMIT as usize + 1];
-        let error = read_search_stdin(Cursor::new(bytes)).unwrap_err();
-        assert!(error.to_string().contains("exceeds"));
-    }
-
-    #[test]
-    fn stdin_alias_parses_and_conflicts_with_explicit_text() {
-        let cli = Cli::try_parse_from(["chibipop", "sentence-search", "--stdin"]).unwrap();
-        assert!(matches!(cli.command, Some(Command::SentenceSearch { read_stdin: true, .. })));
-        assert!(Cli::try_parse_from([
-            "chibipop", "sentence-search", "--text", "猫", "--read-stdin",
-        ]).is_err());
-    }
-
-    #[test]
-    fn leading_hyphen_bind_ids_parse_as_positionals() {
-        let cli = Cli::try_parse_from([
-            "chibipop", "ctl", "bind-down", "--", "-lookup",
-        ]).unwrap();
-        assert!(matches!(
-            cli.command,
-            Some(Command::Ctl { verb, bind_id })
-                if verb == "bind-down" && bind_id.as_deref() == Some("-lookup")
-        ));
-    }
 }

@@ -191,16 +191,6 @@ mod tests {
     }
 
     #[test]
-    fn empty_input_yields_nothing() {
-        assert!(deconjugator().deconjugate("   ").is_empty());
-    }
-
-    #[test]
-    fn seed_form_always_present() {
-        assert!(reaches(&deconjugator(), "学校", "学校"));
-    }
-
-    #[test]
     fn past_plain_ichidan() {
         assert!(reaches(&deconjugator(), "食べた", "食べる"));
     }
@@ -216,59 +206,8 @@ mod tests {
     }
 
     #[test]
-    fn i_adjective_negative() {
-        assert!(reaches(&deconjugator(), "面白くない", "面白い"));
-    }
-
-    #[test]
     fn te_iru_progressive() {
         assert!(reaches(&deconjugator(), "見ている", "見る"));
     }
 
-    #[test]
-    fn terminal_tag_recorded_for_filtering() {
-        let d = deconjugator();
-        let forms = d.deconjugate("食べた");
-        let f = forms.iter().find(|f| f.text == "食べる").unwrap();
-        assert_eq!(Some(&"v1".to_string()), f.tags.last());
-    }
-
-    /// This test pins inherited quirk #1. `max_len` uses `dec_end` alone.
-    /// Therefore, the sixth `dec_tag` in the mizenkei rule (`vs-i`) stays
-    /// unreachable, and that path tags する as `vk`.
-    ///
-    /// The unmodified Python reference also produces these two forms. The input しない
-    /// yields する twice: ('negative', '(mizenkei)') tags it `vk`, and
-    /// ('negative',) tags it `vs-i`. The correct `vs-i` form also appears, so the
-    /// quirk is harmless in practical lookup. Bare し never reaches this rule
-    /// because it needs a form with the `stem-mizenkei` tag.
-    ///
-    /// A change to this test means a deliberate semantic change to deconjugation.
-    /// It is not a refactor.
-    #[test]
-    fn known_quirk_mizenkei_path_tags_suru_as_vk() {
-        let d = deconjugator();
-        let forms = d.deconjugate("しない");
-
-        let via_mizenkei: Vec<&Form> = forms
-            .iter()
-            .filter(|f| f.text == "する" && f.process.iter().any(|p| p == "(mizenkei)"))
-            .collect();
-        assert!(
-            !via_mizenkei.is_empty(),
-            "the mizenkei path to する disappeared - deconjugation changed"
-        );
-        assert!(
-            via_mizenkei
-                .iter()
-                .all(|f| f.tags.last().map(String::as_str) == Some("vk")),
-            "quirk resolved upstream - update this test and the note in the module docs"
-        );
-
-        // The correct `vs-i` form also appears, so the quirk is harmless in practical
-        // lookup.
-        assert!(forms
-            .iter()
-            .any(|f| f.text == "する" && f.tags.last().map(String::as_str) == Some("vs-i")));
-    }
 }

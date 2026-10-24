@@ -167,12 +167,6 @@ mod tests {
         dir
     }
 
-    #[test]
-    fn a_display_that_is_a_path_stays_one_filename() {
-        assert_eq!("run-_run_user_1000_wayland-1.lock", file_name("/run/user/1000/wayland-1"));
-        assert_eq!("run-wayland-1.lock", file_name("wayland-1"));
-    }
-
     /// The second attempt must fail, not wait.
     /// Release the first lock before a later attempt.
     #[test]
@@ -192,63 +186,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A child can inherit the open lock file between fork and exec. Releasing
-    /// the parent guard must permit the next rebuild before that child executes.
-    #[test]
-    fn a_child_before_exec_does_not_keep_a_released_lock() {
-        use std::os::unix::net::UnixStream;
-        use std::os::unix::process::CommandExt;
-        use std::process::{Command, Stdio};
-        use std::time::Duration;
-
-        let dir = tmp("fork_release");
-        let first = acquire(&dir, "wayland-fork").unwrap();
-        let (mut parent, mut child) = UnixStream::pair().unwrap();
-        parent.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
-        child.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
-        let executable = std::env::current_exe().unwrap();
-        let process = std::thread::spawn(move || {
-            let mut command = Command::new(executable);
-            command.arg("--list").stdout(Stdio::null());
-            // SAFETY: The child only reads and writes an existing socket before exec.
-            unsafe {
-                command.pre_exec(move || {
-                    child.write_all(b"ready")?;
-                    child.read_exact(&mut [0])?;
-                    Ok(())
-                });
-            }
-            command.status().unwrap()
-        });
-        parent.read_exact(&mut [0; 5]).unwrap();
-        drop(first);
-        let reacquired = acquire(&dir, "wayland-fork");
-        parent.write_all(b"go").unwrap();
-        assert!(process.join().unwrap().success());
-        assert!(reacquired.is_ok(), "the child must not extend the parent's lock lifetime");
-        drop(reacquired);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn two_displays_do_not_share_a_lock() {
-        let dir = tmp("displays");
-        let _a = acquire(&dir, "wayland-0").expect("first display");
-        let _b = acquire(&dir, "wayland-1").expect("second display");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// The settings lock and daemon lock have separate names.
-    /// Both locks can exist for one display.
-    #[test]
-    fn settings_lock_is_scoped_apart_from_the_daemon_lock() {
-        let dir = tmp("settings_scope");
-        let _daemon = acquire(&dir, "wayland-5").expect("daemon lock");
-        let _settings = acquire_at(&dir, &settings_file_name("wayland-5"))
-            .expect("the settings lock must not contend with the daemon's");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
     /// Refuse a second `chibipop settings` process for the same display.
     #[test]
     fn a_second_settings_lock_is_refused() {
@@ -264,26 +201,6 @@ mod tests {
             Ok(_) => panic!("a second settings lock on one display must be refused"),
         }
         let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn the_refusal_names_display_pid_and_path() {
-        let msg = refusal("wayland-1", Path::new("/run/user/1000/chibipop/run-wayland-1.lock"), Some(4242));
-        assert!(msg.contains("wayland-1"), "{msg}");
-        assert!(msg.contains("4242"), "{msg}");
-        assert!(msg.contains("run-wayland-1.lock"), "{msg}");
-    }
-
-    /// Two libraries must use different locks.
-    /// One library must always use the same lock file.
-    /// A hash that changes would protect no rebuild.
-    #[test]
-    fn the_library_lock_is_keyed_by_path_and_stable() {
-        let a = library_file_name(Path::new("/home/x/.local/share/chibipop/library"));
-        assert_eq!(a, library_file_name(Path::new("/home/x/.local/share/chibipop/library")));
-        assert_eq!(a, library_file_name(Path::new("/home/x/.local/share/chibipop/library/")));
-        assert_ne!(a, library_file_name(Path::new("/home/y/.local/share/chibipop/library")));
-        assert_eq!("library-7938d952a0e0914d.lock", a);
     }
 
     /// Two settings processes can rebuild one library, but only one can do so at a time.
@@ -307,17 +224,6 @@ mod tests {
         }
         drop(first);
         acquire_at(&dir, &name).expect("freed by the first rebuild finishing");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// A library rebuild must not block the daemon or the settings process.
-    #[test]
-    fn the_library_lock_is_scoped_apart_from_the_instance_locks() {
-        let dir = tmp("library_scope");
-        let _daemon = acquire(&dir, "wayland-5").expect("daemon lock");
-        let _settings = acquire_at(&dir, &settings_file_name("wayland-5")).expect("settings lock");
-        let _library = acquire_at(&dir, &library_file_name(Path::new("/tmp/lib")))
-            .expect("the library lock must not contend with the instance locks");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

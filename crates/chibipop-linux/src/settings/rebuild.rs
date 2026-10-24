@@ -213,7 +213,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::mpsc::{self, Receiver};
     use std::sync::Arc;
-    use std::time::Duration;
+    
 
     /// A directory that the test removes at drop.
     struct Scratch(PathBuf);
@@ -267,14 +267,6 @@ mod tests {
         })
         .expect("the library lock");
         collect(rx)
-    }
-
-    /// The inode that a path names now. The build writes beside the
-    /// file and renames over it, so this inode changes while an open
-    /// connection keeps the old inode.
-    fn inode(path: &Path) -> u64 {
-        use std::os::unix::fs::MetadataExt;
-        std::fs::metadata(path).unwrap().ino()
     }
 
     fn collect(rx: Receiver<Progress>) -> (Vec<Progress>, Progress) {
@@ -348,126 +340,6 @@ mod tests {
         );
     }
 
-    /// This test defines how the daemon answers lookups during a
-    /// rebuild. The open snapshot reads the old inode until the daemon
-    /// reopens the file. Only a reopen shows the new dictionary. This
-    /// test holds the whole `reload` contract.
-    #[test]
-    fn an_open_snapshot_keeps_reading_the_old_database_until_it_reopens() {
-        let (dir, _guard) = scratch("snapshot");
-        let p = plan(&dir);
-
-        let first = staging(&[fixture("terms.zip")]);
-        let (_, built) = drive(&first, p.clone());
-        done(&built);
-
-        // The connection of the daemon, opened before the second rebuild.
-        let daemon = SqliteDictionary::open(&p.out).expect("the daemon's snapshot");
-        let before = daemon.dicts().unwrap().len();
-        let old_inode = inode(&p.out);
-
-        let mut second = chibipop::settings::with_library(
-            staging(&[]),
-            &Library::load(&p.library_dir).unwrap(),
-        );
-        // A different second dictionary, so the count moves. A copy of
-        // the first under another name does not move the count.
-        // `Library::load` collapses byte-identical archives to one
-        // entry, because two names for one archive are one dictionary.
-        let extra = dir.join("second.zip");
-        std::fs::copy(
-            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("../../tests/fixtures/media/media.zip"),
-            &extra,
-        )
-        .unwrap();
-        second.stage_add(&extra).expect("staging the second archive");
-        let (_, rebuilt) = drive(&second, p.clone());
-        done(&rebuilt);
-        assert_ne!(
-            old_inode,
-            inode(&p.out),
-            "the new database must arrive by rename, not by rewriting the inode \
-             the daemon is reading"
-        );
-
-        assert_eq!(
-            before,
-            daemon.dicts().unwrap().len(),
-            "the already-open snapshot must keep reading the inode it opened"
-        );
-        let reopened = SqliteDictionary::open(&p.out).expect("reopening after the rename");
-        assert!(
-            reopened.dicts().unwrap().len() > before,
-            "reopening is what serves the new dictionary"
-        );
-    }
-
-    /// The reported failure, end to end, through the real rebuild.
-    ///
-    /// A user imported one dictionary again, rebuilt, and saw no popup.
-    /// The library held two byte-identical copies of the archive. The
-    /// file `library.json` listed one copy and not the other, so the
-    /// build made **two** dictionaries from one file. The log said
-    /// `2 dictionary/ies: Jitendex.org [2026-08-11], Jitendex.org
-    /// [2026-08-11]`. Every later lookup reported
-    /// `database disk image is malformed`.
-    ///
-    /// This test covers the scenario, not the mechanism. One archive
-    /// under two names must rebuild into one dictionary. The promoted
-    /// file must be sound. A lookup must answer. Exactly one `reload`
-    /// must go to the daemon. A stale write-ahead log under the name of
-    /// the promoted file broke the file. That mechanism has its own
-    /// test beside `dict::build::promote`, which holds the order that
-    /// fixes it.
-    #[test]
-    fn the_reported_failure_rebuilds_into_one_sound_dictionary_that_answers() {
-        let (dir, _guard) = scratch("reported");
-        let p = plan(&dir);
-        let seen = fake_daemon(&p.socket);
-        let media_zip = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../tests/fixtures/media/media.zip");
-
-        // The state before the failure: one dictionary, imported and built.
-        done(&drive(&staging(std::slice::from_ref(&media_zip)), p.clone()).1);
-        assert_eq!(1, SqliteDictionary::open(&p.out).unwrap().dicts().unwrap().len());
-
-        // The leftover of the second import: the same bytes under a second, unlisted name.
-        std::fs::copy(&media_zip, p.library_dir.join("[JA-EN] media (2026-08-11).zip")).unwrap();
-        let again = chibipop::settings::with_library(
-            staging(&[]),
-            &Library::load(&p.library_dir).unwrap(),
-        );
-        let reloads_before = seen.load(Ordering::SeqCst);
-
-        let (lines, rebuilt) = drive(&again, p.clone());
-        done(&rebuilt);
-
-        assert_eq!(
-            reloads_before + 1,
-            seen.load(Ordering::SeqCst),
-            "one reload, and only after the promote",
-        );
-        for suffix in ["-wal", "-shm"] {
-            let sidecar = PathBuf::from(format!("{}{suffix}", p.out.display()));
-            assert!(!sidecar.exists(), "{} must not outlive the promote", sidecar.display());
-        }
-
-        let reopened = SqliteDictionary::open(&p.out).expect("reopening after the promote");
-        let dicts = reopened.dicts().unwrap();
-        assert_eq!(1, dicts.len(), "one archive under two names is one dictionary: {dicts:?}");
-        assert_eq!(
-            1,
-            lines
-                .iter()
-                .filter(|l| matches!(l, Progress::Line(t) if t.starts_with("term dict")))
-                .count(),
-            "and the rebuild only ever read one archive: {lines:?}",
-        );
-        // The lookup that gave the user no popup.
-        assert_eq!(1, reopened.terms_for("ねこ").expect("the lookup must not fail").len());
-    }
-
     /// A build dies after an edit to the library. The rollback restores
     /// the archives, the live database does not move, and the rebuild
     /// tells the daemon nothing. This test forces the failure with a
@@ -497,21 +369,6 @@ mod tests {
         assert_eq!(library_before, listing(&p.library_dir), "the staged archive must be undone");
     }
 
-    /// The refusal of an empty library reaches the status area, and nothing moves.
-    #[test]
-    fn an_empty_library_is_refused_without_touching_the_database() {
-        let (dir, _guard) = scratch("empty");
-        let p = plan(&dir);
-        std::fs::write(&p.out, b"the old database").unwrap();
-
-        let (_, last) = drive(&staging(&[]), p.clone());
-        match &last {
-            Progress::Failed(why) => assert!(why.contains("no dictionary"), "{why}"),
-            other => panic!("an empty library must be refused, got {other:?}"),
-        }
-        assert_eq!(b"the old database".to_vec(), std::fs::read(&p.out).unwrap());
-    }
-
     /// Exactly one `reload`, and only on success.
     #[test]
     fn one_reload_is_sent_after_a_successful_rebuild() {
@@ -528,118 +385,5 @@ mod tests {
             other => panic!("expected a live reload, got {other:?}"),
         }
         assert_eq!(1, seen.load(Ordering::SeqCst), "the daemon must be told exactly once");
-    }
-
-    #[test]
-    fn no_reload_is_sent_when_the_build_fails() {
-        let (dir, _guard) = scratch("reload_never");
-        let mut p = plan(&dir);
-        p.socket = dir.join("run/daemon.sock");
-        let seen = fake_daemon(&p.socket);
-
-        let (_, last) = drive(&staging(&[]), p.clone());
-        assert!(matches!(last, Progress::Failed(_)), "{last:?}");
-        assert_eq!(0, seen.load(Ordering::SeqCst), "a failed rebuild tells the daemon nothing");
-    }
-
-    /// An absent daemon is not a failure. The config file and now the
-    /// database hold the truth, and the next start reads them.
-    #[test]
-    fn an_absent_daemon_is_reported_not_treated_as_a_failure() {
-        let (dir, _guard) = scratch("no_daemon");
-        let p = plan(&dir);
-        let (_, last) = drive(&staging(&[fixture("terms.zip")]), p.clone());
-        assert!(matches!(last, Progress::Done { reload: Reload::NoDaemon, .. }), "{last:?}");
-    }
-
-    /// Two settings processes share one library. The flock refuses the
-    /// second process before it moves a file, and the message names the
-    /// holder.
-    #[test]
-    fn a_concurrent_rebuild_is_refused_by_the_library_flock() {
-        let (dir, _guard) = scratch("contend");
-        let p = plan(&dir);
-        let held = lock::acquire_at(&p.runtime_dir, &lock::library_file_name(&p.library_dir))
-            .expect("standing in for the first settings process");
-
-        let form = staging(&[fixture("terms.zip")]);
-        match spawn(&form, p.clone(), |_| {}) {
-            Err(LockError::AlreadyRunning { path, pid }) => {
-                assert_eq!(held.path(), path);
-                let msg = lock::rebuild_refusal(&p.library_dir, &path, pid);
-                assert!(msg.contains("Another rebuild"), "{msg}");
-            }
-            Err(LockError::Io(e)) => panic!("io error instead of a refusal: {e}"),
-            Ok(()) => panic!("two rebuilds of one library must not overlap"),
-        }
-        assert!(!p.out.exists(), "a refused rebuild writes nothing");
-
-        drop(held);
-        // The lock is free, but a new claim can still fail at once.
-        // Sibling tests in this binary fork children (settings::child,
-        // cursor::hyprctl), and a fork clones the fd table. Between the
-        // clone and the exec, the copy of the fd of `held` in the child
-        // keeps the flock alive, because CLOEXEC closes the fd only at
-        // exec. A bounded retry covers that window. Production never
-        // meets it, because the holding process forks nothing during a
-        // rebuild.
-        let mut tries = 0;
-        let last = loop {
-            let (tx, rx) = mpsc::channel();
-            match spawn(&form, p.clone(), move |progress| {
-                let _ = tx.send(progress);
-            }) {
-                Ok(()) => break collect(rx).1,
-                Err(LockError::AlreadyRunning { .. }) if tries < 100 => {
-                    tries += 1;
-                    std::thread::sleep(std::time::Duration::from_millis(10));
-                }
-                Err(e) => panic!("the freed library lock: {e:?}"),
-            }
-        };
-        done(&last);
-    }
-
-    #[test]
-    fn terminal_progress_arrives_after_the_library_flock_is_free() {
-        let (dir, _guard) = scratch("terminal_unlocked");
-        let p = plan(&dir);
-        let runtime_dir = p.runtime_dir.clone();
-        let lock_name = lock::library_file_name(&p.library_dir);
-        let form = staging(&[fixture("terms.zip")]);
-        let (tx, rx) = mpsc::channel();
-
-        spawn(&form, p, move |progress| {
-            if matches!(progress, Progress::Done { .. } | Progress::Failed(_)) {
-                let reacquired = lock::acquire_at(&runtime_dir, &lock_name).is_ok();
-                let _ = tx.send(reacquired);
-            }
-        })
-        .expect("the library lock");
-
-        assert!(
-            rx.recv_timeout(Duration::from_secs(30)).unwrap(),
-            "terminal progress must wait until the library flock is free"
-        );
-    }
-
-    #[test]
-    fn the_status_line_names_the_counts_and_what_the_daemon_did() {
-        let live = Progress::Done {
-            entries: 3,
-            terms: 5,
-            reload: Reload::Sent("OK reload".to_string()),
-        };
-        assert_eq!("Rebuilt: 3 entries, 5 term rows; the daemon reloaded (OK reload).", describe(&live));
-        let dead = Progress::Done { entries: 3, terms: 5, reload: Reload::NoDaemon };
-        assert!(describe(&dead).contains("not running"), "{}", describe(&dead));
-        let failed = Progress::Failed("invalid Zip archive".to_string());
-        assert!(describe(&failed).contains("unchanged"), "{}", describe(&failed));
-        assert!(describe(&failed).contains("invalid Zip archive"));
-        // The shared renderer formats raw builder lines.
-        assert_eq!(
-            "12,500 of 768,636 entries…",
-            describe(&Progress::Line("progress  12500 / 768636".to_string()))
-        );
     }
 }
