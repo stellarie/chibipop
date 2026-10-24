@@ -158,10 +158,17 @@ Worker: capture -> mask -> OCR -> lookup -> present --result--> Controller
 - Diagnostics omit selection text. The normal opt-in lookup log can record the resolved headword.
 
 - Hovering painted Japanese text opens a child popup through dictionary lookup, without capture or OCR.
-- `popup.sub_popups` enables this behavior. Query assembly skips the invisible ruby word joiner and preserves visible word boundaries.
+- `popup.sub_popups` enables hover child popups and defaults to `true`. It does not control lookup shortcuts.
+- Query assembly skips the invisible ruby word joiner and preserves visible word boundaries.
+- Lookup Bind activation over painted popup text uses popup hit testing and direct dictionary lookup. It does not capture or OCR.
+- A Press, Hold, or Toggle activation over popup text performs one dictionary lookup. It uses the Bind's assigned Profile, not `nested_profile`.
+- Blank popup space and a missed popup lookup do not dismiss the chain. The root Bind keeps ownership.
 - Parent popups remain visible. The Controller retains each parent's scroll, selections, and click history.
+- Popup nesting has no fixed depth cap, but resources remain finite.
+- Parent hover preserves a child while the cursor crosses its source-word-to-popup sticky region.
 - Returning to a parent retires its descendants. Root dismissal hides the complete popup chain.
-- A hover lookup ignores stale results after navigation. Selection drags do not open child popups.
+- Popup-entry events control parent navigation. Screen cursor samples do not retire descendants.
+- Hover and shortcut lookups ignore stale results after navigation or a capture hide. Selection drags do not open child popups.
 
 - `TextMeasure` takes an ordered list of styled spans and a wrap width. It returns
   per-line and per-span geometry and a baseline for each line.
@@ -173,8 +180,9 @@ Worker: capture -> mask -> OCR -> lookup -> present --result--> Controller
   `hit_offset` maps a run-relative point to a UTF-16 caret offset.
 - `PopupScene` is the measured popup in one uniform, unit-agnostic pixel space. Core
   never receives a scale factor.
-- The platform bin measures and places the popup. The Controller learns the result as
-  `Event::PopupPlaced { rect }`.
+- The platform bin measures and places the popup. The bin hit-tests painted popup text
+  before normal screen shortcut handling.
+- The Controller learns the result as `Event::PopupPlaced { rect }`.
 - Comments in `crates/chibipop-linux/src/popup/surface.rs` and `popup/text.rs` describe
   the Wayland surface protocol rules.
 - A click catcher exists in Press mode, for selected-text popups, and with `popup.hide_on_cursor_exit = false`
@@ -233,12 +241,14 @@ Worker: capture -> mask -> OCR -> lookup -> present --result--> Controller
   until toggle-off. Configured Linux Toggle Binds use `bind-down ID`.
   The fixed `chibipop ctl toggle` verb remains supported. Windows flips the
   hook latch for both configured and fixed Toggle actions.
-- Press mode has no Frozen grab or Dwell re-check. Each Press Bind activation
-  performs one live masked grab. Text found keeps the popup shown. A press with
-  no text hides the popup. A press over the popup also hides it because the
-  mask gives no text. Screen cursor movement and key release do nothing, and
-  per-character lookup is inert.
-  Hovering text inside an existing popup can still open a child popup.
+- Press mode has no Frozen grab or Dwell re-check. Each Press Bind activation outside
+  a popup performs one live masked grab. Text found keeps the popup shown. A press with
+  no screen text hides the popup.
+- A Press, Hold, or Toggle activation over painted popup text performs one dictionary
+  lookup without capture or OCR. Blank popup space or a popup lookup miss does not
+  dismiss the chain.
+- In Press mode, screen cursor movement and key release do nothing, and per-character lookup is inert.
+- Hovering text inside an existing popup can still open a child popup.
 - A wrap probe follows pass 1 when the lookup would run past the line end and the box did
   not clip the line. Pass 1 must show no continuation. A continuation near pass 1's lead
   edge can be clipped and does not suppress a probe. The probe uses one bounded
@@ -378,8 +388,8 @@ Worker: capture -> mask -> OCR -> lookup -> present --result--> Controller
 - Deletion rejects profiles that the default, a Bind, nested routing, or a Derived parent still references.
 - `ProfileCatalog` retains the saved catalog. A `ProfileSession` retains one resolved profile and uses it until its surface closes.
 - Existing popup chains and Search windows keep their Profile session. New sessions use later saved settings.
-- Nested routing selects the profile for hover links and clicked dictionary links. It is separate from inheritance.
-- Back restores profile, content, scroll, and selections. Same-headword suppression includes Profile ID.
+- Nested routing selects the Profile for hover links and clicked dictionary links. It is separate from inheritance.
+- Explicit lookup shortcuts use the Bind's assigned Profile. Back restores profile, content, scroll, and selections. Same-headword suppression includes Profile ID.
 - Lookup Binds support Press, Hold, and Toggle. Other Bind actions activate once.
 - Lookup, SelectedText, Search, SentenceSearch, and OcrClipboard accept profile overrides. AnkiAdd and StaticRegion use the displayed profile.
 - A new lookup Bind replaces the root and owns its chain. Live lookup pauses until the chain ends. Displaced releases do nothing.
@@ -400,6 +410,7 @@ Worker: capture -> mask -> OCR -> lookup -> present --result--> Controller
 ## Dictionary and lookup
 
 - Direct search uses the existing lookup engine and presentation rules without capture or OCR.
+- Default matching uses rules embedded in both binaries. Windows `--rules FILE` explicitly loads a file and reports invalid or missing files.
 - Search displays candidates before a selected definition. Definitions reuse `PopupScene` and the existing native painters.
 - Sentence search derives UTF-8 word ranges from enabled dictionary matches through the normal lookup engine, including Japanese inflections and Chinese text.
 - Clicks request candidates for the selected word and its shorter internal matches, within the normal result cap.
@@ -445,7 +456,8 @@ Worker: capture -> mask -> OCR -> lookup -> present --result--> Controller
   the part-of-speech row. The separator is ` « ` (U+00AB). An empty chain draws no row,
   so no geometry golden changes.
 - The design rejects an outermost-first display (weikipop's order), a relabel table in
-  code (the labels come from `data/deconjugator.json`), and a setting that hides the row.
+  code (the labels come from embedded rules compiled from `data/deconjugator.json`),
+  and a setting that hides the row.
 
 ## Verification
 

@@ -7,14 +7,10 @@
 //! engine, and the dictionary handle. The daemon keeps only the handle.
 //! A lookup therefore cannot stall the pump.
 //!
-//! Two absences are normal and not fatal. The log names both absences, and
-//! the daemon stays alive:
-//!
-//! - **No database.** A fresh install has no database until the first
-//!   rebuild. See ARCHITECTURE.md#settings-and-config. A lookup reports
-//!   the absence. A `reload` after the rebuild opens the path.
-//! - **No deconjugation rules.** A package fault affects conjugated
-//!   forms, not the whole pipeline. Exact matches still resolve.
+//! A fresh install has no database until the first rebuild.
+//! See ARCHITECTURE.md#settings-and-config. The daemon stays alive, and a lookup
+//! reports the absence. A `reload` after the rebuild opens the path.
+//! Deconjugation rules are embedded in the binary.
 
 use crate::capture::backend::Backend;
 use crate::capture::portal::PortalCapture;
@@ -35,9 +31,6 @@ use chibipop::worker::{ServeNudge, Worker, WorkerParts, WorkerSettings};
 use chibipop_linux::ocr::MeikiOcr;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
-
-/// The bundled deconjugation rules, relative to the binary.
-const RULES: &str = "data/deconjugator.json";
 
 /// The data that the core Worker needs from this session at startup.
 pub struct Setup {
@@ -149,40 +142,9 @@ fn open_dict(db: &Path) -> Result<Box<dyn Dictionary>> {
     Ok(Box::new(dict))
 }
 
-/// Return the path of the bundled deconjugation rules.
-/// The rules sit beside the binary, in a distro `../share/chibipop`, or
-/// in the source tree of a debug build. `chibipop::paths::data_file` handles
-/// the last case.
-fn rules_file() -> PathBuf {
-    let beside = chibipop::paths::beside_exe(RULES);
-    if beside.is_file() {
-        return beside;
-    }
-    let shared = chibipop::paths::beside_exe(&format!("../share/chibipop/{RULES}"));
-    if shared.is_file() {
-        return shared;
-    }
-    chibipop::paths::data_file(RULES)
-}
-
-/// Return the deconjugator for this build.
-///
-/// An absent rules file affects conjugated forms, and this function reports
-/// the absence on stderr.
-/// A refusal to start would affect every lookup.
-/// The Worker thread reads the file with its other parts.
-fn deconjugator() -> Deconjugator {
-    let path = rules_file();
-    match load_rules(&path) {
-        Ok(rules) => Deconjugator::new(rules),
-        Err(e) => {
-            eprintln!(
-                "chibipop: no deconjugation rules at {} ({e:#}); only exact forms will resolve",
-                path.display()
-            );
-            Deconjugator::new(Vec::new())
-        }
-    }
+/// Return the embedded deconjugation rules for Worker startup.
+fn deconjugator() -> Result<Deconjugator> {
+    Ok(Deconjugator::new(load_rules(None)?))
 }
 
 /// Return the box that the user drew in core's coordinate space.
@@ -279,7 +241,7 @@ pub fn spawn(
                 // A second open therefore serves the new dictionary.
                 // This daemon outlives its rebuilds and never restarts.
                 reopen_dict: Some(Box::new(move || open_dict(&reopen_db))),
-                engine: LookupEngine::new(deconjugator()),
+                engine: LookupEngine::new(deconjugator()?),
                 serve: Some(serve_jobs(jobs)),
             })
         },
@@ -326,6 +288,23 @@ pub fn dict_line(db: &Path, dicts: &[DictInfo]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn startup_rules_resolve_inflected_verb_before_exact_prefix() {
+        let mut dict = chibipop::lookup::model::FakeDictionary::new();
+        dict.add_term("治", Some("治"), Some("ち"), "", Some(1367), 1, 1);
+        dict.add_entry(1, 1, r#"["government"]"#);
+        dict.add_term("治る", Some("治る"), Some("なおる"), "v5", Some(1737), 2, 1);
+        dict.add_entry(2, 1, r#"["to recover"]"#);
+
+        let engine = LookupEngine::new(deconjugator().unwrap());
+        let hits = engine.run(&dict, "治って病院を出ること。").unwrap();
+        assert_eq!(hits[0].written.as_deref(), Some("治る"));
+        assert_eq!(hits[0].reading.as_deref(), Some("なおる"));
+        assert_eq!(hits[0].match_len, 3);
+        assert_eq!(chibipop::present::inflection_chain(&hits[0].process), ["(te form)"]);
+        assert!(hits.iter().any(|hit| hit.written.as_deref() == Some("治")));
+    }
 
     /// A fresh install has no database.
     /// The daemon still starts, and a lookup reports the required path.

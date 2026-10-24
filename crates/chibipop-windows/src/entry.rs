@@ -188,13 +188,12 @@ pub fn run() -> Result<()> {
     match command {
         Command::Lookup { text, dict, rules } => {
             let dict = dict_path(dict);
-            let rules = rules_path(rules);
             let dictionary = SqliteDictionary::open(&dict).with_context(|| {
                 format!("opening {} - add dictionaries in the settings window",
                         dict.display())
             })?;
             let engine =
-                LookupEngine::new(Deconjugator::new(load_rules(&rules)?));
+                LookupEngine::new(Deconjugator::new(load_rules(rules.as_deref())?));
 
             let hits = engine.run(&dictionary, &text)?;
             if hits.is_empty() {
@@ -217,7 +216,6 @@ pub fn run() -> Result<()> {
             keep_furigana,
         } => {
             let dict = dict_path(dict);
-            let rules = rules_path(rules);
             let (xs, ys) = at
                 .split_once(',')
                 .context("--at must be X,Y (e.g. --at 1200,400)")?;
@@ -328,7 +326,7 @@ pub fn run() -> Result<()> {
                              r.span.anchor.w, r.span.anchor.h);
 
                     let dictionary = SqliteDictionary::open(&dict)?;
-                    let engine = LookupEngine::new(Deconjugator::new(load_rules(&rules)?));
+                    let engine = LookupEngine::new(Deconjugator::new(load_rules(rules.as_deref())?));
                     let hits = engine.run(&dictionary, &r.span.text[r.span.cursor_byte_offset..])?;
                     println!();
                     print_hits(&hits);
@@ -410,7 +408,6 @@ pub fn run() -> Result<()> {
         }
         Command::Watch { dict, rules, tiles, keep_furigana } => {
             let dict = dict_path(dict);
-            let rules = rules_path(rules);
             let mut source = chibipop_windows::text::text_source(
                 SettingsSnapshot {
                     max_passes: tiles,
@@ -423,7 +420,7 @@ pub fn run() -> Result<()> {
                 "ja",
             )?;
             let dictionary = SqliteDictionary::open(&dict)?;
-            let engine = LookupEngine::new(Deconjugator::new(load_rules(&rules)?));
+            let engine = LookupEngine::new(Deconjugator::new(load_rules(rules.as_deref())?));
 
             println!("watching - hover over Japanese text. Ctrl-C to stop.\n");
 
@@ -471,7 +468,6 @@ pub fn run() -> Result<()> {
         }
         Command::Search { dict, rules, config, sentence, text } => {
             let dict = dict_path(dict);
-            let rules = rules_path(rules);
             let config_path = config.unwrap_or_else(default_config_path);
             let cfg = chibipop::config::load_or_create(&config_path)?;
             let dicts = SqliteDictionary::open(&dict)?.dicts()?;
@@ -480,7 +476,7 @@ pub fn run() -> Result<()> {
             let mode = if sentence { chibipop::search::SearchMode::Sentence }
                 else { chibipop::search::SearchMode::Dictionary };
             let mut search = chibipop_windows::ui::search_window::SearchWindow::open_mode(
-                &dict, &rules, session, mode, text.as_deref())?;
+                &dict, rules.as_deref(), session, mode, text.as_deref())?;
             search.set_resource_config_path(&config_path);
             while search.is_visible() {
                 use windows::Win32::UI::WindowsAndMessaging::{MSG, PeekMessageW, TranslateMessage, DispatchMessageW, PM_REMOVE};
@@ -521,11 +517,10 @@ pub fn run() -> Result<()> {
         }
         Command::Run { dict, rules, config } => {
             let dict = dict_path(dict);
-            let rules = rules_path(rules);
             let config_path = config.unwrap_or_else(default_config_path);
             let cfg = chibipop::config::load_or_create(&config_path)
                 .with_context(|| format!("loading config from {}", config_path.display()))?;
-            chibipop_windows::app::run(cfg, &dict, &rules, &config_path)
+            chibipop_windows::app::run(cfg, &dict, rules.as_deref(), &config_path)
         }
         Command::BuildDict { library, out } => {
             let mut archives = Vec::new();
@@ -652,11 +647,6 @@ fn dump_bmp(path: &Path, buf: &[u8], w: i32, h: i32) -> Result<()> {
 /// Returns `--dict` or the default path.
 fn dict_path(given: Option<PathBuf>) -> PathBuf {
     given.unwrap_or_else(|| chibipop::paths::data_file("data/chibipop.sqlite"))
-}
-
-/// Returns `--rules` or the default path.
-fn rules_path(given: Option<PathBuf>) -> PathBuf {
-    given.unwrap_or_else(|| chibipop::paths::data_file("data/deconjugator.json"))
 }
 
 /// Returns the file name, or an empty string if no file name exists.

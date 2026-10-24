@@ -179,6 +179,7 @@ struct Panel {
     awaiting_frame: Option<Instant>,
     /// The one coalesced pending frame.
     pending: Option<Pending>,
+    painted: Option<PhysRect>,
 }
 
 enum ConfigureAction<T> {
@@ -774,6 +775,27 @@ impl Popup {
         ).ok().flatten()
     }
 
+    pub fn lookup_at(&mut self, pos: PhysPoint) -> Option<(usize, PhysPoint, Option<String>)> {
+        if self.parents_hidden { return None; }
+        let panel = self.panels.iter()
+            .filter(|panel| panel.painted.is_some_and(|rect| rect.contains(pos)))
+            .max_by_key(|panel| panel.depth)?;
+        let rect = panel.painted?;
+        let depth = panel.depth;
+        let local = PhysPoint { x: pos.x - rect.x, y: pos.y - rect.y };
+        let query = if depth == self.parents.len() {
+            self.hover_query(local)
+        } else {
+            let parent = self.parents.get(depth)?;
+            parent.scene.as_ref().zip(parent.hits.as_ref()).and_then(|(scene, hits)| {
+                scene.hover_query(
+                    (local.x as f32, local.y as f32), hits.scroll, &parent.theme.font_name, &mut self.text,
+                ).ok().flatten()
+            })
+        };
+        Some((depth, local, query))
+    }
+
     pub fn depth_of(&self, surface: &WlSurface) -> Option<usize> {
         let panel = self.panel_of(surface)?;
         if self.vis.shown().is_some_and(|shown| shown.output == panel) {
@@ -1060,6 +1082,7 @@ impl Popup {
             configured: None,
             awaiting_frame: None,
             pending: None,
+            painted: None,
         });
         self.next_id += 1;
     }
@@ -1378,6 +1401,7 @@ impl Popup {
         panel.awaiting_frame = Some(Instant::now());
         buffer.attach_to(&surface).context("attaching the popup's buffer")?;
         panel.layer.commit();
+        panel.painted = Some(pending.placement.rect);
         Ok(())
     }
 
@@ -1392,6 +1416,7 @@ impl Popup {
     fn clear(&mut self, idx: usize) {
         let logical = {
             let panel = &mut self.panels[idx];
+            panel.painted = None;
             cancel_pending_show(panel.configured, &mut panel.pending)
         };
         if self.hits.as_ref().is_some_and(|h| h.panel == self.panels[idx].id) {
@@ -1413,6 +1438,7 @@ impl Popup {
     /// would leave the popup unable to hide.
     fn hidden_frame(&mut self, idx: usize, logical: (i32, i32)) {
         let panel = &mut self.panels[idx];
+        panel.painted = None;
         let surface = panel.layer.wl_surface().clone();
         let scale = place::fractional(panel.preferred, &panel.geo);
         let bw = ((f64::from(logical.0) * scale).round() as i32).max(1);

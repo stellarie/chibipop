@@ -462,7 +462,7 @@ pub fn settings_only(
                 Ok(session) => open_search_window_mode(
                     &mut search_windows,
                     dict_path,
-                    &crate::paths::data_file("data/deconjugator.json"),
+                    None,
                     session,
                     config_path,
                     mode,
@@ -1614,7 +1614,7 @@ fn sync_runtime_status(
 /// Capture and OCR objects stay on the Worker thread. Only their status crosses back.
 fn worker_open(
     dict_path: PathBuf,
-    rules_path: PathBuf,
+    rules_path: Option<PathBuf>,
     language: String,
     guard: CaptureGuard,
     // The value is "builtin" or a plugin name.
@@ -1640,7 +1640,7 @@ fn worker_open(
                 dict_path.display()
             )
         })?;
-        let rules = load_rules(&rules_path)?;
+        let rules = load_rules(rules_path.as_deref())?;
         let engine = LookupEngine::new(Deconjugator::new(rules));
         ui.monitor.publish(&active_engine, &active_language, true);
         Ok(WorkerParts {
@@ -1660,15 +1660,15 @@ fn worker_open(
     }
 }
 /// Runs the Windows message loop until the user quits.
-pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path) -> Result<()> {
-    // The Dictionary or rules file does not exist yet.
-    if !dict_path.exists() || !rules_path.exists() {
+pub fn run(mut cfg: Config, dict_path: &Path, rules_path: Option<&Path>, config_path: &Path) -> Result<()> {
+    // The Dictionary does not exist yet.
+    if !dict_path.exists() {
         return settings_only(cfg, &[], config_path, dict_path);
     }
 
     let library = library_dir();
     let db_path = dict_path.to_path_buf();
-    let rules_path = rules_path.to_path_buf();
+    let rules_path = rules_path.map(Path::to_path_buf);
     // One-off OCR pixels for OCR-to-clipboard. Lookup requests use core channels.
     let (ocr_tx, ocr_request_rx) = mpsc::channel::<crate::action::OcrRequest>();
     let capture_guard_active = Arc::new(AtomicBool::new(false));
@@ -2227,7 +2227,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                 open_search_window_mode(
                     &mut search_windows,
                     &db_path,
-                    &rules_path,
+                    rules_path.as_deref(),
                     session,
                     config_path,
                     mode,
@@ -2316,12 +2316,22 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                             continue;
                         };
                         match catalog.for_bind(&bind.id) {
-                            Ok(session) => drive!(Event::LookupBindDown {
-                                bind_id: bind.id,
-                                mode: bind.mode,
-                                session,
-                                pos: cursor_pos,
-                            }),
+                            Ok(session) => {
+                                let event = match popup_query_at(
+                                    &controller, &popup, &mut renderer, &parent_popups, cursor_pos,
+                                ) {
+                                    Some((depth, local, query)) => {
+                                        Event::PopupLookupRequested { depth, local, query, session }
+                                    }
+                                    None => Event::LookupBindDown {
+                                        bind_id: bind.id,
+                                        mode: bind.mode,
+                                        session,
+                                        pos: cursor_pos,
+                                    },
+                                };
+                                drive!(event);
+                            }
                             Err(error) => eprintln!("chibipop: resolving lookup bind failed: {error:#}"),
                         }
                     } else if !edge.down {
@@ -2373,7 +2383,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                         open_search_window_mode(
                             &mut search_windows,
                             &db_path,
-                            &rules_path,
+                            rules_path.as_deref(),
                             bind_session,
                             config_path,
                             mode,
@@ -2398,10 +2408,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                     crate::config::BindAction::StaticRegion => {
                         let session = bind_session;
                         let had_popup = controller.popup().is_some();
-                        drive!(Event::PopupHover {
-                            local: PhysPoint { x: 0, y: 0 },
-                            query: None,
-                        });
+                        drive!(Event::PopupLookupCancelled);
                         if had_popup {
                             set_parent_visibility(&parent_popups, false);
                             let _ = popup.hide();
@@ -2480,10 +2487,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                     crate::config::BindAction::OcrClipboard => {
                         let session = bind_session;
                         let had_popup = controller.popup().is_some();
-                        drive!(Event::PopupHover {
-                            local: PhysPoint { x: 0, y: 0 },
-                            query: None,
-                        });
+                        drive!(Event::PopupLookupCancelled);
                         if had_popup {
                             set_parent_visibility(&parent_popups, false);
                             let _ = popup.hide();
@@ -2529,7 +2533,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                                     open_search_window_mode(
                                         &mut search_windows,
                                         &db_path,
-                                        &rules_path,
+                                        rules_path.as_deref(),
                                         session.clone(),
                                         config_path,
                                         chibipop::search::SearchMode::Sentence,
@@ -2563,7 +2567,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                 open_search_window_mode(
                     &mut search_windows,
                     &db_path,
-                    &rules_path,
+                    rules_path.as_deref(),
                     session,
                     config_path,
                     chibipop::search::SearchMode::Sentence,
@@ -2578,19 +2582,10 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                 } else {
                     drive!(Event::PopupEntered { depth: usize::MAX });
                 }
-                if let Some(depth) = controller.popup_at(cursor_pos) {
-                    let view = if depth == controller.popup_depth() { controller.popup() }
-                        else { controller.parent_popup(depth) };
-                    if let Some(view) = view {
-                        let local = PhysPoint { x: cursor_pos.x - view.popup.x, y: cursor_pos.y - view.popup.y };
-                        let query = if depth == controller.popup_depth() {
-                            renderer.hover_query(local, view.scroll)
-                        } else {
-                            parent_popups.borrow_mut().get_mut(depth)
-                                .and_then(|(_, renderer)| renderer.hover_query(local, view.scroll))
-                        };
-                        drive!(Event::PopupHoverAt { depth, local, query });
-                    }
+                if let Some((depth, local, query)) = popup_query_at(
+                    &controller, &popup, &mut renderer, &parent_popups, cursor_pos,
+                ) {
+                    drive!(Event::PopupHoverAt { depth, local, query });
                 } else {
                     drive!(Event::PopupHover { local: PhysPoint { x: 0, y: 0 }, query: None });
                 }
@@ -3087,7 +3082,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                     open_search_window_mode(
                         &mut search_windows,
                         &db_path,
-                        &rules_path,
+                        rules_path.as_deref(),
                         catalog.session(None)?,
                         config_path,
                         chibipop::search::SearchMode::Dictionary,
@@ -3157,7 +3152,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
 
         // Handle the OS half of screenshot-on-add outside every Command batch.
         while let Some(pending) = pending_shots.pop_front() {
-            drive!(Event::PopupHover { local: PhysPoint { x: 0, y: 0 }, query: None });
+            drive!(Event::PopupLookupCancelled);
             set_parent_visibility(&parent_popups, false);
             let _ = popup.hide();
             if let Some(button) = &anki_button {
@@ -3486,6 +3481,29 @@ fn set_parent_visibility(parents: &std::cell::RefCell<Vec<(Popup, Renderer)>>, v
     }
 }
 
+fn popup_query_at(
+    controller: &Controller,
+    popup: &Popup,
+    renderer: &mut Renderer,
+    parent_popups: &std::cell::RefCell<Vec<(Popup, Renderer)>>,
+    screen: PhysPoint,
+) -> Option<(usize, PhysPoint, Option<String>)> {
+    let depth = controller.popup_at(screen)?;
+    let view = if depth == controller.popup_depth() { controller.popup() }
+        else { controller.parent_popup(depth) }?;
+    let local = PhysPoint { x: screen.x - view.popup.x, y: screen.y - view.popup.y };
+    let query = if depth == controller.popup_depth() {
+        if !popup.is_visible() { return None; }
+        renderer.hover_query(local, view.scroll)
+    } else {
+        let mut parents = parent_popups.borrow_mut();
+        let (popup, renderer) = parents.get_mut(depth)?;
+        if !popup.is_visible() { return None; }
+        renderer.hover_query(local, view.scroll)
+    };
+    Some((depth, local, query))
+}
+
 fn selection_release_events(
     edges: Vec<crate::input::hooks::BindEvent>,
 ) -> impl Iterator<Item = Event> {
@@ -3729,7 +3747,7 @@ fn drive(controller: &mut Controller, event: Event, x: &mut Exec<'_>) {
     }
     let mut queue = std::collections::VecDeque::new();
     if x.cancel_hidden_hover.replace(false) {
-        queue.push_back(Event::PopupHover { local: PhysPoint { x: 0, y: 0 }, query: None });
+        queue.push_back(Event::PopupLookupCancelled);
     }
     queue.push_back(event);
     while let Some(ev) = queue.pop_front() {
@@ -4404,7 +4422,7 @@ fn search_windows_handle_message(
 fn open_search_window_mode(
     windows: &mut Vec<crate::ui::search_window::SearchWindow>,
     database: &Path,
-    rules: &Path,
+    rules: Option<&Path>,
     session: ProfileSession,
     config_path: &Path,
     mode: chibipop::search::SearchMode,
@@ -4698,14 +4716,13 @@ mod tests {
             .unwrap();
 
         let database = Path::new("missing-search-session.sqlite");
-        let rules = Path::new("missing-search-session-rules.json");
         let config_path = Path::new("missing-search-session-config.toml");
         let mode = chibipop::search::SearchMode::Dictionary;
         let mut windows = Vec::new();
         open_search_window_mode(
             &mut windows,
             database,
-            rules,
+            None,
             original_session.clone(),
             config_path,
             mode,
@@ -4714,7 +4731,7 @@ mod tests {
         open_search_window_mode(
             &mut windows,
             database,
-            rules,
+            None,
             updated_session.clone(),
             config_path,
             mode,
@@ -4731,7 +4748,7 @@ mod tests {
         open_search_window_mode(
             &mut windows,
             database,
-            rules,
+            None,
             updated_session,
             config_path,
             mode,
@@ -4747,7 +4764,7 @@ mod tests {
         open_search_window_mode(
             &mut windows,
             database,
-            rules,
+            None,
             original_session,
             config_path,
             chibipop::search::SearchMode::Sentence,

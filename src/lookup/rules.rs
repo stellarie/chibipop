@@ -1,11 +1,11 @@
-//! Deconjugation rule types and rule-file input.
+//! Deconjugation rule types and rule input.
 //!
-//! `data/deconjugator.json` mixes comment strings with rule objects. Each
-//! `dec_end`, `con_end`, `dec_tag`, and `con_tag` field can contain one string or
-//! a list of strings.
+//! The default rules are embedded from `data/deconjugator.json` in both
+//! platform binaries. An explicit path loads that file and preserves errors.
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
+use std::borrow::Cow;
 use std::path::Path;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -50,10 +50,15 @@ enum Element {
     Comment(String),
 }
 
-/// Load rules. Discard comment strings and rules with type `substitution`.
-pub fn load_rules(path: &Path) -> Result<Vec<Rule>> {
-    let text = std::fs::read_to_string(path)
-        .with_context(|| format!("reading rules from {}", path.display()))?;
+/// Load the embedded default rules when `path` is `None`.
+/// Load the file at `path` when it is `Some`. Return read and parse errors
+/// without a fallback.
+pub fn load_rules(path: Option<&Path>) -> Result<Vec<Rule>> {
+    let text = match path {
+        Some(path) => Cow::Owned(std::fs::read_to_string(path)
+            .with_context(|| format!("reading rules from {}", path.display()))?),
+        None => Cow::Borrowed(include_str!("../../data/deconjugator.json")),
+    };
     let elements: Vec<Element> =
         serde_json::from_str(&text).context("parsing deconjugator.json")?;
 
@@ -67,3 +72,25 @@ pub fn load_rules(path: &Path) -> Result<Vec<Rule>> {
         .collect())
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bundled_rules_exclude_substitutions() {
+        let rules = load_rules(None).unwrap();
+        assert!(rules.iter().all(|r| r.rule_type != "substitution"));
+    }
+
+    #[test]
+    fn explicit_rule_errors_do_not_use_bundled_rules() {
+        let path = std::env::temp_dir().join(format!("chibipop-invalid-rules-{}.json", std::process::id()));
+        struct Cleanup(std::path::PathBuf);
+        impl Drop for Cleanup { fn drop(&mut self) { let _ = std::fs::remove_file(&self.0); } }
+        let _cleanup = Cleanup(path.clone());
+        std::fs::write(&path, "invalid JSON").unwrap();
+        assert!(load_rules(Some(&path)).is_err());
+        std::fs::remove_file(&path).unwrap();
+        assert!(load_rules(Some(&path)).is_err());
+    }
+}
