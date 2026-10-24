@@ -227,12 +227,9 @@ mod tests {
     use crate::lookup::model::FakeDictionary;
     use crate::lookup::rules::load_rules;
     
-    use std::path::PathBuf;
 
     fn engine() -> LookupEngine {
-        let p = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("data/deconjugator.json");
-        LookupEngine::new(Deconjugator::new(load_rules(&p).unwrap()))
+        LookupEngine::new(Deconjugator::new(load_rules(None).unwrap()))
     }
 
     /// A glossary payload in the record format. It has one part-of-speech pill and
@@ -345,4 +342,21 @@ mod tests {
         assert_eq!(Some("日本語".to_string()), hits[0].written);
     }
 
+    #[test]
+    fn bundled_rules_match_inflected_verb_before_common_kanji() {
+        let mut dict = FakeDictionary::new();
+        dict.add_term("治", Some("治"), Some("ち"), "", Some(1367), 1, 1);
+        dict.add_entry(1, 1, &glossary("government", ""));
+        dict.add_term("治る", Some("治る"), Some("なおる"), "v5", Some(1737), 2, 1);
+        dict.add_entry(2, 1, &glossary("to recover", "v5"));
+
+        let hits = engine().run(&dict, "治って病院を出ること。").unwrap();
+        assert_eq!(hits[0].written.as_deref(), Some("治る"));
+        assert_eq!(hits[0].reading.as_deref(), Some("なおる"));
+        assert_eq!(hits[0].match_len, 3);
+        assert_eq!(crate::present::inflection_chain(&hits[0].process), ["(te form)"]);
+        let hits = engine().run(&dict, "治").unwrap();
+        assert_eq!(hits[0].written.as_deref(), Some("治"));
+        assert_eq!(hits[0].match_len, 1);
+    }
 }

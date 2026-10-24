@@ -178,12 +178,9 @@ impl Deconjugator {
 mod tests {
     use super::*;
     use crate::lookup::rules::load_rules;
-    use std::path::PathBuf;
 
     fn deconjugator() -> Deconjugator {
-        let p = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("data/deconjugator.json");
-        Deconjugator::new(load_rules(&p).unwrap())
+        Deconjugator::new(load_rules(None).unwrap())
     }
 
     fn reaches(d: &Deconjugator, input: &str, want: &str) -> bool {

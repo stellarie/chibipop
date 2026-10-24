@@ -97,13 +97,6 @@ package() {
 
 	install -Dm755 target/release/chibipop "$pkgdir/usr/bin/chibipop"
 
-	# The binary finds its data by walking up from its own directory, so
-	# an FHS install is not free-form: `/usr/bin/chibipop` looks for
-	# `../share/chibipop/models/meiki` (models::LAYOUTS) and
-	# `../share/chibipop/data/deconjugator.json` (the daemon's rules
-	# search). Move either one and the OCR engine refuses to open or every
-	# conjugated form stops resolving.
-	install -Dm644 data/deconjugator.json "$pkgdir/usr/share/$pkgname/data/deconjugator.json"
 	install -Dm644 -t "$pkgdir/usr/share/$pkgname/models/meiki" \
 		crates/chibipop-linux/models/meiki/*.onnx \
 		crates/chibipop-linux/models/meiki/SHA256SUMS.txt \

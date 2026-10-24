@@ -48,6 +48,7 @@ const CASES: &[(&str, &str, &[&str])] = &[
     ("読みました", "読む", &["past polite"]),
     ("小さかった", "小さい", &["past"]),
     ("してしまった", "する", &["finish/completely/end up", "past"]),
+    ("治って病院を出ること。", "治る", &["(te form)"]),
 ];
 
 /// Set the path to a Dictionary outside the default layout.
@@ -104,7 +105,7 @@ fn golden_corpus() {
     );
 
     let engine = LookupEngine::new(Deconjugator::new(
-        load_rules(&root().join("data/deconjugator.json")).unwrap(),
+        load_rules(None).unwrap(),
     ));
 
     let mut failures = Vec::new();

@@ -10,7 +10,7 @@ the limits that were measured rather than assumed.
 
 - **Rust** stable. MSVC on Windows (`stable-x86_64-pc-windows-msvc`), the
   default toolchain on Linux.
-- `data/deconjugator.json` ships with the repository. No build step.
+- `data/deconjugator.json` supplies rules compiled into both binaries. Default matching needs no external rules file.
 - The Linux OCR models ship with the repository too
   (`crates/chibipop-linux/models/meiki/`). Nothing is downloaded.
 
@@ -71,6 +71,8 @@ Windows Search uses its initial monitor DPI when it opens.
 Search uses the Profile session's configured Dictionary database,
 enabled Dictionaries, and order.
 It accepts dictionary forms and conjugated Japanese text.
+Japanese inflection matching uses rules embedded in the binary, so normal lookup needs no external rules file. On Windows, `--rules FILE` loads the specified file and reports an error when the file is missing or invalid.
+
 Empty input and missing entries clear previous results.
 
 Open either search mode from **Settings > Dictionaries**.
@@ -336,10 +338,13 @@ and configuration keys. This file does not change the Linux settings renderer.
 
 ### Paths
 
-`--dict` and `--rules` look **beside the executable first**, and fall back to
+`--dict` looks **beside the executable first**, and falls back to
 the working directory when nothing is there. That serves both layouts: a
 shipped chibipop keeps its data beside the exe, while a development tree has
 the binary in `target/release/` and the data at the repository root.
+
+Windows `--rules FILE` selects an explicit rules file. The application reads
+that file and reports an error when it is missing or invalid.
 
 `--config` deliberately has no fallback — it resolves **beside the executable**
 only. It is created when absent, so a fallback would write a first run's
@@ -373,16 +378,14 @@ after every release build.
 > replacement would be tracked if anyone writes one. Until then the refresh is
 > the manual copy below.
 
-**Copy five files, and nothing else.** The refresh replaces the executable,
-the deconjugation rules, the README, and the two plugin files that are not
-machine-specific.
+**Copy four files, and nothing else.** The refresh replaces the executable,
+the README, and the two plugin files that are not machine-specific.
 
 ```powershell
 $src = "C:\Users\Stella\chibipop"
 $dst = "C:\Users\Stella\Documents\chibipop-latest"
 
 Copy-Item "$src\target\release\chibipop.exe" "$dst\chibipop.exe" -Force
-Copy-Item "$src\data\deconjugator.json" "$dst\data\deconjugator.json" -Force
 Copy-Item "$src\README.md" "$dst\README.md" -Force
 
 $cfg = $null
@@ -421,10 +424,9 @@ install.
 > including the real install. See [`REGRESSION.md`](REGRESSION.md) tier 0.
 
 **After a release, copy from the published zip instead of `target/release`.**
-Unzip the asset and use its `chibipop.exe`, `data/deconjugator.json`,
-`README.md` and `LICENSE`. The install then runs the exact bytes everyone else
-downloaded, and `Get-FileHash` against the zip's copy proves it. Done this way
-for v0.9.9 on 2026-08-29, on all three installs.
+Unzip the asset and use its `chibipop.exe`, `README.md` and `LICENSE`.
+The install then runs the exact bytes everyone else downloaded, and `Get-FileHash`
+against the zip's copy proves it. Done this way for v0.9.9 on 2026-08-29, on all three installs.
 
 Copying from `target/release` is still right between releases, for a nightly
 off a branch. That copy is a **local build**, not the released artifact: its
@@ -893,8 +895,8 @@ outward, so the reader rebuilds the hovered form from left to right.
 
 A bare te-form such as 風邪をひいて shows `(te form)`. The row hides inner stems such
 as `(unstressed infinitive)`, because they are plumbing between two visible steps.
-The labels are the `detail` strings of `data/deconjugator.json`, verbatim. An
-unconjugated headword shows no row. No setting controls the row.
+The binary embeds the `detail` strings from `data/deconjugator.json` verbatim.
+An unconjugated headword shows no row. No setting controls the row.
 
 ### Sticky hover
 
