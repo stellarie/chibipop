@@ -157,19 +157,31 @@ The fixed socket verbs remain supported:
 These verbs keep their legacy routing and do not replace configured Binds.
 
 Hold mode freezes one full grab before the popup appears.
-Each lookup during the hold reads that frozen screen.
+Each screen lookup during the hold reads that frozen screen.
 Moving to another monitor starts a grab for that monitor.
 Release drops the frame and hides the popup.
 
 Toggle mode latches the trigger.
 It reads live grabs with the popup masked until toggle-off.
-Press mode runs one masked live lookup for each activation.
+Press mode runs one masked live lookup outside a popup for each activation.
 Press mode does not follow cursor movement or run a Dwell re-check.
 The key release does nothing in Press mode.
 Per-character lookup is inert in Press and Toggle modes.
 
+Over painted popup text, a Press, Hold, or Toggle activation performs one dictionary lookup.
+It reads the painted text directly and does not capture or OCR.
+It uses the shortcut's assigned profile, not `nested_profile`.
+It works even when `popup.sub_popups` is off.
+Blank popup space and a missed popup lookup do not dismiss the chain.
+The root Bind keeps ownership of the chain.
+
 Hovering text in an existing popup can open a child popup.
+The hover toggle controls this behavior only.
 The parent stays visible.
+Nesting has no fixed depth cap, but resources remain finite.
+Returning to a parent retires its descendants.
+Dismissing the root closes the chain.
+
 The click catcher exists in Press mode while a popup has a rectangle.
 It also exists in every mode when **Hide popup on cursor exit** is off.
 It consumes an outside click and clears its input region when the popup hides.

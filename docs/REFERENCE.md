@@ -154,9 +154,18 @@ catcher consumes the dismissing click. Sentence search does not need word bounds
 Chibipop never falls back to the regular clipboard. Reads have a two-second
 deadline and a limit of 65,536 UTF-8 bytes.
 
-`popup.sub_popups` defaults to `true`. **Open definitions when hovering over
-popup text** controls this option in **Settings > Popup**. Turning it off
-stops hover sub-popups while preserving normal dictionary lookup.
+`popup.sub_popups` defaults to `true`. **Hover over popup text to open sub-popups**
+controls hover child popups in **Settings > Popup**. Turning it off does not affect
+lookup shortcuts over popup text. Hover links and clicked dictionary links use `nested_profile`.
+
+Press, Hold, or Toggle activation over painted popup text performs one dictionary
+lookup without capture or OCR. The lookup uses the shortcut's assigned profile, not
+`nested_profile`. It works even when `popup.sub_popups` is off. Blank popup space
+and a missed popup lookup do not dismiss the chain. Parent popups remain visible.
+Nesting has no fixed depth cap, but resources remain finite. Returning to a parent
+retires descendants. Dismissing the root closes the chain.
+
+The child stays open when the cursor crosses parent text between the source word and the child.
 
 `actions.ocr_clipboard.open_sentence_search` defaults to `false`. **Open copied
 screen text in sentence search** enables it. Captured text still goes to the
@@ -498,9 +507,10 @@ The `ProfileCatalog` keeps one saved catalog for each session.
 Popups and Search windows retain their Profile session until they close.
 New sessions use later saved settings.
 Nested routing selects a profile for hover links and clicked dictionary links.
-It is separate from inheritance.
-Screen lookup retains its root Profile session after nested routing.
-Back restores the parent profile, content, scroll, selections, and missing Japanese analysis.
+It is separate from inheritance. Lookup shortcuts use their assigned Bind profile,
+not nested routing. Screen lookup retains its root Profile session after nested
+routing. Back restores the parent profile, content, scroll, selections, and missing
+Japanese analysis.
 Same-headword suppression includes Profile ID.
 
 Live lookup pauses while a configured lookup Bind owns a popup chain.
@@ -889,10 +899,10 @@ unconjugated headword shows no row. No setting controls the row.
 ### Sticky hover
 
 The popup stays put while you read it. Move the cursor from the word into the
-popup and it holds still — the hovered character, the gap, and the popup
-itself count as one region, and while the cursor is anywhere in it chibipop
-does no new lookup at all. A word whose answer has not changed is not
-redrawn either, so holding still does not flicker.
+popup and it holds still. The hovered character, the gap, and the popup itself
+count as one region. While the cursor is anywhere in it, chibipop does no new hover
+lookup. A lookup shortcut can still open a child popup from painted text. A word
+whose answer has not changed is not redrawn, so a still cursor does not flicker.
 
 The held region is the characters the entry actually *matched*, not just the
 one glyph under the cursor, so scanning along a conjugated verb shows one
@@ -918,10 +928,12 @@ the popup hides it and does nothing else: the press, and its release, never
 reach the window under the popup, so a stray click cannot act on that window.
 Clicks inside the popup work as usual.
 
-Key actions still hide the popup in every mode: releasing a Hold bind,
-turning a Toggle bind off, and a Press lookup that finds no text (Escape too, on Windows).
-The setting belongs to a profile; the root popup's profile decides for the
-whole popup chain.
+Key actions still hide the popup in every mode: releasing a Hold bind, turning a
+Toggle bind off, and a Press lookup outside the popup that finds no text (Escape
+too, on Windows). A Press, Hold, or Toggle lookup over popup text performs one
+dictionary lookup. Blank popup space and a missed popup lookup leave the chain
+unchanged. The setting belongs to a profile. The root popup's profile decides
+cursor-exit behavior for the whole chain.
 
 ### `scroll_popup`
 

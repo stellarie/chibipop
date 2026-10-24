@@ -2316,12 +2316,22 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                             continue;
                         };
                         match catalog.for_bind(&bind.id) {
-                            Ok(session) => drive!(Event::LookupBindDown {
-                                bind_id: bind.id,
-                                mode: bind.mode,
-                                session,
-                                pos: cursor_pos,
-                            }),
+                            Ok(session) => {
+                                let event = match popup_query_at(
+                                    &controller, &popup, &mut renderer, &parent_popups, cursor_pos,
+                                ) {
+                                    Some((depth, local, query)) => {
+                                        Event::PopupLookupRequested { depth, local, query, session }
+                                    }
+                                    None => Event::LookupBindDown {
+                                        bind_id: bind.id,
+                                        mode: bind.mode,
+                                        session,
+                                        pos: cursor_pos,
+                                    },
+                                };
+                                drive!(event);
+                            }
                             Err(error) => eprintln!("chibipop: resolving lookup bind failed: {error:#}"),
                         }
                     } else if !edge.down {
@@ -2398,10 +2408,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                     crate::config::BindAction::StaticRegion => {
                         let session = bind_session;
                         let had_popup = controller.popup().is_some();
-                        drive!(Event::PopupHover {
-                            local: PhysPoint { x: 0, y: 0 },
-                            query: None,
-                        });
+                        drive!(Event::PopupLookupCancelled);
                         if had_popup {
                             set_parent_visibility(&parent_popups, false);
                             let _ = popup.hide();
@@ -2480,10 +2487,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                     crate::config::BindAction::OcrClipboard => {
                         let session = bind_session;
                         let had_popup = controller.popup().is_some();
-                        drive!(Event::PopupHover {
-                            local: PhysPoint { x: 0, y: 0 },
-                            query: None,
-                        });
+                        drive!(Event::PopupLookupCancelled);
                         if had_popup {
                             set_parent_visibility(&parent_popups, false);
                             let _ = popup.hide();
@@ -2578,19 +2582,10 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                 } else {
                     drive!(Event::PopupEntered { depth: usize::MAX });
                 }
-                if let Some(depth) = controller.popup_at(cursor_pos) {
-                    let view = if depth == controller.popup_depth() { controller.popup() }
-                        else { controller.parent_popup(depth) };
-                    if let Some(view) = view {
-                        let local = PhysPoint { x: cursor_pos.x - view.popup.x, y: cursor_pos.y - view.popup.y };
-                        let query = if depth == controller.popup_depth() {
-                            renderer.hover_query(local, view.scroll)
-                        } else {
-                            parent_popups.borrow_mut().get_mut(depth)
-                                .and_then(|(_, renderer)| renderer.hover_query(local, view.scroll))
-                        };
-                        drive!(Event::PopupHoverAt { depth, local, query });
-                    }
+                if let Some((depth, local, query)) = popup_query_at(
+                    &controller, &popup, &mut renderer, &parent_popups, cursor_pos,
+                ) {
+                    drive!(Event::PopupHoverAt { depth, local, query });
                 } else {
                     drive!(Event::PopupHover { local: PhysPoint { x: 0, y: 0 }, query: None });
                 }
@@ -3157,7 +3152,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
 
         // Handle the OS half of screenshot-on-add outside every Command batch.
         while let Some(pending) = pending_shots.pop_front() {
-            drive!(Event::PopupHover { local: PhysPoint { x: 0, y: 0 }, query: None });
+            drive!(Event::PopupLookupCancelled);
             set_parent_visibility(&parent_popups, false);
             let _ = popup.hide();
             if let Some(button) = &anki_button {
@@ -3486,6 +3481,29 @@ fn set_parent_visibility(parents: &std::cell::RefCell<Vec<(Popup, Renderer)>>, v
     }
 }
 
+fn popup_query_at(
+    controller: &Controller,
+    popup: &Popup,
+    renderer: &mut Renderer,
+    parent_popups: &std::cell::RefCell<Vec<(Popup, Renderer)>>,
+    screen: PhysPoint,
+) -> Option<(usize, PhysPoint, Option<String>)> {
+    let depth = controller.popup_at(screen)?;
+    let view = if depth == controller.popup_depth() { controller.popup() }
+        else { controller.parent_popup(depth) }?;
+    let local = PhysPoint { x: screen.x - view.popup.x, y: screen.y - view.popup.y };
+    let query = if depth == controller.popup_depth() {
+        if !popup.is_visible() { return None; }
+        renderer.hover_query(local, view.scroll)
+    } else {
+        let mut parents = parent_popups.borrow_mut();
+        let (popup, renderer) = parents.get_mut(depth)?;
+        if !popup.is_visible() { return None; }
+        renderer.hover_query(local, view.scroll)
+    };
+    Some((depth, local, query))
+}
+
 fn selection_release_events(
     edges: Vec<crate::input::hooks::BindEvent>,
 ) -> impl Iterator<Item = Event> {
@@ -3729,7 +3747,7 @@ fn drive(controller: &mut Controller, event: Event, x: &mut Exec<'_>) {
     }
     let mut queue = std::collections::VecDeque::new();
     if x.cancel_hidden_hover.replace(false) {
-        queue.push_back(Event::PopupHover { local: PhysPoint { x: 0, y: 0 }, query: None });
+        queue.push_back(Event::PopupLookupCancelled);
     }
     queue.push_back(event);
     while let Some(ev) = queue.pop_front() {

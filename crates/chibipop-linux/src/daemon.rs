@@ -898,6 +898,11 @@ impl App {
     }
 
     fn lookup_bind(&mut self, id: &str, mode: TriggerMode, session: ProfileSession) {
+        let point = self.cursor_now();
+        if let Some((depth, local, query)) = point.and_then(|pos| self.popup.as_mut()?.lookup_at(pos)) {
+            self.feed(Event::PopupLookupRequested { depth, local, query, session });
+            return;
+        }
         let same_owner = self.controller.active_bind_id() == Some(id)
             && self.controller.trigger_mode() == mode;
         if !same_owner && self.hold.is_some() {
@@ -909,9 +914,9 @@ impl App {
             self.apply_bind_trigger(step, None);
         }
         let point = if mode == TriggerMode::Toggle && same_owner {
-            self.cursor_now().unwrap_or(PhysPoint { x: 0, y: 0 })
+            point.unwrap_or(PhysPoint { x: 0, y: 0 })
         } else {
-            let Some(point) = self.cursor_now() else {
+            let Some(point) = point else {
                 self.log.diag("lookup: no cursor sample yet - nothing to look up");
                 return;
             };
@@ -1393,7 +1398,7 @@ impl App {
     }
 
     fn begin_capture_hide(&mut self, owner: HideOwner) {
-        self.feed(Event::PopupHover { local: PhysPoint { x: 0, y: 0 }, query: None });
+        self.feed(Event::PopupLookupCancelled);
         if self.hide_owners.is_empty() {
             self.hidden_popup = if self.controller_hidden { None } else { self.popup_snapshot() };
         }
@@ -4007,7 +4012,7 @@ fn search_blocks_event(event: &Event) -> bool {
     matches!(event, Event::Tick { .. } | Event::GestureTick | Event::Scrolled { .. }
         | Event::PointerDown { .. } | Event::PointerMoved { .. } | Event::PointerUp { .. }
         | Event::AddRequested | Event::BackRequested | Event::LookupBindDown { .. }
-        | Event::SelectedTextRequested { .. }
+        | Event::PopupLookupRequested { .. } | Event::SelectedTextRequested { .. }
         | Event::CursorMoved { .. } | Event::DwellElapsed
         | Event::PopupHover { .. } | Event::PopupEntered { .. }
         | Event::PopupHoverAt { .. } | Event::PopupActivated { .. })

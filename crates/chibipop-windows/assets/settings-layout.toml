@@ -73,13 +73,13 @@ help = "When off, the popup stays until you click outside it. That click only cl
 
 [[tabs.sections.entries]]
 id = "popup-sub-popups"
-label = "Look up words inside the popup"
+label = "Hover over popup text to open sub-popups"
 help = "Hover over popup text to open another definition."
 
 [[tabs.sections.entries]]
 id = "nested-profile"
 label = "Nested lookup profile"
-help = "Choose which profile handles words opened from this popup. Use this profile to keep the current settings."
+help = "Choose which profile handles words opened by hovering over popup text or by clicking dictionary links. Lookup shortcuts use their assigned profile instead."
 
 
 [[tabs.sections.entries]]
