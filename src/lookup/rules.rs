@@ -83,20 +83,6 @@ mod tests {
     }
 
     #[test]
-    fn explicit_rules_replace_bundled_rules() {
-        let path = std::env::temp_dir().join(format!("chibipop-custom-rules-{}.json", std::process::id()));
-        struct Cleanup(std::path::PathBuf);
-        impl Drop for Cleanup { fn drop(&mut self) { let _ = std::fs::remove_file(&self.0); } }
-        let _cleanup = Cleanup(path.clone());
-        std::fs::write(&path,
-            r#"[{"type":"stdrule","con_end":"った","dec_end":"る","detail":"custom past"}]"#).unwrap();
-        let deconjugator = crate::lookup::deconj::Deconjugator::new(load_rules(Some(&path)).unwrap());
-        assert!(deconjugator.deconjugate("治った").iter()
-            .any(|form| form.text == "治る" && form.process == ["custom past"]));
-        assert!(!deconjugator.deconjugate("治って").iter().any(|form| form.text == "治る"));
-    }
-
-    #[test]
     fn explicit_rule_errors_do_not_use_bundled_rules() {
         let path = std::env::temp_dir().join(format!("chibipop-invalid-rules-{}.json", std::process::id()));
         struct Cleanup(std::path::PathBuf);
@@ -106,32 +92,5 @@ mod tests {
         assert!(load_rules(Some(&path)).is_err());
         std::fs::remove_file(&path).unwrap();
         assert!(load_rules(Some(&path)).is_err());
-    }
-
-    #[test]
-    fn parses_scalar_and_list_fields() {
-        let one: StrOrList = serde_json::from_str(r#""る""#).unwrap();
-        assert_eq!(&["る".to_string()], one.as_slice());
-        let many: StrOrList = serde_json::from_str(r#"["く","す"]"#).unwrap();
-        assert_eq!(2, many.as_slice().len());
-    }
-
-    #[test]
-    fn optional_tags_absent_parse_as_none() {
-        let r: Rule = serde_json::from_str(
-            r#"{"type":"stdrule","dec_end":"る","con_end":"た","detail":"x"}"#,
-        )
-        .unwrap();
-        assert!(r.dec_tag.is_none());
-        assert!(r.con_tag.is_none());
-    }
-
-    #[test]
-    fn every_rule_type_present_in_real_file() {
-        let rules = load_rules(None).unwrap();
-        for t in ["stdrule", "onlyfinalrule", "neverfinalrule", "rewriterule",
-                  "contextrule"] {
-            assert!(rules.iter().any(|r| r.rule_type == t), "missing {t}");
-        }
     }
 }

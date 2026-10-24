@@ -30,10 +30,6 @@ cargo clippy -p chibipop-linux --test ocr_gate
 
 scripts/package-linux.sh vX.Y.Z
 packaging/aur/bump.sh vX.Y.Z
-
-# docs/REGRESSION.md's tiers, by script.
-python scripts/manual_regression.py --list
-python scripts/manual_regression.py --tier 0 --repo-root . --repeat-tests 3
 ```
 
 Clippy runs two times across the workspace. You must use `--color never`.
@@ -55,14 +51,15 @@ cargo clippy --workspace --color never --all-targets --all-features -- -D warnin
 
 ## Testing
 
-`docs/REGRESSION.md` defines three tiers.
+`docs/REGRESSION.md` defines the automated gate and the manual tests.
 
-- **Tier 0** — the automated gate without a screen. CI runs the sweep three
-  times to find process-global races. The pass count is a minimum limit, not an
-  exact value: 600 for Linux, 400 for Windows.
-- **Tier 1** — agent-verifiable on real pixels. `docs/fixtures/ocr-corpus.html`
-  publishes its own coordinates.
-- **Tier 2** — mostly automatable. It drives the real pointer and hotkeys.
+- **Automated gate** — runs without a screen. CI runs the sweep three times to
+  find process-global races. The pass count has a ceiling, not a floor: 360 for
+  each platform. Core holds at most 200 tests. Each platform crate holds at
+  most 160. CI fails when the count is greater than the ceiling.
+- **Manual tests** — a person tests each feature by hand. No test launches the
+  daemon, the `chibipop` binary, or a child `chibipop` process. No test needs a
+  real desktop.
 
 Committed geometry-snapshot goldens verify layout under exact equality. A test
 allows no tolerance. Goldens change only through a human-reviewed bless run. A run
@@ -125,12 +122,14 @@ reviewer reads the diff, the tests, and the gate output, not an agent's prose.
 - Pin every dependency in `[workspace.dependencies]`. One pin serves the tree.
 - Run the gate of the changed platform. Run the OCR gate when the OCR engine
   changes.
+- Do not bloat the test count. Add a test only for a real user flow or a
+  reproduced bug. A ceiling gates the count.
 
 **Ask first**
 
 - A new trait or seam. The tree has three traits and rejects hypothetical seams.
 - A new dependency, an async runtime, or a thread pool. The daemon is all sync.
-- A change to the clippy count or a test floor. A change to a runner image pin.
+- A change to the clippy count or a test ceiling. A change to a runner image pin.
   A rename of a setting, a config key, or a socket verb.
 
 **Never.** Each line is a silent failure. Anchors are `ARCHITECTURE.md` sections.

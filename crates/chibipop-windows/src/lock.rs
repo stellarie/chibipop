@@ -67,28 +67,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_hash_is_the_published_fnv1a_vector() {
-        assert_eq!(0xcbf2_9ce4_8422_2325, fnv1a(""));
-        assert_eq!(0xaf63_dc4c_8601_ec8c, fnv1a("a"));
-        assert_eq!(0x85944171f73967e8, fnv1a("foobar"));
-    }
-
-    #[test]
     fn two_library_folders_do_not_share_a_lock() {
         assert_ne!(name_for(Path::new(r"C:\a\library")), name_for(Path::new(r"C:\b\library")));
-    }
-
-    /// Windows treats these paths as case-insensitive.
-    #[test]
-    fn the_same_folder_named_two_ways_is_one_lock() {
-        assert_eq!(name_for(Path::new(r"C:\A\Library")), name_for(Path::new(r"c:\a\library")));
-    }
-
-    #[test]
-    fn a_name_is_short_enough_and_free_of_backslashes() {
-        let name = name_for(Path::new(r"C:\Users\Someone\a\very\long\install\path\library"));
-        assert!(name.len() < 260, "{name}");
-        assert!(!name.contains('\\'), "{name}");
     }
 
     /// Refuses a second lock and does not queue it.

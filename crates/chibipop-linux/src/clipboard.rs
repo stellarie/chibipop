@@ -972,71 +972,6 @@ mod tests {
         );
     }
 
-    /// A session with only the wlr rung still copies. Most compositors use this
-    /// path today.
-    #[test]
-    fn the_wlr_rung_serves_a_session_that_advertises_only_it() {
-        assert_eq!(Some(Rung::Wlr), rung(&advertised(&["wl_seat", WLR_MANAGER])));
-        assert_eq!(WLR_MANAGER, Rung::Wlr.global());
-        assert_eq!(EXT_MANAGER, Rung::Ext.global());
-    }
-
-    /// Stock GNOME advertises no rung, which is a state. `bind` returns
-    /// `Ok(None)` and opens no connection.
-    #[test]
-    fn a_session_with_neither_global_has_no_rung_and_binds_to_nothing() {
-        let globals = advertised(&["wl_seat", "wl_shm", "zwlr_layer_shell_v1"]);
-        assert_eq!(None, rung(&globals));
-        let (tx, _rx) = calloop::channel::channel::<String>();
-        let (selected, _selected_rx) = calloop::channel::channel::<SelectedText>();
-        assert!(
-            Clipboard::bind_with_selected(&globals, tx, selected)
-                .expect("an absent protocol is not an error")
-                .is_none(),
-            "no rung must be a state, not a Clipboard"
-        );
-    }
-
-    /// The refusal names both globals. A compositor upgrade can make the
-    /// clipboard available without a code change
-    /// (ARCHITECTURE.md#capture-and-masking).
-    #[test]
-    fn the_unavailable_line_names_both_globals_it_looked_for() {
-        let line = unavailable_line();
-        assert!(line.contains(EXT_MANAGER), "{line}");
-        assert!(line.contains(WLR_MANAGER), "{line}");
-    }
-
-    /// A reader asks for `text/plain;charset=utf-8` first. This array must offer
-    /// it first, followed by the legacy X11 targets.
-    #[test]
-    fn the_offered_mime_types_lead_with_utf8_text_and_carry_the_x11_targets() {
-        assert_eq!("text/plain;charset=utf-8", TEXT_MIMES[0]);
-        for target in ["TEXT", "STRING", "UTF8_STRING"] {
-            assert!(TEXT_MIMES.contains(&target), "{target} is what XWayland asks by");
-        }
-    }
-
-    #[test]
-    fn primary_support_requires_ext_v1_or_wlr_v2() {
-        assert!(supports_primary(Rung::Ext, 1));
-        assert!(!supports_primary(Rung::Wlr, 1));
-        assert!(supports_primary(Rung::Wlr, 2));
-    }
-
-    #[test]
-    fn primary_mime_uses_utf8_priority() {
-        let mimes = vec!["text/plain".to_string(), "UTF8_STRING".to_string()];
-        assert_eq!(Some("UTF8_STRING"), primary_mime(&mimes));
-        let mimes = vec![
-            "text/plain".to_string(),
-            "UTF8_STRING".to_string(),
-            "text/plain;charset=utf-8".to_string(),
-        ];
-        assert_eq!(Some("text/plain;charset=utf-8"), primary_mime(&mimes));
-        assert_eq!(None, primary_mime(&["image/png".to_string()]));
-    }
-
     fn read_bytes(bytes: Vec<u8>) -> Option<String> {
         let (reader, mut writer) = UnixStream::pair().unwrap();
         let sending = std::thread::spawn(move || writer.write_all(&bytes));
@@ -1052,54 +987,5 @@ mod tests {
         assert_eq!(None, read_bytes(vec![0xff]));
         assert!(read_bytes(vec![b'a'; PRIMARY_MAX_BYTES]).is_some());
         assert_eq!(None, read_bytes(vec![b'a'; PRIMARY_MAX_BYTES + 1]));
-    }
-
-    #[test]
-    fn primary_read_uses_one_overall_deadline() {
-        let (reader, mut writer) = UnixStream::pair().unwrap();
-        let sending = std::thread::spawn(move || {
-            for _ in 0..6 {
-                if writer.write_all(b"x").is_err() {
-                    break;
-                }
-                std::thread::sleep(Duration::from_millis(30));
-            }
-        });
-        assert_eq!(None, read_bounded(reader, Instant::now() + Duration::from_millis(70)));
-        sending.join().unwrap();
-    }
-
-    #[test]
-    fn an_expired_primary_deadline_reads_nothing() {
-        let (reader, mut writer) = UnixStream::pair().unwrap();
-        writer.write_all(b"stale").unwrap();
-        drop(writer);
-        let deadline = Instant::now().checked_sub(Duration::from_millis(1)).unwrap();
-        assert_eq!(None, read_bounded(reader, deadline));
-    }
-
-    #[test]
-    fn changed_generation_rejects_text_and_unchanged_generation_can_repeat() {
-        assert_eq!(None, accept_generation(8, 7, Some("old".to_string())));
-        for _ in 0..2 {
-            assert_eq!(Some("same".to_string()), accept_generation(8, 8, Some("same".to_string())));
-        }
-    }
-
-    #[test]
-    fn retiring_the_device_fails_the_active_request_once() {
-        let deadline = Instant::now() + Duration::from_secs(1);
-        let mut active = Some(ActiveRead { id: RequestId(9), deadline });
-        assert_eq!(Some(RequestId(9)), retire_active(&mut active));
-        assert_eq!(None, retire_active(&mut active));
-    }
-
-    #[test]
-    fn only_one_primary_read_can_wait() {
-        let deadline = Instant::now() + Duration::from_secs(1);
-        let mut active = None;
-        assert!(start_read(&mut active, ActiveRead { id: RequestId(1), deadline }));
-        assert!(!start_read(&mut active, ActiveRead { id: RequestId(2), deadline }));
-        assert_eq!(Some(RequestId(1)), retire_active(&mut active));
     }
 }

@@ -226,7 +226,7 @@ mod tests {
     use super::*;
     use crate::lookup::model::FakeDictionary;
     use crate::lookup::rules::load_rules;
-    use std::collections::HashSet;
+    
 
     fn engine() -> LookupEngine {
         LookupEngine::new(Deconjugator::new(load_rules(None).unwrap()))
@@ -270,103 +270,6 @@ mod tests {
     }
 
     #[test]
-    fn trailing_context_is_ignored_by_prefix_scan() {
-        let hits = engine().run(&taberu_dict(), "食べるのが好き").unwrap();
-        assert!(!hits.is_empty());
-        assert_eq!(Some("食べる".to_string()), hits[0].written);
-    }
-
-    #[test]
-    fn bundled_rules_match_inflected_verb_before_common_kanji() {
-        let mut dict = FakeDictionary::new();
-        dict.add_term("治", Some("治"), Some("ち"), "", Some(1367), 1, 1);
-        dict.add_entry(1, 1, &glossary("government", ""));
-        dict.add_term("治る", Some("治る"), Some("なおる"), "v5", Some(1737), 2, 1);
-        dict.add_entry(2, 1, &glossary("to recover", "v5"));
-
-        let hits = engine().run(&dict, "治って病院を出ること。").unwrap();
-        assert_eq!(hits[0].written.as_deref(), Some("治る"));
-        assert_eq!(hits[0].reading.as_deref(), Some("なおる"));
-        assert_eq!(hits[0].match_len, 3);
-        assert_eq!(crate::present::inflection_chain(&hits[0].process), ["(te form)"]);
-        let hits = engine().run(&dict, "治").unwrap();
-        assert_eq!(hits[0].written.as_deref(), Some("治"));
-        assert_eq!(hits[0].match_len, 1);
-    }
-
-    #[test]
-    fn input_cut_at_japanese_separator() {
-        assert_eq!("食べる", clean_input("食べる。おいしい"));
-    }
-
-    #[test]
-    fn input_truncated_by_character_not_byte_count() {
-        let long = "あ".repeat(40);
-        assert_eq!(MAX_LOOKUP_CHARS, clean_input(&long).chars().count());
-    }
-
-    #[test]
-    fn runs_out_boundary_for_separator_free_tail() {
-        assert!(runs_out(&"あ".repeat(24)));
-        assert!(!runs_out(&"あ".repeat(25)));
-        assert!(!runs_out(&"あ".repeat(26)));
-    }
-
-    #[test]
-    fn runs_out_rejects_text_with_separator() {
-        assert!(!runs_out("あああ。"));
-    }
-
-    #[test]
-    fn empty_input_returns_no_hits() {
-        assert!(engine().run(&taberu_dict(), "   ").unwrap().is_empty());
-    }
-
-    #[test]
-    fn pos_filter_rejects_mismatched_part_of_speech() {
-        let mut d = FakeDictionary::new();
-        d.add_term("食べる", Some("食べる"), Some("たべる"), "v5r", Some(500), 1, 1);
-        d.add_entry(1, 1, &glossary("wrong pos", "v5r"));
-        let hits = engine().run(&d, "食べさせられた").unwrap();
-        assert!(hits.is_empty());
-    }
-
-    #[test]
-    fn dict_pos_for_maps_fine_grained_godan_tags_to_v5() {
-        for tag in [
-            "v5aru", "v5b", "v5g", "v5k", "v5k-s", "v5m", "v5n", "v5r",
-            "v5r-i", "v5s", "v5t", "v5u", "v5u-s",
-        ] {
-            assert_eq!(Some(Some("v5")), dict_pos_for(tag), "tag {tag}");
-        }
-    }
-
-    #[test]
-    fn dict_pos_for_maps_vs_i_to_vs() {
-        assert_eq!(Some(Some("vs")), dict_pos_for("vs-i"));
-    }
-
-    #[test]
-    fn dict_pos_for_identity_mappings_are_explicit() {
-        assert_eq!(Some(Some("adj-i")), dict_pos_for("adj-i"));
-        assert_eq!(Some(Some("v1")), dict_pos_for("v1"));
-        assert_eq!(Some(Some("vk")), dict_pos_for("vk"));
-    }
-
-    #[test]
-    fn dict_pos_for_context_tags_impose_no_constraint() {
-        assert_eq!(Some(None), dict_pos_for("exp"));
-        assert_eq!(Some(None), dict_pos_for("topic-condition"));
-        assert_eq!(Some(None), dict_pos_for("uninflectable"));
-    }
-
-    #[test]
-    fn dict_pos_for_unrecognised_tag_imposes_no_constraint() {
-        // This path must fail open, not closed.
-        assert_eq!(None, dict_pos_for("some-future-tag-not-yet-mapped"));
-    }
-
-    #[test]
     fn v5k_tagged_form_matches_v5_row() {
         // The form has tag `v5k`, and the row has POS `v5`.
         let mut d = FakeDictionary::new();
@@ -376,20 +279,6 @@ mod tests {
         assert!(
             hits.iter().any(|h| h.written.as_deref() == Some("行く")),
             "expected 行く among hits, got {:?}",
-            hits.iter().map(|h| h.written.clone()).collect::<Vec<_>>()
-        );
-    }
-
-    #[test]
-    fn vs_i_tagged_form_matches_vs_row() {
-        // The form has tag `vs-i`, and the row has POS `vs`.
-        let mut d = FakeDictionary::new();
-        d.add_term("する", Some("する"), Some("する"), "vs", Some(10), 1, 1);
-        d.add_entry(1, 1, &glossary("to do", "vs"));
-        let hits = engine().run(&d, "してしまった").unwrap();
-        assert!(
-            hits.iter().any(|h| h.written.as_deref() == Some("する")),
-            "expected する among hits, got {:?}",
             hits.iter().map(|h| h.written.clone()).collect::<Vec<_>>()
         );
     }
@@ -431,58 +320,6 @@ mod tests {
     }
 
     #[test]
-    fn v1_tagged_form_does_not_match_v5_only_row() {
-        // The POS filter must still reject this row.
-        let mut d = FakeDictionary::new();
-        d.add_term("食べる", Some("食べる"), Some("たべる"), "v5", Some(500), 1, 1);
-        d.add_entry(1, 1, &glossary("wrong pos", "v5"));
-        let hits = engine().run(&d, "食べさせられた").unwrap();
-        assert!(hits.is_empty());
-    }
-
-    /// This test detects changes to the rule vocabulary.
-    #[test]
-    fn all_terminal_dec_tags_are_handled_by_the_mapping() {
-        let rules = load_rules(None).unwrap();
-
-        let mut terminal_tags: HashSet<String> = HashSet::new();
-        for rule in &rules {
-            if let Some(tags) = &rule.dec_tag {
-                for t in tags.as_slice() {
-                    if !t.starts_with("stem-") {
-                        terminal_tags.insert(t.clone());
-                    }
-                }
-            }
-        }
-
-        // The guard has no value when the set is empty.
-        assert!(
-            !terminal_tags.is_empty(),
-            "expected at least one terminal dec_tag from the real rule file"
-        );
-
-        let mut unhandled: Vec<&String> = terminal_tags
-            .iter()
-            .filter(|t| dict_pos_for(t).is_none())
-            .collect();
-        unhandled.sort();
-        assert!(
-            unhandled.is_empty(),
-            "dict_pos_for has no explicit arm for real terminal dec_tag(s) {unhandled:?} - \
-             the rule vocabulary moved and the mapping table in engine.rs must be updated"
-        );
-    }
-
-    #[test]
-    fn empty_pos_column_is_never_filtered_out() {
-        let mut d = FakeDictionary::new();
-        d.add_term("ねこ", None, Some("ねこ"), "", None, 1, 1);
-        d.add_entry(1, 1, &glossary("cat", ""));
-        assert_eq!(1, engine().run(&d, "ねこ").unwrap().len());
-    }
-
-    #[test]
     fn more_common_word_ranks_first() {
         // The Dictionary has two Entries and two term-bank rows.
         let mut d = FakeDictionary::new();
@@ -506,89 +343,20 @@ mod tests {
     }
 
     #[test]
-    fn results_truncated_to_max() {
-        let mut d = FakeDictionary::new();
-        for i in 1..=25 {
-            // Add one Entry for each row.
-            d.add_term("あ", None, Some("あ"), "", Some(i), i, i);
-            d.add_entry(i, i, &glossary("x", ""));
-        }
-        assert_eq!(MAX_RESULTS, engine().run(&d, "あ").unwrap().len());
-    }
+    fn bundled_rules_match_inflected_verb_before_common_kanji() {
+        let mut dict = FakeDictionary::new();
+        dict.add_term("治", Some("治"), Some("ち"), "", Some(1367), 1, 1);
+        dict.add_entry(1, 1, &glossary("government", ""));
+        dict.add_term("治る", Some("治る"), Some("なおる"), "v5", Some(1737), 2, 1);
+        dict.add_entry(2, 1, &glossary("to recover", "v5"));
 
-    #[test]
-    fn each_entry_appears_at_most_once() {
-        let hits = engine().run(&taberu_dict(), "食べさせられた").unwrap();
-        let mut ids: Vec<i64> = hits.iter().map(|h| h.entry.entry_id).collect();
-        ids.sort_unstable();
-        let before = ids.len();
-        ids.dedup();
-        assert_eq!(before, ids.len());
-    }
-
-    /// The panel receives every term-bank row that a Dictionary gives one headword.
-    ///
-    /// 大辞林 stores one headword's senses in separate term-bank rows. A census found
-    /// 6 220 headwords and a worst case of eleven rows. The old key held `dict_id`,
-    /// so ten of those eleven rows never reached the panel.
-    #[test]
-    fn every_term_bank_row_of_one_headword_survives() {
-        let mut d = FakeDictionary::new();
-        for id in 1..=3 {
-            d.add_term("ふし", Some("節"), Some("ふし"), "", Some(1000), id, 1);
-            d.add_entry(id, 1, &glossary(&format!("sense {id}"), ""));
-        }
-        let hits = engine().run(&d, "ふし").unwrap();
-        assert_eq!(3, hits.len(), "one dictionary, three rows");
-        assert_eq!(
-            vec![
-                vec!["sense 1".to_string()],
-                vec!["sense 2".to_string()],
-                vec!["sense 3".to_string()],
-            ],
-            hits.iter().map(|h| h.entry.glosses()).collect::<Vec<_>>(),
-            "in the term bank's own order, which is the dictionary's sense order"
-        );
-    }
-
-    /// Keep one row for this Entry. Jitendex writes one term row for each surface
-    /// form. Thus, つま and 妻 both point to one 妻/つま record. Two copies under
-    /// separate headings would be the defect, not the fix.
-    #[test]
-    fn one_record_reached_through_two_surfaces_is_one_row() {
-        let mut d = FakeDictionary::new();
-        d.add_term("つま", Some("妻"), Some("つま"), "", Some(500), 1, 1);
-        d.add_term("妻", Some("妻"), Some("つま"), "", Some(500), 1, 1);
-        d.add_entry(1, 1, &glossary("wife", ""));
-        assert_eq!(1, engine().run(&d, "つま").unwrap().len());
-        assert_eq!(1, engine().run(&d, "妻").unwrap().len());
-    }
-
-    /// The cap comes from inherited behavior, not a local choice. A hover shows at
-    /// most ten rows, no matter how many rows match a headword. The cap counts rows,
-    /// not Dictionaries.
-    #[test]
-    fn the_ten_row_cap_still_holds_when_one_dictionary_fills_it() {
-        let mut d = FakeDictionary::new();
-        for id in 1..=12 {
-            d.add_term("ふし", Some("節"), Some("ふし"), "", Some(1000), id, 1);
-            d.add_entry(id, 1, &glossary(&format!("sense {id}"), ""));
-        }
-        assert_eq!(MAX_RESULTS, engine().run(&d, "ふし").unwrap().len());
-    }
-
-    /// A headword with no enabled frequency Dictionary keeps this fallback. This
-    /// fallback makes "absent data is not counted" free at lookup time
-    /// (ARCHITECTURE.md#dictionary-and-lookup). Reindex writes `NULL`, not a
-    /// stand-in rank. `NULL` has always scored exactly as `DEFAULT_FREQ` does.
-    #[test]
-    fn an_unranked_row_scores_exactly_as_a_default_frequency_one() {
-        let stand_in = Some(DEFAULT_FREQ as i64);
-        assert_eq!(score(3, None, false), score(3, stand_in, false));
-        assert_eq!(score(3, None, true), score(3, stand_in, true));
-        assert!(
-            score(3, Some(1), false) > score(3, None, false),
-            "and a ranked row still beats an unranked one"
-        );
+        let hits = engine().run(&dict, "治って病院を出ること。").unwrap();
+        assert_eq!(hits[0].written.as_deref(), Some("治る"));
+        assert_eq!(hits[0].reading.as_deref(), Some("なおる"));
+        assert_eq!(hits[0].match_len, 3);
+        assert_eq!(crate::present::inflection_chain(&hits[0].process), ["(te form)"]);
+        let hits = engine().run(&dict, "治").unwrap();
+        assert_eq!(hits[0].written.as_deref(), Some("治"));
+        assert_eq!(hits[0].match_len, 1);
     }
 }

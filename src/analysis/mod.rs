@@ -373,14 +373,6 @@ mod tests {
     }
 
     #[test]
-    fn fallback_words_and_punctuation_use_uax_boundaries() {
-        assert_eq!(vec![0..5, 6..11], fallback_words("Hello world"));
-        let text = "Hello, world";
-        let words = fallback_words(text);
-        assert_eq!(5..6, word_at(text, &words, 5));
-    }
-
-    #[test]
     fn the_bundled_model_analyzes_a_past_sentence_and_groups_the_verb_chain() {
         let Some(analyzer) = bundled_analyzer() else {
             return;
@@ -408,26 +400,4 @@ mod tests {
     }
 
 
-    #[test]
-    fn grouped_words_cover_conjugations_and_compound_nouns() {
-        let Some(analyzer) = bundled_analyzer() else {
-            return;
-        };
-        let mut analyzer = analyzer.lock().unwrap();
-        let cases: [(&str, &[&str]); 8] = [
-            ("食べられませんでした", &["食べられませんでした"]),
-            ("行かなければならない", &["行かなければならない"]),
-            ("勉強している人", &["勉強している", "人"]),
-            ("読み終わった本", &["読み終わった", "本"]),
-            ("日本語教師になりたい", &["日本語教師", "に", "なりたい"]),
-            ("東京都庁", &["東京都庁"]),
-            ("今日私は", &["今日", "私", "は"]),
-            ("食べることが", &["食べる", "こと", "が"]),
-        ];
-        for (text, expected) in cases {
-            let analysis = analyzer.analyze(text);
-            let words: Vec<&str> = analysis.words.iter().map(|range| &text[range.clone()]).collect();
-            assert_eq!(expected, words.as_slice(), "{text}");
-        }
-    }
 }

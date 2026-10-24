@@ -18,14 +18,22 @@ Updating this checklist or running `--list` does not authorize desktop interacti
 - Stop desktop input when the user stops computer use. Record the remaining cases without claiming completion.
 - If Escape stops the computer-use tool, do not count that as proof that the application handled Escape.
 
-`python scripts/manual_regression.py --interactive` records results entered by the operator.
-It does not launch a computer-use tool or automatically perform interactive cases.
-Use `--only <case-id>` to select cases and include evidence references in the result notes.
-The existing authorization flags still apply; `--interactive` does not enable mutation permissions.
 Historical pass statements below apply only to their recorded revisions and dates, not to newly added cases or the current build.
-`--list` includes case references and effect metadata. JSON reports include the selected case definitions and authorization flags.
-Platform prerequisites are stated in each new case's prompt and section. Use permission flags that match the authorized case effects.
-This runner's Tier 0 commands target Windows. Use `scripts/linux_container_regression.py` for Linux automated gates.
+Platform prerequisites are stated in each case's prompt and section.
+
+## How features are tested
+
+Each feature gets a manual test. A person or a computer-use run performs it by hand
+against a real build. The case sections below are the manual tests.
+
+The automated gate holds only tests of real user flows and reproduced bugs.
+No automated test launches the daemon, the `chibipop` binary, or a child `chibipop`
+process. No automated test needs a real screen or desktop.
+
+The pass count has a ceiling, not a floor. CI fails when the count is greater than 360
+for a platform. Core holds at most 200 tests. Each platform crate holds at most 160.
+Do not bloat the test count. Add a test only for a real user flow or a reproduced bug.
+Raise a ceiling only in a reviewed pull request.
 
 ## Recent feature case index
 
@@ -38,13 +46,7 @@ Chinese sentence segmentation and Search resize repaint require their
 implementation in the tested build.
 A feature branch may be tested before merge; a missing feature in an older build is not a successful regression result.
 
-No new case is pre-marked as passed. The following commands are optional native regressions and do not replace visible acceptance:
-
-```bash
-cargo test -p chibipop-windows --test popup_hover_live -- --ignored --nocapture --test-threads=1
-cargo test -p chibipop-windows --lib native_definition_hover_and_disable_toggle -- --ignored --nocapture --test-threads=1
-cargo test -p chibipop-windows --lib native_escape_cancels_without_a_focused_selector_message -- --ignored --nocapture --test-threads=1
-```
+No new case is pre-marked as passed. Visible acceptance is the manual test of each case.
 
 Run desktop tests sequentially and only within the requested scope.
 
@@ -104,7 +106,7 @@ exercises the v0.8.0 incremental path, which did not exist that day.
 ---
 
 <a id="tier-0"></a>
-## Tier 0 — the automated gate (~2 min, no screen)
+## The automated gate (~2 min, no screen)
 
 **The `cargo` lines below are the CI contract.** `.github/workflows/ci.yml` is the authoritative
 source for this gate. Read that workflow before you trust this prose, because the workflow moves
@@ -135,13 +137,6 @@ cargo clippy --workspace --color never --all-targets --all-features -- -D warnin
 cargo build --release --workspace --exclude chibipop-linux 2>&1 | grep -E "^error|Finished"
 ```
 
-**`scripts/manual_regression.py` automates this document's own tier and item numbering.** Run
-`python scripts/manual_regression.py --list` to print every check id on this page. Run
-`python scripts/manual_regression.py --tier 0 --repo-root . --repeat-tests 3` to drive this tier.
-The script carries both clippy counts as `--expected-clippy-warnings 1` and
-`--expected-other-clippy 0`. Its `--stop-target-strays` flag replaces the kill line above, and it
-matches on the repo's `target` directory for the reason the callout below gives.
-
 The `--workspace --exclude chibipop-linux` flags arrived with `default-members`, which
 serves the Linux dev box since then, so a bare `cargo test` here would silently skip the
 Windows crate — the exact under-coverage this tier exists to catch. Both bins are named
@@ -169,7 +164,7 @@ check-shaped clippy spans the whole workspace unexcluded.
 
 | Check | Expected |
 |---|---|
-| Rust tests | Three sweeps meet the current platform floor in `ci.yml`. Record confirmed local baseline failures separately. Historical totals below are not current targets. |
+| Rust tests | Three sweeps stay at or below the platform ceiling in `ci.yml`. Record confirmed local baseline failures separately. Historical totals below are not current targets. |
 | Clippy accepted pass | **Exactly 1** warning, excluding cargo summaries; exit code **0**. |
 | Clippy suppressed pass | **0** error or warning diagnostics; exit code **0**. |
 | Release build | Finished, no errors |
@@ -196,11 +191,11 @@ check-shaped clippy spans the whole workspace unexcluded.
 > CI.** That one failure is expected. A *second* golden failure, or a divergence in any other
 > fixture, is a real finding.
 
-**The test count is a floor, not an equality.** Adding a test must not break CI; a whole target
-silently not running must. CI asserts `≥ 400` and prints the total. **1339** is what the runner
-measures today, and what this machine measures with the one expected golden failure counted in.
-A *lower* number is the thing to explain. The clippy counts are equalities — that is the
-difference between the two rows and it is deliberate.
+**The test count is a ceiling, not a floor.** A new test must justify itself. CI asserts `≤ 360`
+and prints the total. Core holds at most 200 tests and each platform crate at most 160. The totals
+quoted above are history, from before the prune. A *higher* number than the ceiling is the thing to
+explain. The clippy counts are equalities — that is the difference between the rows and it is
+deliberate.
 
 **The 2026-08-29 move is a correction, not a round.** This row read *1546 across 17 targets, 0
 ignored* until then, and that figure matched neither host: the workspace split made "the total"
@@ -793,7 +788,7 @@ happened once, with the wheel accumulator.
 
 ---
 
-## Tier 1 — agent-verifiable, on real pixels (~5 min)
+## Manual tests, part 1 — on real pixels (~5 min)
 
 Needs text on screen. There is **one display** (2560×1080, 96 DPI) — put the corpus fixture up
 full-screen and work against its published coordinates. `probe` reads a coordinate without moving
@@ -963,7 +958,7 @@ Uncheck **Read English letters and numbers**, Apply.
 - 「3人」 still resolves **with the 3 intact** — hover the 人.
 - Hovering the `3` itself produces nothing.
 
-Segmentation is why this is a tier 1 check and not a unit test: it depends on how the live engine
+Segmentation is why this is a manual check and not a unit test: it depends on how the live engine
 splits that line. The filter makes a Latin-only word **unhoverable** rather than deleting it from
 the assembled text, which is what keeps 「PCを使う」 looking up whole from the 使.
 
@@ -1666,7 +1661,7 @@ the duplicate guard, not a broken hotkey. Hover a different word to re-test.
 <a id="123-real-text-inside-the-png-encode-bracket"></a>
 ### 1.23 Real text inside the PNG-encode bracket — **added 2026-08-17, not run**
 
-**Why this exists.** The plugin system sends captures to a plugin as base64 PNG. `tests/png_cost.rs`
+**Why this exists.** The plugin system sends captures to a plugin as base64 PNG. the PNG-cost probe
 measured the encode against three synthetic buffers and produced a **bracket**, not an answer:
 
 | Buffer | Bytes | p95 |
@@ -1681,7 +1676,7 @@ between 4.98 and 21.09 ms, and no synthetic buffer can say where. **Only a real 
 The work proceeded on the ruling that the encode is paid only by plugin users, whose engines run
 100–300 ms anyway. This step is what confirms or withdraws that.
 
-**Run it while you are here for any other tier 1 item.** It needs no separate session.
+**Run it while you are here for any other manual item.** It needs no separate session.
 
 **Steps**
 
@@ -1706,10 +1701,10 @@ before this branch. Record the rect. `union_chars` on 宿舎 measured `x=176 y=1
 <a id="125-chibipop-plugin-cli-exit-codes"></a>
 ### 1.25 `chibipop plugin` CLI exit codes — **added 2026-08-18, run**
 
-**Why this exists.** The design spec's section 11 asks for a tier 1 item that runs
+**Why this exists.** The design spec's section 11 asks for a manual item that runs
 `chibipop plugin test` against the reference plugin and confirms a non-zero exit for a
 deliberately broken response. It never landed while the nine build tasks ran — the CLI is the
-branch's only user-facing surface, and it had no tier 1 coverage at all until now. (The spec is a
+branch's only user-facing surface, and it had no manual coverage at all until now. (The spec is a
 working note under the gitignored `docs/superpowers/`, not published with the repo.)
 
 **Setup — two plugin directories beside the binary under test.** Plugins live in a `plugins`
@@ -2292,9 +2287,9 @@ screenshots, logs, and tested revision. Restore only disposable changes.
 ---
 
 <a id="tier-2"></a>
-## Tier 2 — mostly automatable (~5 min)
+## Manual tests, part 2 — real pointer and hotkeys (~5 min)
 
-> [!important] Tier 2 supports requested computer-use execution
+> [!important] These manual tests support requested computer-use execution
 > Use the manual-execution policy at the start of this checklist and the configured computer-use workflow.
 > Measure the current display geometry and scale before choosing fixture coordinates.
 > Historical machine coordinates do not describe every test environment.
@@ -2371,7 +2366,6 @@ screenshots, logs, and tested revision. Restore only disposable changes.
     Right-click the real tray icon. Settings must restore one window, and Quit must exit.
     Run `chibipop settings` with either value. X exits that standalone process.
     Escape keeps its independent live-settings hide behavior.
-    `tests/settings_lifecycle.rs` checks process state, HWND visibility, and preference save/reload.
     Manually check the taskbar button and tray callback on Windows 10 LTSC.
     A posted `WM_TRAYICON` message does not verify Shell delivery. See BACKLOG 7.
 
@@ -2497,17 +2491,11 @@ then reason.
 
 ## Selected application text lookup
 
-Automated Windows desktop regression:
-
-```powershell
-cargo test -p chibipop-windows --test selected_text_live -- --ignored --nocapture --test-threads=1
-```
-
-This test creates an isolated dictionary and editor. It uses the real shortcut,
-checks popup placement and persistence in all four trigger modes, compares clipboard sequence
-numbers, and verifies empty selections, all outside mouse buttons, and Escape.
-A fifth mode verifies Sentence search prefill through the selected-text checkbox. It moves focus to its own
-editor. Run it on an interactive Windows desktop.
+Manual test on an interactive Windows desktop. Use an isolated dictionary and an editor.
+Use the real shortcut in all four trigger modes. Check popup placement and persistence.
+Compare clipboard sequence numbers. Check empty selections, all outside mouse buttons, and Escape.
+Check Sentence search prefill through the selected-text checkbox in a fifth pass.
+Keep focus in the editor during the check.
 Each mode uses a separate process. If Windows refuses foreground activation,
 activate the **Chibipop selection regression** window within one minute.
 

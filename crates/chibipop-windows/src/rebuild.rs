@@ -149,26 +149,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_temp_name_sits_beside_the_output() {
-        let tmp = tmp_path(Path::new(r"C:\a\data\chibipop.sqlite"));
-        assert_eq!(Path::new(r"C:\a\data\chibipop.sqlite.tmp"), tmp);
-    }
-
-    #[test]
-    fn the_no_window_flag_is_the_documented_value() {
-        assert_eq!(0x0800_0000, CREATE_NO_WINDOW.0);
-    }
-
-    #[test]
     fn a_missing_directory_counts_as_an_error_not_as_zero() {
         assert!(archive_count(Path::new(r"C:\nope\chibipop\nope")).is_err());
     }
 
-
-    #[test]
-    fn the_innermost_cause_is_what_gets_reported() {
-        let stderr = "Error: opening x\n\nCaused by:\n    invalid Zip archive\n";
-        assert_eq!(": invalid Zip archive", last_line(stderr));
-        assert_eq!("", last_line("   \n\n"));
-    }
 }

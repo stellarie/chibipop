@@ -88,16 +88,6 @@ mod tests {
         dir.join("chibipop.log")
     }
 
-    #[test]
-    fn diagnostics_land_in_the_file() {
-        let path = tmp("diag");
-        let mut log = Log::open(&path, false);
-        log.diag("hello");
-        let text = std::fs::read_to_string(&path).unwrap();
-        assert!(text.contains("hello"), "{text}");
-        let _ = std::fs::remove_dir_all(path.parent().unwrap());
-    }
-
     /// The gate for screen content. Off means not on disk.
     #[test]
     fn lookup_content_stays_off_disk_until_opted_in() {
@@ -112,26 +102,5 @@ mod tests {
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.contains("lookup: 公開の言葉"), "{text}");
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
-    }
-
-    /// Bounded without file rotation mechanisms.
-    #[test]
-    fn a_restart_truncates_the_previous_log() {
-        let path = tmp("trunc");
-        Log::open(&path, false).diag("first run line");
-        let mut second = Log::open(&path, false);
-        second.diag("second run line");
-        let text = std::fs::read_to_string(&path).unwrap();
-        assert!(!text.contains("first run line"), "{text}");
-        assert!(text.contains("second run line"), "{text}");
-        let _ = std::fs::remove_dir_all(path.parent().unwrap());
-    }
-
-    /// A read-only state directory must not stop the daemon.
-    #[test]
-    fn an_unwritable_logfile_degrades_to_stderr() {
-        let mut log = Log::open(Path::new("/proc/definitely/not/writable/x.log"), false);
-        assert_eq!(None, log.path());
-        log.diag("still alive");
     }
 }

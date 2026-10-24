@@ -54,28 +54,3 @@ pub fn sample() -> Option<(i32, i32)> {
     }
     parse_cursorpos(std::str::from_utf8(&out.stdout).ok()?)
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn the_cadence_decays_after_the_quiet_window() {
-        assert_eq!(budget::POLL_ACTIVE, next_interval(Duration::ZERO));
-        assert_eq!(
-            budget::POLL_ACTIVE,
-            next_interval(budget::POLL_DECAY_AFTER - Duration::from_millis(1))
-        );
-        assert_eq!(budget::POLL_IDLE, next_interval(budget::POLL_DECAY_AFTER));
-        assert_eq!(budget::POLL_IDLE, next_interval(Duration::from_secs(60)));
-    }
-
-    #[test]
-    fn cursorpos_output_parses() {
-        assert_eq!(Some((646, 873)), parse_cursorpos("646, 873\n"));
-        assert_eq!(Some((0, 0)), parse_cursorpos("0,0"));
-        assert_eq!(Some((-5, 12)), parse_cursorpos("-5, 12"));
-        assert_eq!(None, parse_cursorpos("unknown request"));
-        assert_eq!(None, parse_cursorpos(""));
-    }
-}

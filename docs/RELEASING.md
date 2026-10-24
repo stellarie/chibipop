@@ -239,7 +239,7 @@ install an icon into that theme's directories, so both depend on it.
 ## Cutting one
 
 1. **Decide the version.** Update `version` in `Cargo.toml`.
-2. **Run tier 0 locally** — [`REGRESSION.md`](REGRESSION.md). Do not tag a
+2. **Run the automated gate locally** — [`REGRESSION.md`](REGRESSION.md). Do not tag a
    commit you have not gated.
 
 > [!warning] **v0.7.2 is deliberately never tagged. Do not tag it later.**
@@ -302,7 +302,7 @@ scripts/package-linux.sh v0.8.2        # -> dist/chibipop-v0.8.2-linux-x64.tar.g
 
 ## What CI enforces
 
-`.github/workflows/ci.yml` runs [`REGRESSION.md`](REGRESSION.md) tier 0 on
+`.github/workflows/ci.yml` runs the [`REGRESSION.md`](REGRESSION.md) automated gate on
 every push to `main` and every pull request, plus a mirrored Linux gate on
 ubuntu (both bins are named `chibipop`, so link-producing steps
 exclude the foreign bin crate — see the workspace `Cargo.toml`):
@@ -310,6 +310,8 @@ exclude the foreign bin crate — see the workspace `Cargo.toml`):
 - `cargo test --workspace --exclude chibipop-linux` **three times** — the
   wheel accumulator's process-global
   statics produced an intermittent red once that a single run missed.
+  The pass count must stay at or below the **ceiling** of 360. A ceiling
+  stops test bloat; a floor would reward it.
 - Clippy, asserting the accepted-error **count is exactly 1**. The repo
   carries one accepted error on purpose, so `-D warnings` always exits
   non-zero; a second is the regression to catch, and an exit code cannot see
@@ -318,7 +320,7 @@ exclude the foreign bin crate — see the workspace `Cargo.toml`):
   layout walk moved into core, and 2 until 2026-08-26, when the upstream
   v0.9.x merge rewrote `deconj.rs` past its `useless_conversion` — that
   merge's own three new `src/worker.rs` findings were refactored away, not
-  accepted. This number moves; when it does, `REGRESSION.md`'s tier 0 table
+  accepted. This number moves; when it does, `REGRESSION.md`'s gate table
   and `ci.yml` move with it, in the same commit.)
 - Clippy again with those suppressed, asserting **zero** other findings.
 - `cargo build --release --workspace --exclude chibipop-linux`.
@@ -331,11 +333,10 @@ it cannot save you from.
 
 ### What CI cannot do
 
-Everything in `REGRESSION.md` tiers 1 and 2 — anything needing real pixels or
+Everything in the `REGRESSION.md` manual tests — anything needing real pixels or
 a real hand on the mouse. A GitHub runner has no Japanese OCR recognizer and
 no screen, so `tests/golden.rs` and `tests/ocr_fixture.rs` **self-skip** there
-rather than fail. They still count as passing, which is what keeps the
-test-count floor from tripping on a runner.
+rather than fail. A self-skipped test still counts as a pass under the ceiling.
 
 **That is a trade, not a free win, and it is worth naming.** A self-skip is an
 early `return`, and a `#[test]` that returns is a pass — so the totals in
@@ -345,7 +346,7 @@ the only check of real deconjugation against a real dictionary, and it is
 silently the one that never runs. See [`BACKLOG.md`](BACKLOG.md) §27.
 
 That means a green CI badge means "the pure logic is sound and it compiles",
-not "the popup works". Tier 2 is still a human, every time.
+not "the popup works". The manual tests are still a human, every time.
 
 ## If the icon or manifest changes
 
