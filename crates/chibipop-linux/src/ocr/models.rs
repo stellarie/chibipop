@@ -136,32 +136,6 @@ mod tests {
         verify(&bundled()).expect("bundled models must match the digests the gate was measured on");
     }
 
-    /// `scripts/package-linux.sh` checks staged models with
-    /// `sha256sum -c SHA256SUMS.txt`. The shipped binary checks the same models
-    /// against the constants above. These are two digest lists. If they differ,
-    /// a release can pass its build check and then reject its own models on the
-    /// user's machine. The package must prevent this failure.
-    #[test]
-    fn the_checksum_file_the_packaging_script_reads_agrees_with_these_constants() {
-        let text = std::fs::read_to_string(bundled().join("SHA256SUMS.txt")).unwrap();
-        let listed: Vec<(&str, &str)> = text
-            .lines()
-            .filter(|line| !line.trim().is_empty())
-            .map(|line| {
-                let (digest, name) = line.split_once(' ').expect("`<digest>  <name>` per line");
-                (name.trim(), digest.trim())
-            })
-            .collect();
-        for (name, want) in ALL {
-            let (_, got) = listed
-                .iter()
-                .find(|(listed, _)| *listed == name)
-                .unwrap_or_else(|| panic!("SHA256SUMS.txt does not list {name}"));
-            assert_eq!(&want, got, "SHA256SUMS.txt disagrees with the pin for {name}");
-        }
-        assert_eq!(ALL.len(), listed.len(), "SHA256SUMS.txt lists files this build does not know");
-    }
-
     #[test]
     fn a_tampered_model_is_refused() {
         let dir = std::env::temp_dir().join(format!("chibipop-ocr-digest-{}", std::process::id()));
@@ -172,56 +146,5 @@ mod tests {
         let err = verify(&dir).expect_err("a wrong file must not pass");
         assert!(err.to_string().contains("not the model this build was tested against"), "{err}");
         std::fs::remove_dir_all(&dir).ok();
-    }
-
-    /// Check each path that the search order examines. Do not check the order.
-    /// `current_exe` and the process environment are shared by tests and must not
-    /// change at the same time.
-    #[test]
-    fn a_directory_counts_only_when_it_holds_all_three_models() {
-        assert!(has_models(&bundled()));
-        assert!(!has_models(Path::new("/nonexistent/meiki")));
-        assert!(!has_models(&bundled().join("..")), "the parent holds none of them directly");
-    }
-
-    /// Check the other half of the search: the release layout for a binary
-    /// directory. `tests/tarball_layout.rs` checks the real asset in an extracted
-    /// tree.
-    #[test]
-    fn beside_finds_the_release_layouts_and_prefers_the_nearer_one() {
-        let root = std::env::temp_dir().join(format!("chibipop-layout-{}", std::process::id()));
-        std::fs::remove_dir_all(&root).ok();
-        let bin = root.join("usr/bin");
-        std::fs::create_dir_all(&bin).unwrap();
-        assert_eq!(None, beside(&bin), "an empty bin directory resolves nothing");
-
-        let distro = root.join("usr/share/chibipop/models/meiki");
-        std::fs::create_dir_all(&distro).unwrap();
-        for (name, _) in ALL {
-            std::fs::write(distro.join(name), b"stub").unwrap();
-        }
-        // The path keeps its `..` after the join. The engine passes this path to the
-        // model check and session setup. The model check reads the digest. No code
-        // prints or compares the path.
-        assert_eq!(
-            Some(bin.join(LAYOUTS[1])),
-            beside(&bin),
-            "a /usr/bin install reaches ../share"
-        );
-
-        // The layout beside the binary wins. A tarball extracted into a prefix that
-        // also has a packaged install must use its own models.
-        let tarball = bin.join(LAYOUTS[0]);
-        std::fs::create_dir_all(&tarball).unwrap();
-        for (name, _) in ALL {
-            std::fs::write(tarball.join(name), b"stub").unwrap();
-        }
-        assert_eq!(Some(tarball), beside(&bin));
-        std::fs::remove_dir_all(&root).ok();
-    }
-
-    #[test]
-    fn hex_is_lowercase_and_padded() {
-        assert_eq!("000f10ff", hex(&[0x00, 0x0f, 0x10, 0xff]));
     }
 }

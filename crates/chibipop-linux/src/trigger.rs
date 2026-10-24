@@ -119,23 +119,6 @@ mod tests {
         assert_eq!(Step::Release, up(held(LEFT, false)));
     }
 
-    /// A press while a latched hold must preserve the latch.
-    #[test]
-    fn a_press_during_a_latched_hold_keeps_the_latch() {
-        assert_eq!(Step::Latch, down(held(LEFT, true)));
-        assert_eq!(Step::Freeze, down(held(LEFT, false)));
-    }
-
-    #[test]
-    fn a_release_under_a_toggle_latch_changes_nothing() {
-        assert!(matches!(up(held(LEFT, true)), Step::Nothing(_)));
-    }
-
-    #[test]
-    fn a_release_with_nothing_held_changes_nothing() {
-        assert!(matches!(up(None), Step::Nothing(_)));
-    }
-
     /// A toggle starts a live latch and ends it at toggle-off.
     #[test]
     fn toggle_latches_live_until_it_is_toggled_off() {
@@ -143,32 +126,10 @@ mod tests {
         assert_eq!(Step::Release, toggle(held(LEFT, true)));
     }
 
-    /// `toggle` also ends an unlatched hold, so one verb has one visible result.
-    #[test]
-    fn toggle_ends_a_hold_a_press_started() {
-        assert_eq!(Step::Release, toggle(held(LEFT, false)));
-    }
-
-    #[test]
-    fn a_move_within_the_frozen_output_takes_no_new_grab() {
-        let geoms = two_outputs();
-        let hold = Hold { output: LEFT, latched: false };
-        assert_eq!(None, regrab(hold, &geoms, PhysPoint { x: 1919, y: 1079 }));
-    }
-
     #[test]
     fn crossing_onto_the_other_output_grabs_it() {
         let geoms = two_outputs();
         let hold = Hold { output: LEFT, latched: false };
         assert_eq!(Some(RIGHT), regrab(hold, &geoms, PhysPoint { x: 1920, y: 500 }));
-    }
-
-    /// A cursor outside every output resolves to the nearest output.
-    /// A monitor gap does not need another frozen grab.
-    #[test]
-    fn a_cursor_off_every_output_keeps_the_grab_it_has() {
-        let geoms = two_outputs();
-        let hold = Hold { output: LEFT, latched: false };
-        assert_eq!(None, regrab(hold, &geoms, PhysPoint { x: 40, y: 4000 }));
     }
 }

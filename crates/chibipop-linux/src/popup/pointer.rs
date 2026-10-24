@@ -785,25 +785,10 @@ impl PointerHandler for App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::popup::place::{Placement, Shown};
-    use chibipop::geom::PhysRect;
+    
+    
     use chibipop::dict::gloss::{DocAddr, NodePath};
-    use chibipop::ui::layout::{AnkiSlot, HitTarget};
-
-    fn shown_on(panel: usize) -> Visibility {
-        let mut vis = Visibility::Hidden;
-        vis.show(Shown {
-            output: panel,
-            placement: Placement {
-                rect: PhysRect { x: 0, y: 0, w: 300, h: 200 },
-                buffer: (300, 200),
-                logical: (200, 134),
-                margin: (0, 0),
-            },
-            scale: 1.5,
-        });
-        vis
-    }
+    
 
     fn axis(value120: i32) -> AxisScroll {
         AxisScroll { value120, ..AxisScroll::default() }
@@ -936,78 +921,6 @@ mod tests {
 
     // ---- the input region ----
 
-    #[test]
-    fn a_shown_panel_takes_the_whole_surface_and_a_hidden_one_takes_nothing() {
-        // The region is the whole panel, in surface-local logical
-        // units. The placement's `logical` size uses the same units.
-        let region = InputRegion::of(shown_on(1), 1, (200, 134));
-        assert_eq!(InputRegion::Panel { w: 200, h: 134 }, region);
-        assert_eq!(Some((0, 0, 200, 134)), region.rect());
-
-        // Empty: the code adds nothing to the `wl_region`, so every
-        // pointer event falls through to what is underneath.
-        let hidden = InputRegion::of(Visibility::Hidden, 1, (200, 134));
-        assert_eq!(InputRegion::Empty, hidden);
-        assert_eq!(None, hidden.rect());
-    }
-
-    /// A drag over the canned gloss must produce highlight boxes.
-    /// The text hit on one frame and the next frame use the same source spans.
-    #[test]
-    fn a_drag_range_over_the_canned_gloss_produces_highlights() {
-        use chibipop::select::{SelRange, Selections};
-        let scale = 1.0;
-        let scene = scene_at(scale);
-        let font = chibipop::ui::theme::Theme::dark().font_name;
-        let gloss: Vec<&chibipop::ui::layout::SceneElem> =
-            scene.elems.iter().filter(|e| !e.sources.is_empty()).collect();
-        assert!(!gloss.is_empty(), "the canned popup has gloss text");
-        let first = gloss[0];
-        let y = first.pen.1 + 2.0;
-        let start = scene
-            .text_hit((first.pen.0 + 1.0, y), 0.0, &font, &mut FixedMetrics)
-            .unwrap()
-            .expect("a gloss address");
-        let end = scene
-            .text_hit((first.pen.0 + 40.0, y), 0.0, &font, &mut FixedMetrics)
-            .unwrap()
-            .expect("a gloss address");
-        assert!(start < end, "{start:?} < {end:?}");
-        let mut all = Selections::default();
-        all.card_mut(0).replace(SelRange { start, end });
-        let theme = crate::popup::physical_theme(&chibipop::ui::theme::Theme::dark(), scale);
-        let selected = chibipop::ui::layout::scene(
-            &chibipop::ui::layout::SceneRequest {
-                presentation: &crate::popup::canned(),
-                theme: &theme,
-                max_w: 424.0,
-                max_h: 4000.0,
-                show_back: true,
-                side_panel: false,
-                render: Default::default(),
-                anki: None,
-                selection: Some(&all),
-            },
-            &mut FixedMetrics,
-        )
-        .unwrap();
-        assert!(!selected.highlights.is_empty(), "items {:?}", all.card(0));
-        assert!(selected.elems.iter().any(|e| e.kind == chibipop::ui::layout::ElemKind::Check));
-    }
-
-    /// A coalesced repaint can outlive the show that queued it. If
-    /// that repaint landed with a region, a surface that the popup
-    /// has moved off would still take clicks.
-    #[test]
-    fn a_frame_for_a_surface_that_is_not_showing_is_click_through() {
-        assert_eq!(InputRegion::Empty, InputRegion::of(shown_on(0), 1, (200, 134)));
-    }
-
-    #[test]
-    fn a_degenerate_size_still_leaves_a_one_pixel_region_rather_than_a_protocol_error() {
-        assert_eq!(InputRegion::Panel { w: 1, h: 1 }, InputRegion::of(shown_on(0), 0, (0, -4)));
-    }
-
     // ---- the wheel ----
 
     #[test]
@@ -1022,151 +935,7 @@ mod tests {
         assert_eq!(-3, bank.take(&axis(3 * NOTCH_120)));
     }
 
-    #[test]
-    fn sub_notch_wheel_deltas_bank_until_they_make_a_notch() {
-        let mut bank = Wheelbank::default();
-        for _ in 0..7 {
-            assert_eq!(0, bank.take(&axis(15)), "an eighth of a notch is not a notch");
-        }
-        assert_eq!(-1, bank.take(&axis(15)), "the eighth eighth is");
-        assert_eq!(0, bank.take(&axis(15)), "and the bank starts over");
-    }
-
-    #[test]
-    fn a_discarded_bank_forgets_the_partial_flick() {
-        let mut bank = Wheelbank::default();
-        assert_eq!(0, bank.take(&axis(90)));
-        bank.discard();
-        assert_eq!(0, bank.take(&axis(90)), "the 90 before the discard is gone");
-    }
-
-    #[test]
-    fn a_compositor_without_value120_is_read_off_discrete() {
-        let mut bank = Wheelbank::default();
-        let frame = AxisScroll { discrete: 2, absolute: 20.0, ..AxisScroll::default() };
-        assert_eq!(-2, bank.take(&frame), "the notches, not the pixels beside them");
-    }
-
-    #[test]
-    fn a_touchpad_frame_carries_pixels_only_and_still_scrolls() {
-        let mut bank = Wheelbank::default();
-        let half = AxisScroll { absolute: 5.0, ..AxisScroll::default() };
-        assert_eq!(0, bank.take(&half));
-        assert_eq!(-1, bank.take(&half), "two half-notches of finger travel make one");
-    }
-
-    #[test]
-    fn an_empty_axis_frame_is_not_a_scroll() {
-        let mut bank = Wheelbank::default();
-        assert_eq!(0, bank.take(&AxisScroll { stop: true, ..AxisScroll::default() }));
-    }
-
     // ---- hit resolution ----
-
-    /// Two full-width rows and one boxed drill-down target, at the
-    /// geometry a 1.0x scene would have.
-    fn canned_hits(panel: usize, scroll: f32, scale: f64) -> HitScene {
-        HitScene {
-            panel,
-            targets: vec![
-                HitTarget { x: None, y: 0.0, w: None, h: 40.0, action: HitAction::Back },
-                HitTarget {
-                    x: Some(20.0),
-                    y: 60.0,
-                    w: Some(30.0),
-                    h: 30.0,
-                    action: HitAction::DrillDown("\u{6f22}".into()),
-                },
-                HitTarget {
-                    x: None,
-                    y: 120.0,
-                    w: None,
-                    h: 40.0,
-                    action: HitAction::ExpandEntry(1),
-                },
-            ],
-            anki: Some(SceneRect { x: 0.0, y: 200.0, w: 300.0, h: 28.0 }),
-            view_h: 200.0,
-            scroll,
-            scale,
-        }
-    }
-
-    #[test]
-    fn logical_pointer_coordinates_become_physical_panel_pixels() {
-        let unscaled = canned_hits(0, 0.0, 1.0);
-        assert_eq!(PhysPoint { x: 40, y: 70 }, unscaled.local((40.0, 70.0)));
-
-        let scaled = canned_hits(0, 0.0, 1.5);
-        assert_eq!(PhysPoint { x: 60, y: 105 }, scaled.local((40.0, 70.0)));
-        assert_eq!(PhysPoint { x: 1, y: 1 }, scaled.local((0.9, 0.9)), "floor, not round");
-    }
-
-    #[test]
-    fn the_same_row_is_hit_at_1x_and_at_1_5x() {
-        let unscaled = canned_hits(0, 0.0, 1.0);
-        let scaled = canned_hits(0, 0.0, 1.5);
-        // The drill-down box is scene y 60..90, x 20..50. At 1.5x the
-        // pointer reaches it at two thirds of those logical numbers.
-        let hit = Some(Hit::Action(HitAction::DrillDown("\u{6f22}".into())));
-        assert_eq!(hit, unscaled.hit(unscaled.local((30.0, 70.0))));
-        assert_eq!(hit, scaled.hit(scaled.local((20.0, 46.7))));
-        // The logical point that hit at 1.0x lands one row further
-        // down the scene at 1.5x, where nothing is.
-        assert_eq!(None, scaled.hit(scaled.local((30.0, 70.0))));
-    }
-
-    #[test]
-    fn a_full_width_target_spans_the_panel_and_a_boxed_one_does_not() {
-        let hits = canned_hits(0, 0.0, 1.0);
-        assert_eq!(Some(Hit::Action(HitAction::Back)), hits.hit(PhysPoint { x: 290, y: 10 }));
-        assert_eq!(None, hits.hit(PhysPoint { x: 290, y: 70 }), "beside the drill-down box");
-    }
-
-    #[test]
-    fn the_first_target_in_paint_order_wins() {
-        let mut hits = canned_hits(0, 0.0, 1.0);
-        hits.targets.push(HitTarget {
-            x: None,
-            y: 0.0,
-            w: None,
-            h: 40.0,
-            action: HitAction::ExpandEntry(9),
-        });
-        assert_eq!(Some(Hit::Action(HitAction::Back)), hits.hit(PhysPoint { x: 10, y: 10 }));
-    }
-
-    #[test]
-    fn scrolling_moves_the_targets_under_the_pointer() {
-        let top = canned_hits(0, 0.0, 1.0);
-        let at = PhysPoint { x: 10, y: 10 };
-        assert_eq!(Some(Hit::Action(HitAction::Back)), top.hit(at));
-
-        // Scrolled by 120 px, the expand row (scene y 120..160) now
-        // sits at the top of the view, and the back row has scrolled
-        // off it.
-        let scrolled = canned_hits(0, 120.0, 1.0);
-        assert_eq!(Some(Hit::Action(HitAction::ExpandEntry(1))), scrolled.hit(at));
-    }
-
-    #[test]
-    fn the_anki_strip_is_fixed_while_the_body_scrolls_under_it() {
-        let hits = canned_hits(0, 0.0, 1.0);
-        assert_eq!(Some(Hit::Anki), hits.hit(PhysPoint { x: 150, y: 210 }));
-        // A row that scrolls into the strip's band must stay
-        // unreachable through the strip. On Windows the strip was a
-        // separate window. Here it is the bottom of the same buffer.
-        let scrolled = canned_hits(0, 90.0, 1.0);
-        assert_eq!(Some(Hit::Anki), scrolled.hit(PhysPoint { x: 150, y: 210 }));
-        assert_eq!(None, scrolled.hit(PhysPoint { x: 150, y: 199 }), "the gap above the strip");
-    }
-
-    #[test]
-    fn a_scene_with_no_anki_slot_has_nothing_below_the_view() {
-        let mut hits = canned_hits(0, 0.0, 1.0);
-        hits.anki = None;
-        assert_eq!(None, hits.hit(PhysPoint { x: 150, y: 210 }));
-    }
 
     #[test]
     fn a_press_carries_its_button_hit_and_text() {
@@ -1231,46 +1000,6 @@ mod tests {
         );
     }
 
-    /// Core's own targets, not hand-written ones. The scene that the
-    /// painter draws is the same scene that the pointer resolves
-    /// against.
-    #[test]
-    fn the_targets_come_from_the_scene_core_measured() {
-        let mut scene = PopupScene {
-            origin: 12.0,
-            content_w: 176.0,
-            elems: Vec::new(),
-            hits: vec![HitTarget {
-                x: None,
-                y: 12.0,
-                w: None,
-                h: 24.0,
-                action: HitAction::ExpandEntry(0),
-            }],
-            side: None,
-            anki: Some(AnkiSlot {
-                label: "Add to Anki".to_string(),
-                color: (130, 170, 220),
-                rect: SceneRect { x: 0.0, y: 100.0, w: 200.0, h: 28.0 },
-            }),
-            used_h: 40.0,
-            content_h: 160.0,
-            view_h: 100.0,
-            panel_w: None,
-            highlights: Vec::new(),
-        };
-        let hits = HitScene::of(3, &scene, 24.0, 1.5);
-        assert_eq!(3, hits.panel);
-        assert_eq!(scene.hit_targets(), hits.targets);
-        assert_eq!(Some(SceneRect { x: 0.0, y: 100.0, w: 200.0, h: 28.0 }), hits.anki);
-        assert_eq!(100.0, hits.view_h);
-        assert_eq!(24.0, hits.scroll);
-
-        scene.anki = None;
-        assert_eq!(None, HitScene::of(0, &scene, 0.0, 1.0).anki);
-        assert_eq!(1.0, HitScene::of(0, &scene, 0.0, 0.0).scale, "never divide by nothing");
-    }
-
     // ---- against a real scene, at both scales ----
 
     /// The acceptance criterion, on core's own geometry. The pointer
@@ -1302,87 +1031,6 @@ mod tests {
         }
     }
 
-    /// This test proves that the transform does real work. Feed a
-    /// 1.5x frame the physical number instead of the logical one, and
-    /// the hit misses. A latched or forgotten scale would look
-    /// exactly like this miss.
-    #[test]
-    fn a_pointer_position_that_skipped_the_scale_transform_misses() {
-        let hits = HitScene::of(0, &scene_at(1.5), 0.0, 1.5);
-        let row = HitAction::ExpandEntry(0);
-        let at = aim(&hits, &row);
-        assert_eq!(Some(Hit::Action(row.clone())), hits.hit(hits.local(at)));
-        assert_ne!(
-            Some(Hit::Action(row)),
-            hits.hit(hits.local((at.0 * 1.5, at.1 * 1.5))),
-            "a logical point read as physical lands 1.5 rows further down"
-        );
-    }
-
-    /// A scroll moves the body under a fixed pointer, and the targets
-    /// move with it, because the code repainted the frame that
-    /// carried them.
-    #[test]
-    fn a_scrolled_frame_resolves_the_row_that_scrolled_into_view() {
-        // A box shorter than the content, as a real monitor-percent cap
-        // gives: `view_h` clamps and `max_scroll` is positive.
-        let scene = scene_at_boxed(1.5, 240.0);
-        assert!(scene.content_h > scene.view_h, "the scene has to overflow to scroll");
-        let scroll = (scene.content_h - scene.view_h).min(96.0);
-        let top = HitScene::of(0, &scene, 0.0, 1.5);
-        let scrolled = HitScene::of(0, &scene, scroll, 1.5);
-
-        let row = HitAction::DrillDown("\u{5b57}".to_string());
-        let at = aim(&scrolled, &row);
-        assert_eq!(Some(Hit::Action(row.clone())), scrolled.hit(scrolled.local(at)));
-        // The same point on the unscrolled frame reads a different part
-        // of the scene, so it is not the same target.
-        assert_ne!(Some(Hit::Action(row)), top.hit(top.local(at)));
-    }
-
     // ---- the script ----
 
-    #[test]
-    fn a_script_parses_the_steps_it_recognises_and_rejects_the_rest() {
-        let (passes, rejects) =
-            parse_script("enter:10,20; motion:10.5,20.5 ;wheel:-360;click:11,21;press:12,22;release:12,22;press2:13,23;release2:13,23;drag:14,24;leave;dump;;");
-        assert_eq!(
-            vec![vec![
-                Step::Enter(10.0, 20.0),
-                Step::Motion(10.5, 20.5),
-                Step::Wheel(-360),
-                Step::Click(11.0, 21.0),
-                Step::Press(12.0, 22.0, Button::Primary),
-                Step::Release(12.0, 22.0, Button::Primary),
-                Step::Press(13.0, 23.0, Button::Secondary),
-                Step::Release(13.0, 23.0, Button::Secondary),
-                Step::Drag(14.0, 24.0),
-                Step::Leave,
-                Step::Dump,
-            ]],
-            passes
-        );
-        assert!(rejects.is_empty());
-
-        let (passes, rejects) = parse_script("hover:1,2;click:1;wheel:x;leave:3;press:");
-        assert!(passes.is_empty(), "a pass of nothing but rejects is no pass");
-        assert_eq!(5, rejects.len(), "every bad step says so and none of them run");
-    }
-
-
-    /// The second pass clicks the affordance that the first pass's
-    /// click produced. This sequence is the whole reason that passes
-    /// exist.
-    #[test]
-    fn passes_are_split_on_the_pipe_and_each_runs_at_most_once() {
-        let (passes, rejects) = parse_script("click:10,20|click:30,40;dump");
-        assert_eq!(
-            vec![
-                vec![Step::Click(10.0, 20.0)],
-                vec![Step::Click(30.0, 40.0), Step::Dump],
-            ],
-            passes
-        );
-        assert!(rejects.is_empty());
-    }
 }

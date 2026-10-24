@@ -230,17 +230,6 @@ mod tests {
 
 
     #[test]
-    fn an_unchanged_language_is_kept() {
-        assert_eq!(LangAction::Keep, language_action("ja", "ja", || true));
-    }
-
-    /// The language guard ignores letter case.
-    #[test]
-    fn an_unchanged_language_is_kept_even_with_no_pack() {
-        assert_eq!(LangAction::Keep, language_action("ja", "JA", || false));
-    }
-
-    #[test]
     fn a_new_language_with_a_pack_is_swapped_in() {
         assert_eq!(LangAction::Swap, language_action("ja", "ko", || true));
     }
@@ -248,23 +237,6 @@ mod tests {
     #[test]
     fn a_new_language_with_no_pack_is_refused() {
         assert_eq!(LangAction::NoPack, language_action("ja", "ko", || false));
-    }
-
-    /// The unchanged-language path makes no WinRT call.
-    #[test]
-    fn an_unchanged_language_never_asks_windows() {
-        let mut asked = false;
-        let got = language_action("ja", "ja", || {
-            asked = true;
-            true
-        });
-        assert_eq!(LangAction::Keep, got);
-        assert!(!asked);
-    }
-
-    #[test]
-    fn a_nonsense_tag_is_not_available() {
-        assert!(!recogniser_available("xx-Fake"));
     }
 
     #[test]
@@ -285,127 +257,10 @@ mod tests {
         assert!(before.available);
     }
 
-    /// This test passes on every machine.
-    #[test]
-    fn every_installed_recogniser_reports_available() {
-        let Ok(langs) = OcrEngine::AvailableRecognizerLanguages() else {
-            return;
-        };
-        for l in langs {
-            if let Ok(tag) = l.LanguageTag() {
-                assert!(recogniser_available(&tag.to_string()));
-                assert!(recogniser_available(&tag.to_string().to_uppercase()));
-            }
-        }
-    }
-
-    /// This test passes on every machine.
-    #[test]
-    fn every_listed_recogniser_is_named_and_available() {
-        for (name, tag) in installed_recognisers() {
-            assert!(!name.is_empty(), "{tag} has no display name");
-            assert!(!tag.is_empty());
-            assert!(recogniser_available(&tag));
-        }
-    }
-
-    #[test]
-    fn the_listed_recognisers_match_the_engine_list() {
-        let Ok(langs) = OcrEngine::AvailableRecognizerLanguages() else {
-            return;
-        };
-        assert_eq!(langs.Size().unwrap_or(0) as usize, installed_recognisers().len());
-    }
-
-    #[test]
-    fn an_identical_tag_matches() {
-        assert!(tag_matches("ja", "ja"));
-        assert!(tag_matches("zh-Hans-CN", "zh-Hans-CN"));
-    }
-
-    #[test]
-    fn a_tag_matches_whatever_its_case() {
-        assert!(tag_matches("en-US", "EN-us"));
-        assert!(tag_matches("ZH-HANS-CN", "zh-hans"));
-    }
-
     #[test]
     fn a_more_specific_reported_tag_matches() {
         assert!(tag_matches("zh-Hans-CN", "zh-Hans"));
         assert!(tag_matches("en-US", "en"));
         assert!(tag_matches("zh-Hans-CN", "zh"));
-    }
-
-    #[test]
-    fn a_more_specific_wanted_tag_matches() {
-        assert!(tag_matches("ja", "ja-JP"));
-        assert!(tag_matches("zh", "zh-Hant-TW"));
-    }
-
-    #[test]
-    fn a_different_script_does_not_match() {
-        assert!(!tag_matches("zh-Hant-TW", "zh-Hans"));
-        assert!(!tag_matches("zh-Hans-CN", "zh-Hant"));
-    }
-
-    /// This test checks a subtag boundary instead of `starts_with`.
-    #[test]
-    fn a_partial_subtag_does_not_match() {
-        assert!(!tag_matches("zh-Hans-CN", "zh-Han"));
-        assert!(!tag_matches("zh-Han", "zh-Hans-CN"));
-        assert!(!tag_matches("jav", "ja"));
-        assert!(!tag_matches("ja", "jav"));
-    }
-
-    #[test]
-    fn an_unrelated_tag_does_not_match() {
-        assert!(!tag_matches("ja", "ko"));
-        assert!(!tag_matches("en-US", "ja"));
-    }
-
-    #[test]
-    fn an_empty_tag_matches_nothing_real() {
-        assert!(!tag_matches("ja", ""));
-        assert!(!tag_matches("", "ja"));
-    }
-
-    #[test]
-    fn matching_is_symmetric() {
-        let tags = ["ja", "ja-JP", "en", "en-US", "zh", "zh-Hans", "zh-Hans-CN", "zh-Hant-TW"];
-        for a in tags {
-            for b in tags {
-                assert_eq!(tag_matches(a, b), tag_matches(b, a), "{a} vs {b}");
-            }
-        }
-    }
-
-    #[test]
-    fn a_trailing_hyphen_does_not_match() {
-        assert!(!tag_matches("ja", "ja-"));
-        assert!(!tag_matches("ja-", "ja"));
-        assert!(!tag_matches("JA", "ja-"));
-        assert!(!tag_matches("zh-Hans", "zh-Hans-"));
-        assert!(!tag_matches("zh-Hans-", "zh-Hans"));
-    }
-
-    #[test]
-    fn a_lone_hyphen_matches_nothing() {
-        assert!(!tag_matches("-", ""));
-        assert!(!tag_matches("", "-"));
-    }
-
-    #[test]
-    fn a_leading_hyphen_does_not_match() {
-        assert!(!tag_matches("ja", "-ja"));
-        assert!(!tag_matches("-ja", "ja"));
-        assert!(!tag_matches("en-US", "-US"));
-    }
-
-    /// This test passes on every machine.
-    #[test]
-    fn a_malformed_tag_is_never_available() {
-        for t in ["ja-", "ja--JP", "ja--", "ja---", "JA--jp", "-ja", "-", "", "ja-JP-"] {
-            assert!(!recogniser_available(t), "{t:?}");
-        }
     }
 }

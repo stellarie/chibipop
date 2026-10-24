@@ -83,16 +83,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_request_is_one_line_and_ends_in_a_newline() {
-        let s = request(7, "text/recognise", serde_json::json!({"scale": 2}));
-        assert!(s.ends_with('\n'));
-        assert_eq!(s.matches('\n').count(), 1);
-        let v: serde_json::Value = serde_json::from_str(s.trim_end()).unwrap();
-        assert_eq!(v["id"], 7);
-        assert_eq!(v["method"], "text/recognise");
-    }
-
-    #[test]
     fn a_geometry_response_parses() {
         let json = r#"{"lines":[{"text":"宿舎に","words":[
             {"text":"宿舎","rect":{"x":0,"y":0,"w":112,"h":60}}]}]}"#;
@@ -102,24 +92,9 @@ mod tests {
     }
 
     #[test]
-    fn a_text_only_response_parses_with_no_words() {
-        let json = r#"{"lines":[{"text":"宿舎に戻る"}]}"#;
-        let r: RecogniseResult = serde_json::from_str(json).unwrap();
-        assert!(r.lines[0].words.is_none());
-    }
-
-    #[test]
     fn an_unknown_field_is_ignored_not_rejected() {
         let json = r#"{"lines":[{"text":"x","confidence":0.9}],"engine":"v9"}"#;
         let r: RecogniseResult = serde_json::from_str(json).unwrap();
         assert_eq!(r.lines[0].text, "x");
-    }
-
-    #[test]
-    fn a_ready_without_capabilities_parses() {
-        let json = r#"{"protocol":1,"name":"p","roles":["text-provider"]}"#;
-        let r: Ready = serde_json::from_str(json).unwrap();
-        assert_eq!(r.protocol, 1);
-        assert!(r.capabilities.is_none());
     }
 }

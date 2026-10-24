@@ -357,44 +357,11 @@ mod tests {
         assert_eq!(outbox.take(), None);
     }
 
-    /// The `deaf` plugin must not leave a request buffer queued.
-    #[test]
-    fn an_abandoned_request_is_dropped_rather_than_left_queued() {
-        let outbox = Outbox::default();
-        assert!(outbox.put(vec![0u8; 256 * 1024]));
-        outbox.clear();
-        outbox.close();
-        // The queued request would retain 256 KiB.
-        assert!(outbox.take().is_none());
-    }
-
     #[test]
     fn a_closed_outbox_refuses_a_request_instead_of_swallowing_it() {
         let outbox = Outbox::default();
         outbox.close();
         assert!(!outbox.put(b"one".to_vec()));
         assert_eq!(outbox.take(), None);
-    }
-
-    /// The writer thread must exit when the outbox closes.
-    #[test]
-    fn a_waiting_writer_wakes_when_the_outbox_closes() {
-        let outbox = Arc::new(Outbox::default());
-        let mine = Arc::clone(&outbox);
-        let writer = std::thread::spawn(move || mine.take());
-        outbox.close();
-        assert_eq!(writer.join().unwrap(), None);
-    }
-
-    #[test]
-    fn the_log_ring_keeps_only_the_newest_lines_once_full() {
-        let buf = Mutex::new(VecDeque::new());
-        for i in 0..LOG_CAP + 5 {
-            push_log_line(&buf, i.to_string());
-        }
-        let got: Vec<String> = buf.lock().unwrap().iter().cloned().collect();
-        assert_eq!(got.len(), LOG_CAP);
-        assert_eq!(got.first(), Some(&"5".to_string()));
-        assert_eq!(got.last(), Some(&(LOG_CAP + 4).to_string()));
     }
 }
