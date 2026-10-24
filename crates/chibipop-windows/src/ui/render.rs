@@ -28,7 +28,7 @@ use crate::ui::layout::{
 use crate::ui::media::MediaSurfaces;
 use crate::ui::theme::{Theme, SCROLLBAR_W};
 use anyhow::{Context, Result};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use windows::core::*;
 use windows::Win32::Foundation::*;
@@ -473,6 +473,7 @@ pub struct Renderer {
     target: Option<ID2D1HwndRenderTarget>,
     /// The hit targets from the last paint pass, in DIPs, exactly as the scene reported them.
     hits: RefCell<Vec<HitTarget>>,
+    scrollbar_thumb: Cell<Option<(SceneRect, i32)>>,
     /// This field stores the scene from the last successful paint pass.
     ///
     /// Pointer text hits must use the same measured runs as the pixels on screen.
@@ -518,6 +519,7 @@ impl Renderer {
             text: Text::new()?,
             target: None,
             hits: RefCell::new(Vec::new()),
+            scrollbar_thumb: Cell::new(None),
             scene: None,
             scene_font: String::new(),
             media: RefCell::new(media),
@@ -529,6 +531,7 @@ impl Renderer {
         self.scene = None;
         self.scene_font.clear();
         self.hits.borrow_mut().clear();
+        self.scrollbar_thumb.set(None);
         let (media, warning) = match MediaSurfaces::open(db) {
             Ok(cache) => (Some(cache), None),
             Err(error) => {
@@ -556,7 +559,13 @@ impl Renderer {
     pub fn hit_test(&self, x_phys: i32, y_phys: i32, scroll_phys: i32) -> Option<HitAction> {
         let scale = self.dpi_scale();
         let x = x_phys as f32 / scale;
-        let y = y_phys as f32 / scale + scroll_phys as f32 / scale;
+        let y = y_phys as f32 / scale;
+        if let Some((rect, travel)) = self.scrollbar_thumb.get() {
+            if x >= rect.x && x < rect.x + rect.w && y >= rect.y && y < rect.y + rect.h {
+                return Some(HitAction::ScrollThumb { travel });
+            }
+        }
+        let y = y + scroll_phys as f32 / scale;
         self.hits
             .borrow()
             .iter()
@@ -635,12 +644,12 @@ impl Renderer {
         let scene = scene_of(&self.text, inputs, (w as f32, h as f32))?;
         *self.hits.borrow_mut() = scene.hit_targets();
 
-        if let Err(e) = self.paint_once(&scene, theme, w, h, scroll) {
+        if let Err(e) = self.paint_once(&scene, theme, w, h, scroll, scale) {
             if e.code() == D2DERR_RECREATE_TARGET {
                 self.target = None;
                 self.ensure_target(cw, ch)
                     .context("recreating the D2D render target after device loss")?;
-                self.paint_once(&scene, theme, w, h, scroll)
+                self.paint_once(&scene, theme, w, h, scroll, scale)
                     .context("repainting after device-lost recovery")?;
             } else {
                 return Err(e).context("D2D paint failed");
@@ -707,6 +716,7 @@ impl Renderer {
         w: i32,
         h: i32,
         scroll: i32,
+        scale: f32,
     ) -> windows::core::Result<()> {
         let target = self
             .target
@@ -717,6 +727,7 @@ impl Renderer {
         let scope = DrawScope {
             target: Some(target),
         };
+        let mut scrollbar_thumb = None;
 
         let draw_result: windows::core::Result<()> = (|| {
             unsafe {
@@ -802,14 +813,21 @@ impl Renderer {
             if let Some((top, thumb_h)) = scene.scrollbar_thumb(theme.padding, h, scroll) {
                 let brush =
                     unsafe { target.CreateSolidColorBrush(&color_f(theme.dimmed_text), None) }?;
-                let x = (w - theme.padding / 2 - SCROLLBAR_W) as f32;
-                let rect = D2D_RECT_F {
-                    left: x,
-                    top: (theme.padding + top) as f32,
-                    right: x + SCROLLBAR_W as f32,
-                    bottom: (theme.padding + top + thumb_h) as f32,
+                let rect = SceneRect {
+                    x: (w - theme.padding / 2 - SCROLLBAR_W) as f32,
+                    y: (theme.padding + top) as f32,
+                    w: SCROLLBAR_W as f32,
+                    h: thumb_h as f32,
                 };
-                unsafe { target.FillRectangle(&rect, &brush) };
+                let painted_rect = D2D_RECT_F {
+                    left: rect.x,
+                    top: rect.y,
+                    right: rect.x + rect.w,
+                    bottom: rect.y + rect.h,
+                };
+                unsafe { target.FillRectangle(&painted_rect, &brush) };
+                let travel = h - 2 * theme.padding - thumb_h;
+                scrollbar_thumb = Some((rect, (travel as f32 * scale).round() as i32));
             }
 
             Ok(())
@@ -819,7 +837,11 @@ impl Renderer {
 
         // The draw error comes first because it is more specific.
         // `EndDraw` only signals a device loss.
-        draw_result.and(end_result)
+        let result = draw_result.and(end_result);
+        if result.is_ok() {
+            self.scrollbar_thumb.set(scrollbar_thumb);
+        }
+        result
     }
 
     /// Draws one scene element.

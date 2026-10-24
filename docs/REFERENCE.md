@@ -939,16 +939,19 @@ cursor-exit behavior for the whole chain.
 
 ### `scroll_popup`
 
-Lets the wheel scroll a popup whose content overflows the `max_height_percent`
-cap. **On by default.** A thin scrollbar appears at the right edge when there
-is more to read; the window itself never grows.
+Enables scrolling when popup content exceeds the `max_height_percent` cap.
+**On by default.** A thin scrollbar appears at the right edge when content
+overflows. The window does not grow beyond the cap.
 
-While the cursor is inside such a popup, chibipop takes the wheel so the
-window underneath does not scroll at the same time. It takes it **only** then
-— cursor on the word rather than the popup, or content that fits, and the
-wheel behaves normally. Setting `scroll_popup = false` stops chibipop
-touching the wheel at all while still drawing the scrollbar, so you can see
-there is more even though you cannot reach it.
+The mouse wheel scrolls content while the cursor is inside the popup.
+You can also drag the scrollbar thumb with the primary button.
+The thumb keeps its grab position until you release the button.
+Thumb dragging also works with Anki disabled.
+
+chibipop captures the wheel only inside a popup with overflowing content.
+The window underneath does not scroll at the same time.
+Setting `scroll_popup = false` disables both wheel scrolling and thumb dragging.
+The scrollbar remains visible to indicate overflow.
 
 ### The render settings
 

@@ -36,6 +36,7 @@ use chibipop::controller::{Button, HitAction};
 use chibipop::geom::PhysPoint;
 use chibipop::select::TextAddr;
 use chibipop::ui::layout::{HitTarget, PopupScene, SceneRect};
+use chibipop::ui::theme::SCROLLBAR_W;
 use smithay_client_toolkit::dispatch2::Dispatch2;
 use smithay_client_toolkit::globals::GlobalData;
 use smithay_client_toolkit::seat::pointer::cursor_shape::CursorShapeManager;
@@ -122,6 +123,8 @@ pub struct HitScene {
     /// The Anki strip, when core reserved one. The code paints this
     /// strip unscrolled, and tests it unscrolled too.
     pub anki: Option<SceneRect>,
+    /// The painted rectangle and total track travel.
+    pub scrollbar_thumb: Option<(SceneRect, i32)>,
     /// Where the body view ends. Below it there is only the strip.
     pub view_h: f32,
     /// The scroll value used to paint this frame, in physical pixels.
@@ -132,14 +135,35 @@ pub struct HitScene {
 
 impl HitScene {
     /// Take one painted frame's targets.
-    pub fn of(panel: usize, scene: &PopupScene, scroll: f32, scale: f64) -> HitScene {
+    pub fn of(
+        panel: usize,
+        scene: &PopupScene,
+        buffer_w: i32,
+        padding: i32,
+        scroll: f32,
+        scale: f64,
+    ) -> HitScene {
+        let scale = if scale > 0.0 { scale } else { 1.0 };
+        let view = scene.view_h.round() as i32;
+        let scrollbar_thumb = scene.scrollbar_thumb(padding, view, scroll.round() as i32)
+            .map(|(top, height)| {
+                let width = (SCROLLBAR_W as f32 * scale as f32).round().max(1.0);
+                let rect = SceneRect {
+                    x: buffer_w as f32 - (padding / 2) as f32 - width,
+                    y: (padding + top) as f32,
+                    w: width,
+                    h: height as f32,
+                };
+                (rect, view - 2 * padding - height)
+            });
         HitScene {
             panel,
             targets: scene.hit_targets(),
             anki: scene.anki.as_ref().map(|a| a.rect),
+            scrollbar_thumb,
             view_h: scene.view_h,
             scroll,
-            scale: if scale > 0.0 { scale } else { 1.0 },
+            scale,
         }
     }
 
@@ -168,6 +192,11 @@ impl HitScene {
         if let Some(strip) = self.anki {
             if within(strip.x, strip.w, x) && within(strip.y, strip.h, y) {
                 return Some(Hit::Anki);
+            }
+        }
+        if let Some((thumb, travel)) = self.scrollbar_thumb {
+            if within(thumb.x, thumb.w, x) && within(thumb.y, thumb.h, y) {
+                return Some(Hit::Action(HitAction::ScrollThumb { travel }));
             }
         }
         if y >= self.view_h {
@@ -319,7 +348,7 @@ pub struct Pointer {
     focus: Option<Focus>,
     /// Buttons currently held on the popup.
     buttons: u8,
-    /// Core requested pointer capture for a selection drag.
+    /// Core requested pointer capture for a drag.
     dragging: bool,
     bank: Wheelbank,
     /// The last shape that the code asked for. A hover across one
@@ -788,7 +817,7 @@ mod tests {
     
     
     use chibipop::dict::gloss::{DocAddr, NodePath};
-    
+    use chibipop::ui::layout::AnkiSlot;
 
     fn axis(value120: i32) -> AxisScroll {
         AxisScroll { value120, ..AxisScroll::default() }
@@ -1009,7 +1038,8 @@ mod tests {
     fn every_affordance_of_a_real_scene_is_reachable_at_1x_and_at_1_5x() {
         for scale in [1.0, 1.5] {
             let scene = scene_at(scale);
-            let hits = HitScene::of(0, &scene, 0.0, scale);
+            let padding = crate::popup::physical_theme(&chibipop::ui::theme::Theme::dark(), scale).padding;
+            let hits = HitScene::of(0, &scene, (424.0 * scale) as i32, padding, 0.0, scale);
             let wanted = [
                 HitAction::Back,
                 HitAction::DrillDown("\u{6f22}".to_string()),
@@ -1028,6 +1058,80 @@ mod tests {
             let strip = hits.anki.expect("the demo reserves the Anki slot");
             let mid = f64::from(strip.y + strip.h / 2.0) / scale;
             assert_eq!(Some(Hit::Anki), hits.hit(hits.local((10.0, mid))));
+        }
+    }
+
+    #[test]
+    fn a_thumb_press_hits_the_painted_rectangle_before_scrolled_content_at_both_scales() {
+        for (scale, buffer_w, left, top, width, height, travel) in [
+            (1.0, 307, 297, 34, 4, 88, 88),
+            (1.5, 461, 446, 51, 6, 132, 132),
+        ] {
+            let s = scale as f32;
+            let theme = crate::popup::physical_theme(&chibipop::ui::theme::Theme::dark(), scale);
+            let mut scene = PopupScene {
+                origin: 12.0 * s,
+                content_w: 176.0 * s,
+                elems: Vec::new(),
+                hits: vec![HitTarget {
+                    x: None,
+                    y: 0.0,
+                    w: None,
+                    h: 600.0 * s,
+                    action: HitAction::ExpandEntry(0),
+                }],
+                side: None,
+                anki: None,
+                used_h: 376.0 * s,
+                content_h: 400.0 * s,
+                view_h: 200.0 * s,
+                panel_w: None,
+                highlights: Vec::new(),
+            };
+            let scroll = 50.0 * s;
+            let hits = HitScene::of(0, &scene, buffer_w, theme.padding, scroll, scale);
+            let thumb = Some(Hit::Action(HitAction::ScrollThumb { travel }));
+            for (x, y) in [(left, top), (left + width - 1, top + height - 1)] {
+                let local = hits.local(((f64::from(x) + 0.25) / scale, (f64::from(y) + 0.25) / scale));
+                assert_eq!(thumb, hits.hit(local), "scale {scale}, pixel {local:?}");
+                assert_eq!(
+                    Interaction::Down {
+                        local,
+                        button: Button::Primary,
+                        hit: Some(HitAction::ScrollThumb { travel }),
+                        text: None,
+                    },
+                    press(local, Button::Primary, hits.hit(local), None),
+                );
+            }
+            for (x, y) in [
+                (left - 1, top),
+                (left + width, top),
+                (left, top - 1),
+                (left, top + height),
+            ] {
+                assert_eq!(
+                    Some(Hit::Action(HitAction::ExpandEntry(0))),
+                    hits.hit(PhysPoint { x, y }),
+                    "outside the thumb at scale {scale}, pixel {x},{y}",
+                );
+            }
+            scene.anki = Some(AnkiSlot {
+                label: "Add to Anki".to_string(),
+                color: (130, 170, 220),
+                rect: SceneRect { x: left as f32, y: top as f32, w: width as f32, h: height as f32 },
+            });
+            let strip = HitScene::of(0, &scene, buffer_w, theme.padding, scroll, scale);
+            assert_eq!(Some(Hit::Anki), strip.hit(PhysPoint { x: left, y: top }));
+
+            scene.anki = None;
+            scene.used_h = scene.view_h - 2.0 * theme.padding as f32;
+            scene.content_h = scene.view_h;
+            let fitting = HitScene::of(0, &scene, buffer_w, theme.padding, 0.0, scale);
+            assert_eq!(
+                Some(Hit::Action(HitAction::ExpandEntry(0))),
+                fitting.hit(PhysPoint { x: left, y: top }),
+            );
         }
     }
 
