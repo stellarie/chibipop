@@ -197,7 +197,7 @@ Profile IDs stay stable when names change. Bind IDs stay stable when chords
 change. Frequency lists and the Ranking strategy are shared by all profiles.
 
 Configured Binds select lookup mode, action, and an optional profile.
-Lookup Binds support Press, Hold, and Toggle.
+Lookup Binds support Hold and Toggle.
 Anki add and static-region Binds use the displayed profile.
 Existing popups and Search windows retain their profile settings until close.
 Linux has no Search profile picker.
@@ -813,7 +813,7 @@ bind = ALT, F, exec, chibipop ctl bind-down my-lookup
 bindr = ALT, F, exec, chibipop ctl bind-up my-lookup
 ```
 
-Press mode and Toggle mode use `bind-down` only.
+Toggle mode uses `bind-down` only.
 The settings window provides the exact command for each configured Bind.
 The fixed verbs `trigger-down`, `trigger-up`, `toggle`, and `lookup` remain
 supported.

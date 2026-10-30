@@ -72,6 +72,9 @@ impl<'de> Deserialize<'de> for Config {
         } else {
             migrate(value).map_err(serde::de::Error::custom)?
         };
+        for bind in config.binds.iter_mut().filter(|bind| bind.action == BindAction::Lookup) {
+            if bind.mode == TriggerMode::Press { bind.mode = TriggerMode::HoldKey; }
+        }
         config.validate().map_err(serde::de::Error::custom)?;
         Ok(config)
     }
@@ -142,7 +145,7 @@ fn migrate(mut value: toml::Value) -> Result<Config> {
             _ => old.actions.enabled,
         };
         if action == BindAction::Lookup {
-            bind.mode = if old.trigger.mode == TriggerMode::Live { TriggerMode::Press } else { old.trigger.mode };
+            bind.mode = if matches!(old.trigger.mode, TriggerMode::Live | TriggerMode::Press) { TriggerMode::HoldKey } else { old.trigger.mode };
         }
         bind
     }).collect();

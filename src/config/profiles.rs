@@ -135,7 +135,8 @@ pub struct Bind {
 impl Bind {
     pub fn new(id: String, action: BindAction) -> Self {
         Self { id, action, windows: String::new(), linux: String::new(),
-            mode: TriggerMode::Press, profile: None, enabled: true }
+            mode: if action == BindAction::Lookup { TriggerMode::HoldKey } else { TriggerMode::Press },
+            profile: None, enabled: true }
     }
 
     pub fn chord(&self, platform: Platform) -> &str {

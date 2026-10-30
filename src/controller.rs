@@ -803,13 +803,13 @@ impl Controller {
     pub fn watches_outside_clicks(&self) -> bool {
         self.selected_text_active()
             || (self.surface.is_some()
-                && (self.trigger_mode() == TriggerMode::Press || !self.hides_on_cursor_exit()))
+                && (self.trigger_mode() != TriggerMode::Live || !self.hides_on_cursor_exit()))
     }
 
     /// Whether the bin must consume the outside
     /// press that hides the popup.
     pub fn swallows_outside_clicks(&self) -> bool {
-        self.watches_outside_clicks() && !self.hides_on_cursor_exit()
+        self.watches_outside_clicks() && (!self.selected_text_active() || !self.hides_on_cursor_exit())
     }
 
     /// Whether a cursor miss hides the popup.
@@ -1241,7 +1241,7 @@ impl Controller {
         self.set_profile_config(&session);
         self.trigger_held = matches!(mode, TriggerMode::HoldKey | TriggerMode::HoldShift | TriggerMode::Toggle);
         self.last_accepted = Some(pos);
-        let command = if mode == TriggerMode::Press {
+        let command = if matches!(mode, TriggerMode::Press | TriggerMode::HoldKey | TriggerMode::HoldShift) {
             self.trigger_pressed(pos, session)
         } else {
             self.dispatch_lookup_for(pos, session, true)
@@ -1783,7 +1783,7 @@ impl Controller {
         if self.selected_text_active() && !was_trigger_held {
             return Vec::new();
         }
-        if matches!(self.trigger_mode(), TriggerMode::Live | TriggerMode::Press) {
+        if self.trigger_mode() != TriggerMode::Toggle {
             return Vec::new();
         }
         self.chain_bind = None;
@@ -2986,12 +2986,8 @@ mod tests {
             c.handle(placed(POPUP, 200, 200));
             assert_eq!(c.popup().unwrap().session, &session);
             assert_eq!(c.popup_depth(), 1);
-            if mode == TriggerMode::HoldKey {
-                assert!(bind_up(&mut c, "root").contains(&Command::HidePopup));
-            } else {
-                assert!(bind_up(&mut c, "child").is_empty());
-                assert_eq!(c.popup_depth(), 1);
-            }
+            assert!(bind_up(&mut c, "child").is_empty());
+            assert_eq!(c.popup_depth(), 1);
         }
     }
 
@@ -3341,15 +3337,24 @@ mod tests {
     }
 
     #[test]
-    fn the_key_coming_up_retracts_the_popup_in_hold_mode() {
+    fn a_hold_tap_shows_the_popup_and_it_stays_until_an_outside_click() {
         let mut c = test_controller(hold_cfg());
-        bind_down(&mut c, "hold", TriggerMode::HoldKey, PhysPoint { x: 110, y: 110 });
-        shown(&mut c);
-        let out = bind_up(&mut c, "hold");
+        let pos = PhysPoint { x: 110, y: 110 };
+        bind_down(&mut c, "hold", TriggerMode::HoldKey, pos);
+        let id = c.latest;
+        assert!(bind_up(&mut c, "hold").is_empty());
+        c.handle(ready_id(id, "\u{732B}", ANCHOR));
+        c.handle(placed(POPUP, 200, 200));
+        assert!(c.is_shown());
+        assert!(c.watches_outside_clicks());
+        assert!(c.swallows_outside_clicks());
+        assert!(c.handle(Event::CursorMoved { pos: PhysPoint { x: 900, y: 900 } }).is_empty());
+        assert!(c.handle(Event::DwellElapsed).is_empty());
+        assert!(c.is_shown());
+        let out = c.handle(Event::PointerDownOutside);
         assert_eq!(out, vec![Command::HidePopup, Command::SetBackArmed(false)]);
         assert!(!c.is_shown());
     }
-
 
     // -- the sticky region --
 

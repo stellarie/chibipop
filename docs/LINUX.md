@@ -64,13 +64,13 @@ For native bindings, each configured Bind has a **Copy bind snippet** button.
 Each snippet uses `chibipop ctl bind-down -- ID` or `chibipop ctl bind-up -- ID`.
 The compositor selector changes snippet syntax, not Bind ownership.
 
-KDE and GNOME show **Copy daemon command** for a Press action when no portal
+KDE and GNOME show **Copy daemon command** for a one-shot action when no portal
 binding exists. Their shortcut editors cannot send a key release.
 Hold mode on those desktops needs a portal binding.
-Otherwise, select Toggle or Press mode.
+Otherwise, select Toggle mode or bind `chibipop ctl lookup`, which needs no release.
 GNOME repeats a held custom shortcut, so tap the chord.
 Niri snippets go inside the existing `binds` block.
-Niri supports Press bindings but has no key-release bind for Hold mode.
+Niri has no key-release bind for Hold mode. Use Toggle or `chibipop ctl lookup`.
 Screen capture exclusion stays on **Popup**.
 
 **Ctrl+Tab** selects the next tab. **Ctrl+Shift+Tab** selects the previous tab.
@@ -146,7 +146,7 @@ bindr = ALT, F, exec, chibipop ctl bind-up -- my-lookup
 Use `chibipop ctl bind-down -- -lookup` when a Bind ID starts with a hyphen.
 
 Use both commands for Hold mode.
-Use only `bind-down` for Press and Toggle modes.
+Use only `bind-down` for Toggle mode.
 Use `bind-down` for one-shot actions.
 The daemon rejects an ID that is absent or disabled.
 
@@ -159,16 +159,14 @@ These verbs keep their legacy routing and do not replace configured Binds.
 Hold mode freezes one full grab before the popup appears.
 Each screen lookup during the hold reads that frozen screen.
 Moving to another monitor starts a grab for that monitor.
-Release drops the frame and hides the popup.
+Release drops the frame. The popup stays until an outside click, which is consumed, or until a later press finds no text.
 
 Toggle mode latches the trigger.
 It reads live grabs with the popup masked until toggle-off.
-Press mode runs one masked live lookup outside a popup for each activation.
-Press mode does not follow cursor movement or run a Dwell re-check.
-The key release does nothing in Press mode.
-Per-character lookup is inert in Press and Toggle modes.
+A Hold press while a popup is up reads a live grab with the popup masked, not a frozen one.
+Per-character lookup is inert in Toggle mode.
 
-Over painted popup text, a Press, Hold, or Toggle activation performs one dictionary lookup.
+Over painted popup text, a Hold or Toggle activation performs one dictionary lookup.
 It reads the painted text directly and does not capture or OCR.
 It uses the shortcut's assigned profile, not `nested_profile`.
 It works even when `popup.sub_popups` is off.
@@ -182,7 +180,7 @@ Nesting has no fixed depth cap, but resources remain finite.
 Returning to a parent retires its descendants.
 Dismissing the root closes the chain.
 
-The click catcher exists in Press mode while a popup has a rectangle.
+The click catcher exists in every mode but Live while a popup has a rectangle.
 It also exists in every mode when **Hide popup on cursor exit** is off.
 It consumes an outside click and clears its input region when the popup hides.
 

@@ -85,17 +85,15 @@ pub fn default_ocr_language() -> String {
 #[serde(rename_all = "kebab-case")]
 pub enum TriggerMode {
     Live,
-    /// Shows the popup while the user holds a key.
+    /// Runs one lookup when the key goes down. The popup stays after the key
+    /// comes up until the user clicks outside it or a later press finds no text.
     HoldKey,
     /// Shows the popup after one key press and hides it after the next press.
     /// The trigger key latches the hold, so the user can move onto the popup
     /// without a held key. The lookup reads live grabs with the popup masked while latched.
     Toggle,
-    /// Runs one lookup at the cursor for each key press, like Yomitan. The
-    /// popup stays until the next press finds no text or the user clicks
-    /// outside it. The lookup reads a live grab with the popup masked, so a
-    /// press over the popup is a miss and hides it. Screen OCR hover never follows.
-    /// Hovering existing popup text can still open child popups.
+    /// The neutral one-shot mode for non-lookup binds and the `lookup` verb.
+    /// Lookup binds saved with it load as `HoldKey`.
     Press,
     /// Accepts a legacy name and maps it to `HoldKey`.
     #[serde(rename = "hold-shift")]

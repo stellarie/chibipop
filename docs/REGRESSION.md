@@ -2148,13 +2148,13 @@ Linux OCR popups still lack CSS support; that separate gap must not fail the imp
 <a id="case-1-35"></a>
 ### 1.35 Hover sub-popups
 
-**Prerequisites.** Windows and Linux. Use Japanese entries whose definitions reference other entries. Use Press mode and stage logs for the no-extra-OCR check.
+**Prerequisites.** Windows and Linux. Use Japanese entries whose definitions reference other entries. Use Hold mode and stage logs for the no-extra-OCR check.
 
 | ID | Case | Steps and expected result |
 |---|---|---|
 | 1.35 | Hover creates dictionary children | Windows/Linux: open an OCR popup, then hover Japanese text in its definition and in the resulting child. Open dictionary children while retaining their parents. |
 | 1.35.1 | Hover navigation preserves parent state | Windows/Linux: scroll and select text in a parent, enter a child, and return with Back or Escape. Preserve click history and parent state. Retire descendants on reentry, even after a miss. Expansion must invalidate late replies. Expire deferred plain-click clears. |
-| 1.35.2 | Ruby lookup and sub-popup toggle | Windows/Linux: in Press mode, hover a ruby-backed 食べる definition. Require the complete word and no new OCR stage for child lookup. Disable sub-popups and repeat; retain the root with no child. Restore configuration. |
+| 1.35.2 | Ruby lookup and sub-popup toggle | Windows/Linux: in Hold mode, hover a ruby-backed 食べる definition. Require the complete word and no new OCR stage for child lookup. Disable sub-popups and repeat; retain the root with no child. Restore configuration. |
 | 1.35.3 | Hover edges scrolling and hit regions | Windows/Linux: repeat near screen edges, across whitespace, while scrolling, and during text selection. Shift hover targets and painted text must match. Keep long paragraphs responsive. |
 | 1.35.4 | Hover modes and bounded depth | Windows/Linux: repeat in Follow pointer, While held, Turn on / off, and Once per press modes. With a linked fixture, enforce current hover bounds: 17 normal popup levels, 16 Windows search definitions, and 8 Linux search definitions. Navigation must remain responsive. Restore mode. |
 
