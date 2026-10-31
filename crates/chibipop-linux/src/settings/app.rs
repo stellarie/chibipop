@@ -1013,7 +1013,7 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
             }
         }
         Message::BindModePicked(id, mode) => {
-            if matches!(mode, TriggerMode::Press | TriggerMode::HoldKey | TriggerMode::Toggle) {
+            if matches!(mode, TriggerMode::HoldKey | TriggerMode::Toggle) {
                 if let Some(bind) = app.form.catalog.binds.iter_mut()
                     .find(|bind| bind.id == id && bind.action == BindAction::Lookup)
                 {
@@ -1525,7 +1525,7 @@ fn bind_card<'a>(app: &'a App, bind: &'a Bind) -> Element<'a, Message> {
             Element::from(pick_list(labels(&BIND_MODES), Some(mode_label), move |label| {
                 Message::BindModePicked(
                     mode_id.clone(),
-                    value_of(&BIND_MODES, &label, TriggerMode::Press),
+                    value_of(&BIND_MODES, &label, TriggerMode::HoldKey),
                 )
             }))
         } else {
@@ -2145,8 +2145,7 @@ fn ocr_page(app: &App) -> Element<'_, Message> {
 /// to the picker and the mode comes back. iced returns a label, while the
 /// Windows combo returns an index. Both windows use one table instead of a
 /// string match at the call site. The first item supplies the default.
-const BIND_MODES: [(TriggerMode, &str); 3] = [
-    (TriggerMode::Press, "Press"),
+const BIND_MODES: [(TriggerMode, &str); 2] = [
     (TriggerMode::HoldKey, "Hold"),
     (TriggerMode::Toggle, "Toggle"),
 ];

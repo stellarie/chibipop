@@ -161,7 +161,7 @@ Worker: capture -> mask -> OCR -> lookup -> present --result--> Controller
 - `popup.sub_popups` enables hover child popups and defaults to `true`. It does not control lookup shortcuts.
 - Query assembly skips the invisible ruby word joiner and preserves visible word boundaries.
 - Lookup Bind activation over painted popup text uses popup hit testing and direct dictionary lookup. It does not capture or OCR.
-- A Press, Hold, or Toggle activation over popup text performs one dictionary lookup. It uses the Bind's assigned Profile, not `nested_profile`.
+- A Hold or Toggle activation over popup text performs one dictionary lookup. It uses the Bind's assigned Profile, not `nested_profile`.
 - Blank popup space and a missed popup lookup do not dismiss the chain. The root Bind keeps ownership.
 - Parent popups remain visible. The Controller retains each parent's scroll, selections, and click history.
 - Popup nesting has no fixed depth cap, but resources remain finite.
@@ -185,7 +185,7 @@ Worker: capture -> mask -> OCR -> lookup -> present --result--> Controller
 - The Controller learns the result as `Event::PopupPlaced { rect }`.
 - Comments in `crates/chibipop-linux/src/popup/surface.rs` and `popup/text.rs` describe
   the Wayland surface protocol rules.
-- A click catcher exists in Press mode, for selected-text popups, and with `popup.hide_on_cursor_exit = false`
+- A click catcher exists in every mode but Live, for selected-text popups, and with `popup.hide_on_cursor_exit = false`
   while a popup is placed (`Controller::watches_outside_clicks`). The daemon gives every
   output a transparent full-output layer surface at the popup layer. Its input region covers
   the output except the popup rectangle. The catcher is never unmapped. Hide clears its input
@@ -241,13 +241,13 @@ Worker: capture -> mask -> OCR -> lookup -> present --result--> Controller
   until toggle-off. Configured Linux Toggle Binds use `bind-down ID`.
   The fixed `chibipop ctl toggle` verb remains supported. Windows flips the
   hook latch for both configured and fixed Toggle actions.
-- Press mode has no Frozen grab or Dwell re-check. Each Press Bind activation outside
-  a popup performs one live masked grab. Text found keeps the popup shown. A press with
-  no screen text hides the popup.
-- A Press, Hold, or Toggle activation over painted popup text performs one dictionary
+- Hold mode runs one lookup per key-down and ignores the key release. The popup stays
+  until an outside click (consumed by the click catcher or hook) or a later press that
+  finds no text. A press while a popup is shown performs a live masked grab, not a
+  Frozen one.
+- A Hold or Toggle activation over painted popup text performs one dictionary
   lookup without capture or OCR. Blank popup space or a popup lookup miss does not
   dismiss the chain.
-- In Press mode, screen cursor movement and key release do nothing, and per-character lookup is inert.
 - Hovering text inside an existing popup can still open a child popup.
 - A wrap probe follows pass 1 when the lookup would run past the line end and the box did
   not clip the line. Pass 1 must show no continuation. A continuation near pass 1's lead
@@ -390,7 +390,7 @@ Worker: capture -> mask -> OCR -> lookup -> present --result--> Controller
 - Existing popup chains and Search windows keep their Profile session. New sessions use later saved settings.
 - Nested routing selects the Profile for hover links and clicked dictionary links. It is separate from inheritance.
 - Explicit lookup shortcuts use the Bind's assigned Profile. Back restores profile, content, scroll, and selections. Same-headword suppression includes Profile ID.
-- Lookup Binds support Press, Hold, and Toggle. Other Bind actions activate once.
+- Lookup Binds support Hold and Toggle. Other Bind actions activate once.
 - Lookup, SelectedText, Search, SentenceSearch, and OcrClipboard accept profile overrides. AnkiAdd and StaticRegion use the displayed profile.
 - A new lookup Bind replaces the root and owns its chain. Live lookup pauses until the chain ends. Displaced releases do nothing.
 - Search identity is Search mode plus Profile ID. Linux Search text stays bounded stdin, and Linux has no profile picker.

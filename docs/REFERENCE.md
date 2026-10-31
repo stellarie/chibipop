@@ -107,7 +107,7 @@ chibipop ctl bind-up -- search-bilingual
 chibipop ctl bind-down -- -lookup
 ```
 
-Use `bind-up` for lookup Hold mode. Use `bind-down` for Press, Toggle, and
+Use `bind-up` for lookup Hold mode. Use `bind-down` for Toggle and
 one-shot actions. The daemon rejects IDs that are absent or disabled.
 
 Search identity is its mode and Profile ID. A reused Search keeps its
@@ -160,7 +160,7 @@ deadline and a limit of 65,536 UTF-8 bytes.
 controls hover child popups in **Settings > Popup**. Turning it off does not affect
 lookup shortcuts over popup text. Hover links and clicked dictionary links use `nested_profile`.
 
-Press, Hold, or Toggle activation over painted popup text performs one dictionary
+Hold or Toggle activation over painted popup text performs one dictionary
 lookup without capture or OCR. The lookup uses the shortcut's assigned profile, not
 `nested_profile`. It works even when `popup.sub_popups` is off. Blank popup space
 and a missed popup lookup do not dismiss the chain. Parent popups remain visible.
@@ -182,7 +182,7 @@ settings process, control-socket verbs, and three diagnostics.
 |---|---|
 | `chibipop run` | The daemon. The default when no subcommand is given. |
 | `chibipop settings` | The settings window, in its own process ([`ARCHITECTURE.md`](../ARCHITECTURE.md#settings-and-config)). A settings crash cannot take live hover down. |
-| `chibipop ctl VERB` | Sends one verb to the running daemon over its control socket. `lookup` runs one Press-mode lookup at the cursor. Bind these in your compositor. |
+| `chibipop ctl VERB` | Sends one verb to the running daemon over its control socket. `lookup` runs one lookup at the cursor. Bind these in your compositor. |
 | `chibipop probe` | Connects to the Wayland display, prints the capability report, exits. |
 | `chibipop capture-dump` | Grabs screen regions with the selected capture backend and writes PNGs. |
 | `chibipop clipboard-check` | Takes the clipboard selection with a known string and holds it. |
@@ -932,7 +932,7 @@ Clicks inside the popup work as usual.
 
 Key actions still hide the popup in every mode: releasing a Hold bind, turning a
 Toggle bind off, and a Press lookup outside the popup that finds no text (Escape
-too, on Windows). A Press, Hold, or Toggle lookup over popup text performs one
+too, on Windows). A Hold or Toggle lookup over popup text performs one
 dictionary lookup. Blank popup space and a missed popup lookup leave the chain
 unchanged. The setting belongs to a profile. The root popup's profile decides
 cursor-exit behavior for the whole chain.

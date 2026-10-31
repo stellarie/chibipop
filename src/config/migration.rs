@@ -61,7 +61,7 @@ struct SavedConfig {
 impl<'de> Deserialize<'de> for Config {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
         let value = toml::Value::deserialize(deserializer)?;
-        let config = if value.get("profiles").is_some() || value.get("version").is_some() {
+        let mut config = if value.get("profiles").is_some() || value.get("version").is_some() {
             let saved: SavedConfig = value.try_into().map_err(serde::de::Error::custom)?;
             Self {
                 version: saved.version, next_id: saved.next_id, default_profile: saved.default_profile,
@@ -72,6 +72,9 @@ impl<'de> Deserialize<'de> for Config {
         } else {
             migrate(value).map_err(serde::de::Error::custom)?
         };
+        for bind in config.binds.iter_mut().filter(|bind| bind.action == BindAction::Lookup) {
+            if bind.mode == TriggerMode::Press { bind.mode = TriggerMode::HoldKey; }
+        }
         config.validate().map_err(serde::de::Error::custom)?;
         Ok(config)
     }
@@ -142,7 +145,7 @@ fn migrate(mut value: toml::Value) -> Result<Config> {
             _ => old.actions.enabled,
         };
         if action == BindAction::Lookup {
-            bind.mode = if old.trigger.mode == TriggerMode::Live { TriggerMode::Press } else { old.trigger.mode };
+            bind.mode = if matches!(old.trigger.mode, TriggerMode::Live | TriggerMode::Press) { TriggerMode::HoldKey } else { old.trigger.mode };
         }
         bind
     }).collect();

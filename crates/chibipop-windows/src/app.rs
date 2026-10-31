@@ -3735,12 +3735,7 @@ struct Exec<'a> {
 fn drive(controller: &mut Controller, event: Event, x: &mut Exec<'_>) {
     if let Event::LookupBindUp { bind_id } = &event {
         if controller.active_bind_id() == Some(bind_id.as_str())
-            && matches!(
-                controller.trigger_mode(),
-                crate::config::TriggerMode::HoldKey
-                    | crate::config::TriggerMode::HoldShift
-                    | crate::config::TriggerMode::Toggle
-            )
+            && controller.trigger_mode() == crate::config::TriggerMode::Toggle
         {
             for visible in x.capture_restore { visible.set(false); }
         }
@@ -5561,9 +5556,9 @@ mod tests {
         for event in selection_release_events(vec![release]) {
             commands.extend(controller.handle(event));
         }
-        assert!(commands.contains(&Command::HidePopup));
+        assert!(!commands.contains(&Command::HidePopup));
         assert_eq!(None, controller.active_bind_id());
-        assert!(screenshot_restore_view(&controller).is_none());
+        assert!(screenshot_restore_view(&controller).is_some());
     }
 
     #[test]
