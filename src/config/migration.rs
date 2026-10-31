@@ -61,7 +61,7 @@ struct SavedConfig {
 impl<'de> Deserialize<'de> for Config {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
         let value = toml::Value::deserialize(deserializer)?;
-        let config = if value.get("profiles").is_some() || value.get("version").is_some() {
+        let mut config = if value.get("profiles").is_some() || value.get("version").is_some() {
             let saved: SavedConfig = value.try_into().map_err(serde::de::Error::custom)?;
             Self {
                 version: saved.version, next_id: saved.next_id, default_profile: saved.default_profile,
