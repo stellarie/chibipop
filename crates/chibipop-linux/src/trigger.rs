@@ -34,7 +34,7 @@ pub enum Step {
     Freeze,
     /// Start or keep a live-grab latch until `toggle` releases it.
     Latch,
-    /// Drop the frozen grab or release the live latch, and retract the popup.
+    /// Drop the frozen grab or release the live latch.
     Release,
     /// Keep the hold unchanged. The value gives the log reason.
     Nothing(&'static str),

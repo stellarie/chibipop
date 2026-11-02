@@ -925,7 +925,10 @@ impl App {
         match mode {
             TriggerMode::Press | TriggerMode::Live => {}
             TriggerMode::HoldKey => {
-                self.apply_bind_trigger(trigger::down(self.hold), Some(point));
+                // A frozen grab would capture a popup that is still up.
+                if !self.controller.is_shown() {
+                    self.apply_bind_trigger(trigger::down(self.hold), Some(point));
+                }
             }
             TriggerMode::Toggle => {
                 self.apply_bind_trigger(trigger::toggle(self.hold), Some(point));
@@ -1059,8 +1062,7 @@ impl App {
     /// configuration UI after binding.
     fn sync_shortcuts(&mut self) {
         if self.shortcut_selection != shortcuts::Selection::Portal {
-            let retired_hold = self.hold.is_some_and(|hold| !hold.latched)
-                && self.controller.trigger_mode() == TriggerMode::HoldKey
+            let retired_hold = self.controller.trigger_mode() == TriggerMode::HoldKey
                 && self.controller.active_bind_id().is_some_and(|id| {
                     !self.saved.binds.iter().any(|bind| {
                         bind.id == id

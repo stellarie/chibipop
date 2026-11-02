@@ -3151,24 +3151,21 @@ fn bind_action_index(action: BindAction) -> usize {
 
 fn bind_mode_at(index: isize) -> TriggerMode {
     match index {
-        1 => TriggerMode::HoldKey,
-        2 => TriggerMode::Toggle,
-        _ => TriggerMode::Press,
+        1 => TriggerMode::Toggle,
+        _ => TriggerMode::HoldKey,
     }
 }
 
 fn bind_mode_index(mode: TriggerMode) -> usize {
     match mode {
-        TriggerMode::Press => 0,
-        TriggerMode::HoldKey | TriggerMode::HoldShift => 1,
-        TriggerMode::Toggle => 2,
-        TriggerMode::Live => 0,
+        TriggerMode::Toggle => 1,
+        TriggerMode::Press | TriggerMode::HoldKey | TriggerMode::HoldShift | TriggerMode::Live => 0,
     }
 }
 
 fn bind_modes(action: BindAction) -> &'static [&'static str] {
     if action == BindAction::Lookup {
-        &["Press", "Hold", "Toggle"]
+        &["Hold", "Toggle"]
     } else {
         &["Press"]
     }
@@ -8206,13 +8203,13 @@ mod tests {
 
         select_combo_row(&window, action, bind_action_index(BindAction::Lookup));
         assert_eq!(
-            3,
+            2,
             unsafe { SendMessageW(mode_combo, CB_GETCOUNT, None, None).0 },
         );
         select_combo_row(&window, mode, 1);
         let read = window.read(&form);
         let bind = read.catalog.binds.iter().find(|bind| bind.id == bind_id).unwrap();
-        assert_eq!(TriggerMode::HoldKey, bind.mode);
+        assert_eq!(TriggerMode::Toggle, bind.mode);
     }
 
     #[test]

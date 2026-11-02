@@ -305,18 +305,17 @@ reads a live grab with the popup masked, so lookups see screen changes. The next
 popup and turns off the latch. Per-character lookup is inert in this mode, as in hold-key mode.
 _Avoid_: latch mode, sticky mode
 
-**Press mode**:
-One trigger-key press runs one lookup at the cursor. The lookup reads a live grab with the popup masked.
-If it finds text, the popup shows and stays. Hover never follows the cursor, and no Dwell re-check runs.
-If a press finds no text, the popup hides. A press over the popup also hides it because the mask gives
-no text. A button press outside the popup also hides it. The key release does nothing. Per-character
-lookup is inert in this mode.
-On Windows, the low-level mouse hook observes an outside button press without swallowing it, so the
-press reaches the window under the popup, unless `popup.hide_on_cursor_exit` is off.
-_Avoid_: one-shot mode, sticky popup
+**Hold mode**:
+One trigger-key press runs one lookup at the cursor. The key release does nothing. If a lookup finds
+text, the popup shows and stays until an outside button press, which is swallowed, or a later press
+that finds no text. Hover never follows the cursor and no Dwell re-check runs. A press while a popup
+is up reads a live grab with the popup masked. Per-character lookup is inert in this mode.
+Desktops that cannot send a key release (KDE and GNOME without a portal binding, Niri) can still
+use it through the `chibipop ctl lookup` verb or Toggle mode.
+_Avoid_: press mode, one-shot mode, sticky popup
 
 **Click catcher**:
-The transparent full-output layer surface that the daemon gives every output while a Press-mode popup,
+The transparent full-output layer surface that the daemon gives every output while a Hold-mode popup,
 a selected-text popup, or a popup with `popup.hide_on_cursor_exit = false` is placed.
 Its input region covers the output except a hole over the popup rectangle. It is never unmapped. When
 the daemon hides the popup, it clears the input region. It swallows the outside button press, so that
@@ -428,7 +427,7 @@ Existing Profile sessions can finish after a deletion.
 
 ## Bind rules
 
-Lookup binds support Press, Hold, and Toggle modes.
+Lookup binds support Hold and Toggle modes.
 Other Bind actions run once per activation.
 Lookup, SelectedText, Search, SentenceSearch, and OcrClipboard can select a profile.
 AnkiAdd and StaticRegion use the displayed profile.
