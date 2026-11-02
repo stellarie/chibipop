@@ -2,7 +2,6 @@
 //! and dictionary ordering behave like popup lookups without an OCR source.
 
 use crate::config::{Config, ProfileCatalog, ProfileSession, ResolvedConfig};
-use crate::dict::pitch::PitchClaim;
 use crate::lookup::deconj::Deconjugator;
 use crate::lookup::enabled::EnabledDictionary;
 use crate::lookup::engine::LookupEngine;
