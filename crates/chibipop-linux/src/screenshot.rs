@@ -350,7 +350,7 @@ fn query_hyprland() -> Result<Vec<Window>> {
         .filter_map(|monitor| {
             let id = monitor.get("id")?.as_i64()?;
             let active = monitor.get("activeWorkspace")?.get("id")?.as_i64()?;
-            let special = monitor.get("specialWorkspace")?.get("id")?.as_i64().unwrap_or(0);
+            let special = monitor.get("specialWorkspace").and_then(|s| s.get("id")).and_then(Value::as_i64).unwrap_or(0);
             Some((id, (active, special)))
         })
         .collect();
