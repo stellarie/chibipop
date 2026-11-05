@@ -1625,7 +1625,9 @@ fn worker_open(
     ui: WorkerUi,
 ) -> impl FnOnce() -> Result<WorkerParts> + Send + 'static {
     move || {
-        let backend = open_ocr_backend(&ocr_engine, &enabled_plugins, &language, &ui.monitor)?;
+        let opened = open_ocr_backend(&ocr_engine, &enabled_plugins, &language, &ui.monitor);
+        let ocr_available = opened.is_ok();
+        let backend = ocr_backend_or_unavailable(opened, &ocr_engine, &language, &ui.monitor);
         let OcrBackend { engine: ocr, name: active_engine, language: active_language } = backend;
         let active_selection = OcrSelection {
             engine: ocr_engine,
@@ -1642,7 +1644,9 @@ fn worker_open(
         })?;
         let rules = load_rules(rules_path.as_deref())?;
         let engine = LookupEngine::new(Deconjugator::new(rules));
-        ui.monitor.publish(&active_engine, &active_language, true);
+        if ocr_available {
+            ui.monitor.publish(&active_engine, &active_language, true);
+        }
         Ok(WorkerParts {
             capture: Box::new(capture),
             ocr,
@@ -3335,6 +3339,29 @@ fn open_ocr_backend(
         }
     }
 }
+
+/// Returns the backend, or `UnavailableOcr` on error.
+fn ocr_backend_or_unavailable(
+    result: Result<OcrBackend>,
+    requested_engine: &str,
+    requested_language: &str,
+    monitor: &OcrMonitor,
+) -> OcrBackend {
+    match result {
+        Ok(backend) => backend,
+        Err(error) => {
+            let reason = format!("{error:#}");
+            eprintln!("chibipop: OCR engine unavailable at startup: {reason}");
+            monitor.publish(requested_engine, requested_language, false);
+            OcrBackend {
+                engine: Box::new(UnavailableOcr { name: requested_engine.to_string(), reason }),
+                name: requested_engine.to_string(),
+                language: requested_language.to_string(),
+            }
+        }
+    }
+}
+
 /// Measures, places, shows, and paints the popup.
 fn show_presentation(
     popup: &Popup,
@@ -4685,6 +4712,27 @@ mod tests {
             source.recognise(&[255; 4], 1, 1).unwrap_err().to_string(),
         );
         Ok(())
+    }
+
+    #[test]
+    fn ocr_backend_or_unavailable_keeps_the_worker_alive() {
+        let monitor = OcrMonitor::default();
+        let backend = ocr_backend_or_unavailable(
+            Err(anyhow!("no ja recogniser")),
+            "windows-ocr",
+            "ja",
+            &monitor,
+        );
+        assert_eq!("windows-ocr", backend.name);
+        assert_eq!("windows-ocr", backend.engine.name());
+        assert_eq!(
+            "OCR engine unavailable: no ja recogniser",
+            backend.engine.recognise(&[255; 4], 1, 1).unwrap_err().to_string(),
+        );
+        assert_eq!(
+            OcrRuntime { engine: "windows-ocr".into(), language: "ja".into(), available: false },
+            monitor.snapshot(),
+        );
     }
 
     #[test]
