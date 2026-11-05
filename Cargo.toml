@@ -197,6 +197,9 @@ resvg = { version = "0.48.1", default-features = false }
 # which is what `probe` already documents that column as meaning.
 zune-jpeg = "0.5"
 gif = "0.14.2"
+# The screenshot JPEG encoder (`image::encode_bgra_to_jpeg`). Pure Rust
+# with no dependencies, so both bins keep the C-free build.
+jpeg-encoder = "0.7.1"
 # AVIF: 201 of this library's 236 assets and the awkward format,
 # because sizing one needs no decoder and painting one needs a whole AV1
 # implementation. Every C route was refused on the build it would cost:
@@ -253,6 +256,7 @@ png.workspace = true
 # instead of two.
 resvg.workspace = true
 zune-jpeg.workspace = true
+jpeg-encoder.workspace = true
 gif.workspace = true
 avif-rust.workspace = true
 rusqlite.workspace = true

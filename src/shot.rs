@@ -5,7 +5,7 @@
 //! a region, grab pixels, and restore windows. These rules do not depend on
 //! platform facts (ARCHITECTURE.md#workspace-and-seams).
 
-use crate::config::{AnkiConfig, ResolvedConfig};
+use crate::config::{AnkiConfig, ImageFormat, ResolvedConfig};
 use anyhow::{Context, Result};
 use base64::Engine;
 use std::collections::HashMap;
@@ -18,10 +18,20 @@ pub struct ShotPlan {
     /// [`Event::NoteAdded`](crate::controller::Event) returns.
     pub expr: String,
     pub fields: HashMap<String, String>,
-    /// `<save_root>/<sanitized expr>_<epoch seconds>.png`.
+    /// `<save_root>/<sanitized expr>_<epoch seconds>.<png|jpg>`.
     pub path: PathBuf,
     /// The Anki fields that receive the picture.
     pub picture_fields: Vec<String>,
+    pub encoding: Encoding,
+}
+
+/// How [`encode`] writes the picture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Encoding {
+    pub format: ImageFormat,
+    pub jpeg_quality: u8,
+    /// The longest side in physical pixels. 0 keeps the full size.
+    pub max_size: u32,
 }
 
 /// Plans the screenshot that accompanies an already-authorized add, or returns
@@ -54,7 +64,17 @@ fn make_plan(
     save_root: &Path,
     now: u64,
 ) -> ShotPlan {
-    let path = save_root.join(format!("{}_{now}.png", sanitize_filename(&expr)));
+    let shot = &cfg.actions.screenshot;
+    let encoding = Encoding {
+        format: shot.image_format,
+        jpeg_quality: shot.jpeg_quality,
+        max_size: shot.max_size,
+    };
+    let path = save_root.join(format!(
+        "{}_{now}.{}",
+        sanitize_filename(&expr),
+        encoding.format.extension()
+    ));
     let picture_fields = cfg
         .anki
         .field_map
@@ -62,35 +82,50 @@ fn make_plan(
         .filter(|m| m.source == "screenshot")
         .map(|m| m.anki_field.clone())
         .collect();
-    ShotPlan { expr, fields, path, picture_fields }
+    ShotPlan { expr, fields, path, picture_fields, encoding }
 }
 
-/// Writes the PNG and creates the save folder when needed.
-pub fn save(png: &[u8], plan: &ShotPlan) -> Result<()> {
+/// Encodes top-down BGRA8 pixels as the plan asks.
+pub fn encode(bgra: &[u8], w: i32, h: i32, plan: &ShotPlan) -> Result<Vec<u8>> {
+    let small = crate::image::shrink_bgra(bgra, w, h, plan.encoding.max_size);
+    let (bgra, w, h) = match &small {
+        Some((px, w, h)) => (px.as_slice(), *w, *h),
+        None => (bgra, w, h),
+    };
+    match plan.encoding.format {
+        ImageFormat::Png => crate::image::encode_bgra_to_png(bgra, w, h),
+        ImageFormat::Jpeg => {
+            crate::image::encode_bgra_to_jpeg(bgra, w, h, plan.encoding.jpeg_quality)
+        }
+    }
+}
+
+/// Writes the picture and creates the save folder when needed.
+pub fn save(image: &[u8], plan: &ShotPlan) -> Result<()> {
     if let Some(dir) = plan.path.parent() {
         std::fs::create_dir_all(dir)
             .with_context(|| format!("creating {}", dir.display()))?;
     }
-    std::fs::write(&plan.path, png)
+    std::fs::write(&plan.path, image)
         .with_context(|| format!("writing {}", plan.path.display()))
 }
 
 /// Calls [`save`], then writes the note with its picture.
 ///
 /// Anki copies the attached file to `collection.media`. The copy uses the
-/// `chibipop-screenshot-` namespace and the saved file stem, so a user can
+/// `chibipop-screenshot-` namespace and the saved file name, so a user can
 /// match the two names.
 pub fn save_and_add(
-    png: &[u8],
+    image: &[u8],
     plan: &ShotPlan,
     anki: &AnkiConfig,
 ) -> Result<crate::anki::WriteResult> {
-    save(png, plan)?;
+    save(image, plan)?;
     let picture = (!plan.picture_fields.is_empty()).then(|| crate::anki::NotePicture {
-        data_base64: base64::engine::general_purpose::STANDARD.encode(png),
+        data_base64: base64::engine::general_purpose::STANDARD.encode(image),
         filename: format!(
-            "chibipop-screenshot-{}.png",
-            plan.path.file_stem().unwrap_or_default().to_string_lossy()
+            "chibipop-screenshot-{}",
+            plan.path.file_name().unwrap_or_default().to_string_lossy()
         ),
         fields: plan.picture_fields.clone(),
     });
@@ -107,7 +142,7 @@ pub fn save_and_add(
 
 /// Returns seconds since the epoch for a screenshot file name.
 ///
-/// [`plan_add`] names files `<word>_<epoch seconds>.png`. Both bins pass this value
+/// [`plan_add`] names files `<word>_<epoch seconds>.<png|jpg>`. Both bins pass this value
 /// as `now`, so a screenshots folder keeps one name pattern on both platforms.
 pub fn epoch_secs() -> u64 {
     std::time::SystemTime::now()
@@ -186,6 +221,27 @@ mod tests {
         );
         assert_eq!("\u{5bbf}\u{820e}", plan.expr);
         assert_eq!(fields, plan.fields);
+    }
+
+    /// A 2901x1637 game window gave a 6.25 MB PNG that missed the AnkiConnect timeout.
+    #[test]
+    fn a_jpeg_plan_shrinks_a_large_capture_and_keeps_its_colors() {
+        let mut cfg = cfg_on();
+        cfg.actions.screenshot.image_format = ImageFormat::Jpeg;
+        cfg.actions.screenshot.max_size = 1280;
+        let plan = plan_add("猫", &HashMap::new(), &cfg, Path::new(ROOT), 1_700_000_000).unwrap();
+        assert_eq!(Path::new(ROOT).join("猫_1700000000.jpg"), plan.path);
+
+        let (w, h) = (2901, 1637);
+        let bgra = [40u8, 120, 200, 0].repeat(w * h);
+        let jpeg = encode(&bgra, w as i32, h as i32, &plan).unwrap();
+
+        let mut decoder = zune_jpeg::JpegDecoder::new(std::io::Cursor::new(&jpeg));
+        let rgb = decoder.decode().unwrap();
+        assert_eq!(Some((1280, 722)), decoder.dimensions());
+        for (got, want) in rgb[..3].iter().zip([200u8, 120, 40]) {
+            assert!(got.abs_diff(want) <= 2, "BGR -> RGB: got {:?}", &rgb[..3]);
+        }
     }
 
 }

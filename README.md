@@ -512,6 +512,12 @@ For example, the default Linux folder is
 Anki copies each screenshot into its own media folder. The `screenshots`
 folder keeps your local copies.
 
+**Picture size.** A full-screen PNG can be several megabytes. To keep your
+Anki collection small, set **Picture format** to **JPEG** and set
+**Largest side** on the **Anki** tab on Linux. On Windows, set
+`image_format`, `jpeg_quality`, and `max_size` under `[actions.screenshot]`.
+The picture keeps its aspect ratio and is never enlarged.
+
 ### Add the sentence
 
 Map an Anki field to `sentence` before you choose a sentence source.
