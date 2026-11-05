@@ -3424,13 +3424,13 @@ fn handle_screenshot_save(
     cmd: crate::action::ScreenshotCommand,
 ) -> crate::action::ScreenshotResult {
     let filed = (|| -> anyhow::Result<Option<anki::WriteResult>> {
-        let png = crate::image::encode_bgra_to_png(&cmd.bgra_buf, cmd.width, cmd.height)?;
+        let image = crate::shot::encode(&cmd.bgra_buf, cmd.width, cmd.height, &cmd.plan)?;
         if cmd.anki_connected && !cmd.plan.expr.is_empty() {
-            return crate::shot::save_and_add(&png, &cmd.plan, &cmd.anki).map(Some);
+            return crate::shot::save_and_add(&image, &cmd.plan, &cmd.anki).map(Some);
         }
         // If Anki is unreachable, save the screenshot without a card.
         // No card means that no add occurs.
-        crate::shot::save(&png, &cmd.plan)?;
+        crate::shot::save(&image, &cmd.plan)?;
         Ok(None)
     })();
     crate::action::ScreenshotResult {
@@ -5709,6 +5709,7 @@ mod tests {
             fields: HashMap::from([("expression".to_string(), "猫".to_string())]),
             path,
             picture_fields: vec!["Screenshot".to_string()],
+            encoding: Default::default(),
         }
     }
 

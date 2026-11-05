@@ -540,8 +540,8 @@ impl AnkiCall {
             AnkiCall::Shot { id, session, plan, bgra, w, h } => {
                 let anki = &session.config().anki;
                 let filed = (|| -> Result<chibipop::anki::WriteResult> {
-                    let png = chibipop::image::encode_bgra_to_png(&bgra, w, h)?;
-                    chibipop::shot::save_and_add(&png, &plan, anki)
+                    let image = chibipop::shot::encode(&bgra, w, h, &plan)?;
+                    chibipop::shot::save_and_add(&image, &plan, anki)
                 })();
                 AnkiOutcome::Shot {
                     id,

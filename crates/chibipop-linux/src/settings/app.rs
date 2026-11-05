@@ -25,7 +25,7 @@ use crate::shortcuts;
 use anyhow::Context;
 use chibipop::config::{
     Bind, BindAction, FieldMapping, FieldOverride, LayoutMode, PopupLayer, ProfileData,
-    ScreenshotMode, SelectionButtons, SelectionSeparator, SentenceMode, TriggerMode, TripleClick,
+    ImageFormat, ScreenshotMode, SelectionButtons, SelectionSeparator, SentenceMode, TriggerMode, TripleClick,
     FIELD_SOURCES, MAX_HEIGHT_RANGE, MAX_WIDTH_RANGE, PASSES_RANGE, PROFILE_FIELDS, SUMMARY_RANGE,
 };
 use chibipop::dict::frequency::RankingStrategy;
@@ -762,6 +762,11 @@ enum Message {
     /// Clear both saved fixed screenshot targets.
     ResetScreenshotTargets,
     ScreenshotSaveDir(String),
+    /// [`IMAGE_FORMATS`] maps the label to a value.
+    ImageFormatPicked(String),
+    JpegQuality(u8),
+    /// [`MAX_SIZES`] maps the label to a value.
+    MaxSizePicked(String),
     LaunchSearch(SearchMode),
     SearchClosed(Result<(), String>),
     OpenSentenceSearch(bool),
@@ -928,6 +933,15 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
         }
         Message::ScreenshotSaveDir(v) => {
             app.form.cfg.actions.screenshot.save_dir = v;
+        }
+        Message::ImageFormatPicked(label) => {
+            app.form.cfg.actions.screenshot.image_format =
+                value_of(&IMAGE_FORMATS, &label, ImageFormat::default());
+        }
+        Message::JpegQuality(v) => app.form.cfg.actions.screenshot.jpeg_quality = v,
+        Message::MaxSizePicked(label) => {
+            let max = app.form.cfg.actions.screenshot.max_size;
+            app.form.cfg.actions.screenshot.max_size = value_of(&MAX_SIZES, &label, max);
         }
         Message::LaunchSearch(mode) => return launch_search(app, mode),
         Message::SearchClosed(Err(error)) => app.status = error,
@@ -2210,11 +2224,29 @@ const SCREENSHOT_MODES: [(ScreenshotMode, &str); 4] = [
     (ScreenshotMode::FixedWindow, "Reuse one window"),
 ];
 
+/// The screenshot format picker items, in display order.
+const IMAGE_FORMATS: [(ImageFormat, &str); 2] = [
+    (ImageFormat::Png, "PNG (lossless)"),
+    (ImageFormat::Jpeg, "JPEG (smaller)"),
+];
+
+/// The screenshot size picker items, in display order.
+const MAX_SIZES: [(u32, &str); 5] = [
+    (0, "Full size"),
+    (1920, "1920 px"),
+    (1280, "1280 px"),
+    (960, "960 px"),
+    (640, "640 px"),
+];
+
 /// The screenshot rows control inclusion on add, the save folder, the mode, and saved targets.
 ///
 /// Show every row in every state. The folder stores local copies of card pictures.
 fn screenshot_rows(app: &App) -> Vec<Element<'_, Message>> {
     let anki_enabled = app.form.cfg.anki.enabled;
+    let shot = &app.form.cfg.actions.screenshot;
+    let max_size = MAX_SIZES.iter().find(|entry| entry.0 == shot.max_size)
+        .map_or_else(|| format!("{} px", shot.max_size), |entry| entry.1.to_string());
     let region_summary = match app.form.cfg.actions.screenshot.fixed_region {
         Some([x, y, width, height]) => format!(
             "Saved fixed region: x={x}, y={y}, width={width}, height={height} physical pixels."
@@ -2254,6 +2286,30 @@ fn screenshot_rows(app: &App) -> Vec<Element<'_, Message>> {
         button("Reset saved screenshot targets")
             .on_press(Message::ResetScreenshotTargets)
             .into(),
+        labeled(
+            "Picture format",
+            pick_list(
+                labels(&IMAGE_FORMATS),
+                Some(label_of(&IMAGE_FORMATS, shot.image_format).to_string()),
+                Message::ImageFormatPicked,
+            ),
+        ),
+        labeled(
+            "JPEG quality",
+            row![
+                slider(1..=100, shot.jpeg_quality, Message::JpegQuality).width(220),
+                text(shot.jpeg_quality.to_string()),
+            ]
+            .spacing(10),
+        ),
+        labeled(
+            "Largest side",
+            pick_list(labels(&MAX_SIZES), Some(max_size), Message::MaxSizePicked),
+        ),
+        hint(
+            "JPEG and a smaller size keep Anki media small. The picture keeps its aspect \
+             ratio and is never enlarged."
+        ),
         labeled(
             "Screenshots folder",
             text_input("screenshots", &app.form.cfg.actions.screenshot.save_dir)

@@ -1,4 +1,4 @@
-//! The core PNG encoder.
+//! The core PNG and JPEG encoders.
 //!
 //! Both platform bins send pixels to Anki and disk. Each bin once had its own
 //! writer. Windows used WinRT's `BitmapEncoder`, which required its screenshot
@@ -8,6 +8,7 @@
 //! These details do not belong to a platform. A PNG has one format. Core now
 //! owns one pure-Rust encoder. The daemon's capture dumps no longer use
 //! raw-size files, and the Windows screenshot thread needs no apartment.
+//! Screenshots can also be JPEG and smaller (`shot::encode`).
 
 use anyhow::{Context, Result};
 
@@ -60,6 +61,58 @@ fn encode_png(bgra: &[u8], w: i32, h: i32, compression: png::Compression) -> Res
     writer.write_image_data(&rgb).context("compressing the PNG")?;
     writer.finish().context("closing the PNG")?;
     Ok(out)
+}
+
+/// Encode `bgra` as a baseline JPEG. `quality` is clamped to 1-100.
+/// The layout and the errors match [`encode_bgra_to_png`].
+pub fn encode_bgra_to_jpeg(bgra: &[u8], w: i32, h: i32, quality: u8) -> Result<Vec<u8>> {
+    let dims = u16::try_from(w).ok().zip(u16::try_from(h).ok());
+    let Some((w, h)) = dims.filter(|(w, h)| *w > 0 && *h > 0) else {
+        anyhow::bail!("a JPEG needs dimensions from 1 to 65535, not {w}x{h}");
+    };
+    let need = (w as usize) * (h as usize) * 4;
+    anyhow::ensure!(
+        bgra.len() >= need,
+        "{w}x{h} needs {need} bytes of BGRA, got {}",
+        bgra.len()
+    );
+    let mut out = Vec::new();
+    jpeg_encoder::Encoder::new(&mut out, quality.clamp(1, 100))
+        .encode(&bgra[..need], w, h, jpeg_encoder::ColorType::Bgra)
+        .context("encoding the JPEG")?;
+    Ok(out)
+}
+
+/// Shrink `bgra` so that its longest side is at most `max`, with a box filter.
+/// Returns `None` when the image already fits or `max` is 0.
+pub fn shrink_bgra(bgra: &[u8], w: i32, h: i32, max: u32) -> Option<(Vec<u8>, i32, i32)> {
+    let (sw, sh) = (usize::try_from(w).ok()?, usize::try_from(h).ok()?);
+    let longest = sw.max(sh);
+    let max = max as usize;
+    if max == 0 || longest <= max || bgra.len() < sw * sh * 4 {
+        return None;
+    }
+    let dw = ((sw * max + longest / 2) / longest).max(1);
+    let dh = ((sh * max + longest / 2) / longest).max(1);
+    let mut out = Vec::with_capacity(dw * dh * 4);
+    for dy in 0..dh {
+        let (y0, y1) = (dy * sh / dh, ((dy + 1) * sh / dh).max(dy * sh / dh + 1));
+        for dx in 0..dw {
+            let (x0, x1) = (dx * sw / dw, ((dx + 1) * sw / dw).max(dx * sw / dw + 1));
+            let mut sum = [0u32; 4];
+            for y in y0..y1 {
+                let row = &bgra[(y * sw + x0) * 4..(y * sw + x1) * 4];
+                for px in row.as_chunks::<4>().0 {
+                    for (acc, &c) in sum.iter_mut().zip(px) {
+                        *acc += u32::from(c);
+                    }
+                }
+            }
+            let n = ((y1 - y0) * (x1 - x0)) as u32;
+            out.extend(sum.map(|acc| ((acc + n / 2) / n) as u8));
+        }
+    }
+    Some((out, dw as i32, dh as i32))
 }
 
 #[cfg(test)]
