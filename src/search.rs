@@ -2,10 +2,10 @@
 //! and dictionary ordering behave like popup lookups without an OCR source.
 
 use crate::config::{Config, ProfileCatalog, ProfileSession, ResolvedConfig};
-use crate::dict::pitch::PitchClaim;
 use crate::lookup::deconj::Deconjugator;
+use crate::lookup::enabled::EnabledDictionary;
 use crate::lookup::engine::LookupEngine;
-use crate::lookup::model::{Dictionary, Entry, TermRow};
+use crate::lookup::model::Dictionary;
 use crate::lookup::rules::load_rules;
 use crate::lookup::sqlite::SqliteDictionary;
 use crate::present::{self, DictInfo, PresentConfig, Presentation};
@@ -172,11 +172,11 @@ impl SearchService {
     }
 
     pub fn sentence_tokens(&self, text: &str) -> Result<Vec<SentenceToken>> {
-        dictionary_tokens(&enabled_dictionary(&self.dictionary, &self.dicts, &self.config), &self.engine, text)
+        dictionary_tokens(&EnabledDictionary::new(&self.dictionary, &self.dicts, &self.config), &self.engine, text)
     }
 
     pub fn sentence_tokens_in(&self, session: &ProfileSession, text: &str) -> Result<Vec<SentenceToken>> {
-        dictionary_tokens(&enabled_dictionary(&self.dictionary, &self.dicts, session.present_config()), &self.engine, text)
+        dictionary_tokens(&EnabledDictionary::new(&self.dictionary, &self.dicts, session.present_config()), &self.engine, text)
     }
 
     pub fn search_word(&self, word: &str) -> Result<SearchResult> {
@@ -186,12 +186,6 @@ impl SearchService {
     pub fn search_word_in(&self, session: &ProfileSession, word: &str) -> Result<SearchResult> {
         word_search(&self.dictionary, &self.engine, &self.dicts, session.present_config(), word)
     }
-}
-
-fn enabled_dictionary<'a>(dictionary: &'a dyn Dictionary, dicts: &[DictInfo],
-    config: &PresentConfig) -> EnabledDictionary<'a> {
-    EnabledDictionary { dictionary, ids: dicts.iter().filter(|dict| config.terms.contains(&dict.name))
-        .map(|dict| dict.dict_id).collect() }
 }
 
 fn dictionary_tokens(dictionary: &dyn Dictionary, engine: &LookupEngine, text: &str) -> Result<Vec<SentenceToken>> {
@@ -220,7 +214,7 @@ fn dictionary_tokens(dictionary: &dyn Dictionary, engine: &LookupEngine, text: &
 fn word_search(dictionary: &dyn Dictionary, engine: &LookupEngine, dicts: &[DictInfo],
     config: &PresentConfig, word: &str) -> Result<SearchResult> {
     if word.trim().is_empty() { return Ok(SearchResult::Empty); }
-    let enabled = enabled_dictionary(dictionary, dicts, config);
+    let enabled = EnabledDictionary::new(dictionary, dicts, config);
     let mut hits = Vec::new();
     let has_kana = word.chars().any(|ch| matches!(ch, '\u{3040}'..='\u{30ff}'));
     for (offset, _) in word.char_indices().take(crate::lookup::engine::MAX_LOOKUP_CHARS) {
@@ -237,32 +231,10 @@ fn word_search(dictionary: &dyn Dictionary, engine: &LookupEngine, dicts: &[Dict
     Ok(if presentation.top.is_some() { SearchResult::Found(Box::new(presentation)) } else { SearchResult::Miss })
 }
 
-struct EnabledDictionary<'a> {
-    dictionary: &'a dyn Dictionary,
-    ids: Vec<i64>,
-}
-
-impl Dictionary for EnabledDictionary<'_> {
-    fn terms_for(&self, surface: &str) -> Result<Vec<TermRow>> {
-        Ok(self.dictionary.terms_for(surface)?.into_iter()
-            .filter(|row| self.ids.contains(&row.dict_id)).collect())
-    }
-
-    fn entries(&self, ids: &[i64]) -> Result<Vec<Entry>> { self.dictionary.entries(ids) }
-    fn dicts(&self) -> Result<Vec<DictInfo>> { self.dictionary.dicts() }
-    fn pitch_for(&self, term: &str, reading: &str) -> Vec<PitchClaim> {
-        self.dictionary.pitch_for(term, reading)
-    }
-}
-
 fn search(dictionary: &dyn Dictionary, engine: &LookupEngine, dicts: &[DictInfo],
     config: &PresentConfig, query: &str) -> Result<SearchResult> {
     if query.trim().is_empty() { return Ok(SearchResult::Empty); }
-    let enabled = EnabledDictionary {
-        dictionary,
-        ids: dicts.iter().filter(|dict| config.terms.contains(&dict.name))
-            .map(|dict| dict.dict_id).collect(),
-    };
+    let enabled = EnabledDictionary::new(dictionary, dicts, config);
     let hits = engine.run(&enabled, query)?;
     let presentation = present::build(&hits, dicts, config, dictionary);
     Ok(if presentation.top.is_some() { SearchResult::Found(Box::new(presentation)) }
