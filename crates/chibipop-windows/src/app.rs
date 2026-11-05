@@ -1376,6 +1376,19 @@ fn spawn_detect_fields(
     });
 }
 
+/// Opens the CSS editor, or focuses the open one.
+fn open_css_editor(
+    slot: &mut Option<crate::ui::editor::CssEditor>,
+    open: impl FnOnce() -> Result<crate::ui::editor::CssEditor>,
+) -> Result<()> {
+    if let Some(editor) = slot.as_ref().filter(|editor| editor.is_visible()) {
+        editor.focus();
+        return Ok(());
+    }
+    *slot = Some(open()?);
+    Ok(())
+}
+
 /// Processes one settings click for Anki, update, or the CSS editor.
 fn service_settings_click(
     w: &SettingsWindow,
@@ -1448,9 +1461,9 @@ fn service_settings_click(
             let css_path = crate::paths::beside_exe("popup.css");
             let theme_name = w.read_theme_name();
             let font = w.read_font_name();
-            match crate::ui::editor::CssEditor::open(&css_path, &theme_name, &font) {
-                Ok(ed) => *css_editor = Some(ed),
-                Err(e) => eprintln!("chibipop: CSS editor: {e:#}"),
+            let open = || crate::ui::editor::CssEditor::open(&css_path, &theme_name, &font);
+            if let Err(e) = open_css_editor(css_editor, open) {
+                eprintln!("chibipop: CSS editor: {e:#}");
             }
             None
         }
@@ -4598,6 +4611,41 @@ mod tests {
 
     // Capture and a native window crash together.
     static NATIVE: Mutex<()> = Mutex::new(());
+
+    fn open_test_editor() -> Result<crate::ui::editor::CssEditor> {
+        let path = std::env::temp_dir().join("chibipop-css-editor-test.css");
+        crate::ui::editor::CssEditor::open(&path, "dark", "Segoe UI")
+    }
+
+    #[test]
+    fn css_editor_second_open_keeps_the_open_window() -> Result<()> {
+        let _native = NATIVE.lock().unwrap_or_else(|error| error.into_inner());
+        let mut slot = None;
+        open_css_editor(&mut slot, open_test_editor)?;
+        let first = slot.as_ref().map(|editor| editor.hwnd());
+        assert!(first.is_some());
+        let mut second_ran = false;
+        open_css_editor(&mut slot, || {
+            second_ran = true;
+            open_test_editor()
+        })?;
+        assert!(!second_ran);
+        assert_eq!(slot.as_ref().map(|editor| editor.hwnd()), first);
+        Ok(())
+    }
+
+    #[test]
+    fn css_editor_drop_destroys_its_window() -> Result<()> {
+        let _native = NATIVE.lock().unwrap_or_else(|error| error.into_inner());
+        let editor = open_test_editor()?;
+        let hwnd = editor.hwnd();
+        // SAFETY: `IsWindow` accepts any handle value.
+        assert!(unsafe { windows::Win32::UI::WindowsAndMessaging::IsWindow(Some(hwnd)) }.as_bool());
+        drop(editor);
+        // SAFETY: `IsWindow` accepts any handle value.
+        assert!(!unsafe { windows::Win32::UI::WindowsAndMessaging::IsWindow(Some(hwnd)) }.as_bool());
+        Ok(())
+    }
 
     #[test]
     fn worker_serve_preserves_idle_backend_and_applies_explicit_reload() -> Result<()> {
