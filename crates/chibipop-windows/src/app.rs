@@ -3061,24 +3061,13 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: Option<&Path>, config_
             }
         } else if msg.message == WM_APP_CONTROL {
             while let Ok(request) = control_rx.try_recv() {
-                // Each error becomes an ERR reply.
-                let reply = if request.line != "reload" {
-                    "ERR unknown verb".to_string()
-                } else {
-                    match crate::config::load_or_create(config_path) {
-                        Err(error) => format!("ERR {error:#}"),
-                        Ok(updated) => match ProfileCatalog::new(&updated, &dicts) {
-                            Err(error) => format!("ERR {error:#}"),
-                            Ok(_) if pending_ocr_reload.lock().is_err() => {
-                                "ERR poisoned OCR reload lock".to_string()
-                            }
-                            Ok(_) => {
-                                let previous = cfg.clone();
-                                let previous_dicts = dicts.clone();
-                                install_runtime_catalog!(updated, previous, previous_dicts);
-                                "OK reload".to_string()
-                            }
-                        },
+                let reply = match check_reload(&request.line, config_path, &dicts, &pending_ocr_reload) {
+                    Err(line) => line,
+                    Ok(updated) => {
+                        let previous = cfg.clone();
+                        let previous_dicts = dicts.clone();
+                        install_runtime_catalog!(updated, previous, previous_dicts);
+                        "OK reload".to_string()
                     }
                 };
                 let _ = request.reply.send(reply);
@@ -4488,6 +4477,26 @@ fn open_search_window_mode(
     }
 }
 
+/// Checks a reload request before the macro runs.
+///
+/// Returns the new config, or the ERR line to send.
+fn check_reload(
+    line: &str,
+    config_path: &Path,
+    dicts: &[DictInfo],
+    pending_ocr_reload: &Mutex<Option<ProfileSession>>,
+) -> std::result::Result<Config, String> {
+    if line != "reload" {
+        return Err("ERR unknown verb".to_string());
+    }
+    let updated = crate::config::load_or_create(config_path).map_err(|error| format!("ERR {error:#}"))?;
+    ProfileCatalog::new(&updated, dicts).map_err(|error| format!("ERR {error:#}"))?;
+    if pending_ocr_reload.lock().is_err() {
+        return Err("ERR poisoned OCR reload lock".to_string());
+    }
+    Ok(updated)
+}
+
 /// Saves the config while the pump stays responsive.
 fn save_in_background(
     prev: &mut Option<thread::JoinHandle<()>>,
@@ -5156,6 +5165,79 @@ mod tests {
             saved_default,
             crate::config::load_or_create(&path).unwrap().default_profile
         );
+    }
+
+    /// Saves a config that differs from the default.
+    fn reload_file(test_name: &str) -> (PathBuf, ScratchDir) {
+        let (dir, scratch) = edit_scratch(test_name);
+        let path = dir.join("config.toml");
+        let mut config = Config::default();
+        config.application.background_on_close = true;
+        config.save(&path).unwrap();
+        (path, scratch)
+    }
+
+    /// An unknown verb gets an ERR line.
+    #[test]
+    fn reload_unknown_verb_is_refused() {
+        let (path, _scratch) = reload_file("reload_verb");
+        let lock = Mutex::new(None);
+        assert_eq!(check_reload("bogus", &path, &[], &lock), Err("ERR unknown verb".to_string()));
+    }
+
+    /// A file that does not parse gets an ERR line.
+    #[test]
+    fn reload_unreadable_file_replies_err() {
+        let (path, _scratch) = reload_file("reload_unreadable");
+        std::fs::write(&path, "not = [valid").unwrap();
+        let lock = Mutex::new(None);
+        let line = check_reload("reload", &path, &[], &lock).unwrap_err();
+        assert!(line.starts_with("ERR "), "{line}");
+        assert!(line.contains("parsing config"), "{line}");
+    }
+
+    /// A file with no default profile gets ERR.
+    #[test]
+    fn reload_invalid_profile_replies_err() {
+        let (path, _scratch) = reload_file("reload_profile");
+        let text = std::fs::read_to_string(&path).unwrap();
+        let id = Config::default().default_profile;
+        let broken = text.replace(&format!("default_profile = \"{id}\""), "default_profile = \"missing\"");
+        assert_ne!(text, broken);
+        std::fs::write(&path, broken).unwrap();
+        let lock = Mutex::new(None);
+        let line = check_reload("reload", &path, &[], &lock).unwrap_err();
+        assert!(line.starts_with("ERR "), "{line}");
+        assert!(line.contains("default profile does not exist"), "{line}");
+    }
+
+    /// A poisoned OCR lock gets an ERR line.
+    #[test]
+    fn reload_poisoned_lock_replies_err() {
+        let (path, _scratch) = reload_file("reload_poison");
+        let lock = Arc::new(Mutex::new(None));
+        let held = Arc::clone(&lock);
+        let _ = thread::spawn(move || {
+            let _guard = held.lock().unwrap();
+            panic!("poison the OCR reload lock");
+        })
+        .join();
+        assert!(lock.is_poisoned());
+        assert_eq!(
+            check_reload("reload", &path, &[], &lock),
+            Err("ERR poisoned OCR reload lock".to_string())
+        );
+    }
+
+    /// A valid file returns its config.
+    #[test]
+    fn reload_valid_file_returns_the_config() {
+        let (path, _scratch) = reload_file("reload_valid");
+        let lock = Mutex::new(None);
+        let got = check_reload("reload", &path, &[], &lock).unwrap();
+        assert!(got.application.background_on_close);
+        assert_eq!(got, crate::config::load_or_create(&path).unwrap());
+        assert!(lock.try_lock().is_ok());
     }
 
     #[test]
