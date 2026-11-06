@@ -231,6 +231,9 @@ fn disconnect(pipe: &PipeHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs::{File, OpenOptions};
+    use std::io::{BufRead, BufReader, Write};
+    use std::path::PathBuf;
 
     /// Both crates assert this one literal.
     #[test]
@@ -239,5 +242,133 @@ mod tests {
             pipe_name(Path::new(r"C:\Users\x\chibipop.toml")),
             r"\\.\pipe\chibipop-control-b3e76833bdc645c8"
         );
+    }
+
+    const BUSY: i32 = 231;
+    const CLIENT_BUDGET: Duration = Duration::from_secs(30);
+
+    /// Starts a listener on a name unique to `tag`.
+    fn listen(tag: &str) -> (PathBuf, String, mpsc::Receiver<ControlRequest>) {
+        let file = format!("chibipop_control_{tag}_{}.toml", std::process::id());
+        let path = std::env::temp_dir().join(file);
+        let (tx, rx) = mpsc::channel();
+        spawn_listener(&path, 0, tx).unwrap();
+        let name = pipe_name(&path);
+        (path, name, rx)
+    }
+
+    /// Plays the main thread and answers each line.
+    fn answer(rx: mpsc::Receiver<ControlRequest>, reply: fn(&str) -> String) {
+        thread::spawn(move || {
+            for request in rx {
+                let _ = request.reply.send(reply(&request.line));
+            }
+        });
+    }
+
+    /// Opens the pipe and retries while the pipe is busy.
+    fn connect(name: &str) -> File {
+        let end = Instant::now() + CLIENT_BUDGET;
+        loop {
+            match OpenOptions::new().read(true).write(true).open(name) {
+                Ok(file) => return file,
+                Err(error) if error.raw_os_error() == Some(BUSY) && Instant::now() < end => {
+                    thread::sleep(Duration::from_millis(50));
+                }
+                Err(error) => panic!("opening {name}: {error}"),
+            }
+        }
+    }
+
+    /// Sends `bytes` and returns the reply line.
+    fn ask(name: &str, bytes: &[u8]) -> String {
+        let mut file = connect(name);
+        file.write_all(bytes).unwrap();
+        let mut line = String::new();
+        BufReader::new(file).read_line(&mut line).unwrap();
+        line
+    }
+
+    fn echo(line: &str) -> String {
+        format!("OK {line}")
+    }
+
+    /// The reply of the main thread reaches the client.
+    #[test]
+    fn reload_round_trip() {
+        let (_path, name, rx) = listen("round_trip");
+        answer(rx, echo);
+        assert_eq!(ask(&name, b"reload\n"), "OK reload\n");
+    }
+
+    /// A line that ends in CR LF gets served.
+    #[test]
+    fn crlf_line_is_accepted() {
+        let (_path, name, rx) = listen("crlf");
+        answer(rx, echo);
+        assert_eq!(ask(&name, b"reload\r\n"), "OK reload\n");
+    }
+
+    /// A line over the limit gets an error, not a hang.
+    #[test]
+    fn overlong_line_gets_bad_request() {
+        let (_path, name, rx) = listen("overlong");
+        answer(rx, echo);
+        assert_eq!(ask(&name, &[b'x'; 300]), "ERR bad request\n");
+        assert_eq!(ask(&name, b"reload\n"), "OK reload\n");
+    }
+
+    /// Each client gets its own reply, one after another.
+    #[test]
+    fn many_clients_in_a_row_are_served() {
+        let (_path, name, rx) = listen("sequence");
+        answer(rx, echo);
+        for index in 0..50 {
+            assert_eq!(ask(&name, format!("n{index}\n").as_bytes()), format!("OK n{index}\n"));
+        }
+    }
+
+    /// A second daemon on one config file gets an error.
+    #[test]
+    fn second_listener_on_one_name_fails() {
+        let (path, _name, _rx) = listen("second");
+        let (tx, _unused) = mpsc::channel();
+        assert!(spawn_listener(&path, 0, tx).is_err());
+    }
+
+    /// A silent main thread gets a timeout reply.
+    #[test]
+    fn frozen_main_thread_gets_timeout_reply() {
+        let (_path, name, _rx) = listen("frozen");
+        let started = Instant::now();
+        let reply = ask(&name, b"reload\n");
+        let waited = started.elapsed();
+        assert_eq!(reply, "ERR timeout\n");
+        assert!(waited >= REPLY_DEADLINE - Duration::from_millis(500), "{waited:?}");
+        assert!(waited < CLIENT_BUDGET, "{waited:?}");
+    }
+
+    /// A reply with a line break stays one bounded line.
+    #[test]
+    fn multi_line_reply_becomes_one_line() {
+        let (_path, name, rx) = listen("multi_line");
+        answer(rx, |_| format!("ERR {}\nline two{}", "a".repeat(100), "\u{3042}".repeat(400)));
+        let reply = ask(&name, b"reload\n");
+        assert!(reply.starts_with(&format!("ERR {} line two", "a".repeat(100))));
+        assert_eq!(reply.matches('\n').count(), 1);
+        assert!(reply.ends_with('\n'));
+        assert!(reply.len() <= REPLY_LIMIT + 1);
+    }
+
+    /// A client that sends nothing cannot block the next.
+    #[test]
+    fn idle_client_does_not_block_the_next() {
+        let (_path, name, rx) = listen("idle");
+        answer(rx, echo);
+        let idle = connect(&name);
+        let started = Instant::now();
+        assert_eq!(ask(&name, b"reload\n"), "OK reload\n");
+        assert!(started.elapsed() < CLIENT_BUDGET);
+        drop(idle);
     }
 }

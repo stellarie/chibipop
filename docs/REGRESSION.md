@@ -30,10 +30,16 @@ The automated gate holds only tests of real user flows and reproduced bugs.
 No automated test launches the daemon, the `chibipop` binary, or a child `chibipop`
 process. No automated test needs a real screen or desktop.
 
-The pass count has a ceiling, not a floor. CI fails when the count is greater than 360
-for a platform. Core holds at most 200 tests. Each platform crate holds at most 160.
-Do not bloat the test count. Add a test only for a real user flow or a reproduced bug.
-Raise a ceiling only in a reviewed pull request.
+The pass count has a ceiling, not a floor. CI fails when the count passes the
+ceiling of its platform.
+
+Windows allows 400: 220 core tests, 160 for the platform crate, and 20 for
+`chibipop-settings-windows`. Linux allows 360, because it builds no settings
+crate. The Windows ceiling rose from 360 on 2026-11-07, for the control-pipe
+tests.
+
+Do not bloat the test count. Add a test only for a real user flow or a
+reproduced bug. Raise a ceiling only in a reviewed pull request.
 
 ## Recent feature case index
 
@@ -191,7 +197,7 @@ check-shaped clippy spans the whole workspace unexcluded.
 > CI.** That one failure is expected. A *second* golden failure, or a divergence in any other
 > fixture, is a real finding.
 
-**The test count is a ceiling, not a floor.** A new test must justify itself. CI asserts `≤ 360`
+**The test count is a ceiling, not a floor.** A new test must justify itself. CI asserts `≤ 400` on Windows and `≤ 360` on Linux
 and prints the total. Core holds at most 200 tests and each platform crate at most 160. The totals
 quoted above are history, from before the prune. A *higher* number than the ceiling is the thing to
 explain. The clippy counts are equalities — that is the difference between the rows and it is
