@@ -370,8 +370,19 @@ Worker: capture -> mask -> OCR -> lookup -> present --result--> Controller
   names `tauri`.
 - The shared `Config` and `SettingsForm` model lives in core. Both platform bins render
   widgets only.
-- Live-apply saves the configuration and sends `reload` over the control socket. Windows
-  also queues OCR engine changes to the existing Worker command path.
+- Linux live-apply saves the configuration and sends `reload` over the control socket.
+  Windows also queues OCR engine changes to the existing Worker command path.
+- The Windows daemon serves `reload` over the named pipe `\\.\pipe\chibipop-control-<key>`.
+  The `<key>` is the FNV-1a hash of the lowercased configuration path. The pipe has one
+  instance and serves one request line at a time.
+- The Tauri settings window sends `reload` when the user presses Apply. When no daemon
+  owns the pipe, the saved file takes effect at the next daemon start. The file holds the
+  only truth. No setting crosses the pipe.
+- The daemon checks the file before it installs it. When the file is invalid, the daemon
+  replies `ERR` and keeps its previous configuration. An invalid file never ends the daemon.
+- Each Windows configuration writer holds the named mutex `chibipop-config-<key>` for one
+  load-merge-save sequence. The writers are the Tauri settings child, `settings_only`, and
+  the daemon. The `<key>` is the key of the pipe name.
 - `anki.include_dictionary_name` controls headings in both Anki glossary fields. The plain
   definitions use an HTML heading because square brackets can become furigana in Anki.
 - Any setting that must round-trip is a field on the shared `Config`. It is never a

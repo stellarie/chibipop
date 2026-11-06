@@ -1,10 +1,16 @@
-//! Provides a cross-process lock for a library Apply.
+//! Provides cross-process locks.
 
 use anyhow::{bail, Context, Result};
 use std::path::Path;
 use windows::core::PCWSTR;
-use windows::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, HANDLE};
-use windows::Win32::System::Threading::CreateMutexW;
+use windows::Win32::Foundation::{
+    CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, HANDLE, WAIT_ABANDONED, WAIT_OBJECT_0,
+    WAIT_TIMEOUT,
+};
+use windows::Win32::System::Threading::{CreateMutexW, ReleaseMutex, WaitForSingleObject};
+
+/// The wait for the config lock, in milliseconds.
+const CONFIG_LOCK_WAIT_MS: u32 = 5000;
 
 /// Holds the library lock for one complete Apply.
 pub struct LibraryLock(HANDLE);
@@ -43,6 +49,62 @@ impl Drop for LibraryLock {
             let _ = CloseHandle(self.0);
         }
     }
+}
+
+/// Holds the config lock for one load-merge-save.
+pub struct ConfigLock(HANDLE);
+
+impl ConfigLock {
+    /// Waits for the lock on `config_path`.
+    pub fn acquire(config_path: &Path) -> Result<ConfigLock> {
+        let name: Vec<u16> = format!("chibipop-config-{}", config_key(config_path))
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        // SAFETY: `name` is a NUL-terminated UTF-16 buffer. It stays alive for
+        // this call, and `CreateMutexW` reads only through this pointer. The
+        // null security descriptor selects the default. This struct owns the
+        // returned handle and closes it exactly once in `Drop`.
+        let handle = unsafe { CreateMutexW(None, false, PCWSTR(name.as_ptr())) }
+            .context("CreateMutexW for the config lock")?;
+        // SAFETY: `handle` came from `CreateMutexW` above and stays open. This
+        // call only waits on it. It does not close or move the handle.
+        let waited = unsafe { WaitForSingleObject(handle, CONFIG_LOCK_WAIT_MS) };
+        if waited == WAIT_OBJECT_0 || waited == WAIT_ABANDONED {
+            return Ok(ConfigLock(handle));
+        }
+        // SAFETY: `CreateMutexW` returned `handle` above. This struct has not
+        // stored it. This block closes it once, so no double free occurs.
+        unsafe {
+            let _ = CloseHandle(handle);
+        }
+        if waited == WAIT_TIMEOUT {
+            bail!("another settings window is saving");
+        }
+        bail!("waiting for the config lock failed");
+    }
+}
+
+impl Drop for ConfigLock {
+    fn drop(&mut self) {
+        // SAFETY: `acquire` waited on `self.0`, so the acquiring thread owns
+        // the mutex. `HANDLE` is not `Send`, so `Drop` runs on that thread.
+        // This struct owns the handle alone, and `Drop` closes it once.
+        unsafe {
+            let _ = ReleaseMutex(self.0);
+            let _ = CloseHandle(self.0);
+        }
+    }
+}
+
+/// Makes the hex key of a config file.
+/// The pipe name and the lock name use it.
+pub(crate) fn config_key(config_path: &Path) -> String {
+    let text = std::fs::canonicalize(config_path)
+        .unwrap_or_else(|_| config_path.to_path_buf())
+        .to_string_lossy()
+        .to_lowercase();
+    format!("{:016x}", fnv1a(&text))
 }
 
 /// Makes one lock name for each library folder.

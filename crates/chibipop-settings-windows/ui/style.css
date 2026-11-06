@@ -94,3 +94,60 @@ main {
   color: var(--muted);
   font-size: 12px;
 }
+
+#error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.control {
+  font: inherit;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 2px 6px;
+}
+
+input.control[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--accent);
+}
+
+#actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 24px;
+}
+
+.action {
+  padding: 6px 18px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+}
+
+.action.primary {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.action:disabled {
+  opacity: 0.5;
+}
+
+#status {
+  margin-top: 12px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+#error[hidden] {
+  display: none;
+}

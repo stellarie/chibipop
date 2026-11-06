@@ -13,7 +13,7 @@ use chibipop::select::TextAddr;
 use crate::geom::{place_popup, PhysPoint, PhysRect, ScanDisplay};
 use crate::input::hooks::Hooks;
 use crate::library::{Library, Pending, Role, Roles};
-use crate::lock::LibraryLock;
+use crate::lock::{ConfigLock, LibraryLock};
 use crate::lookup::deconj::Deconjugator;
 use crate::lookup::engine::LookupEngine;
 use crate::lookup::model::Dictionary;
@@ -90,6 +90,10 @@ const WM_APP_SCREENSHOT_DONE: u32 = WM_APP + 11;
 
 /// The analysis service posts this message after it pushes a result.
 const WM_APP_ANALYSIS: u32 = WM_APP + 12;
+
+/// The control pipe posts this message after it queues a request.
+pub(crate) const WM_APP_CONTROL: u32 = WM_APP + 13;
+
 /// The interval for the cursor poll, in milliseconds.
 const DISPATCH_TICK_MS: u32 = 20;
 
@@ -522,6 +526,13 @@ pub fn settings_only(
             match built {
                 Ok(()) => {
                     keep_apply(&flight, &window);
+                    let config_lock = match ConfigLock::acquire(config_path) {
+                        Ok(lock) => lock,
+                        Err(error) => {
+                            refuse_apply(&window, &error);
+                            continue;
+                        }
+                    };
                     let latest = match crate::config::load_or_create(config_path) {
                         Ok(latest) => latest,
                         Err(error) => {
@@ -545,6 +556,7 @@ pub fn settings_only(
                         }
                         continue;
                     }
+                    drop(config_lock);
                     form.staged_adds.clear();
                     form.staged_removes.clear();
                     form.accept_applied(applied, dicts)?;
@@ -587,6 +599,13 @@ pub fn settings_only(
             }
             Some(SettingsOutcome::Apply) => {
                 let mut edited = window.read(&form);
+                let config_lock = match ConfigLock::acquire(config_path) {
+                    Ok(lock) => lock,
+                    Err(error) => {
+                        refuse_apply(&window, &error);
+                        continue;
+                    }
+                };
                 let latest = match crate::config::load_or_create(config_path) {
                     Ok(latest) => latest,
                     Err(error) => {
@@ -609,6 +628,7 @@ pub fn settings_only(
                         refuse_apply(&window, &error);
                         continue;
                     }
+                    drop(config_lock);
                     edited.accept_applied(applied, dicts)?;
                     window.replace_form(&edited)?;
                     window.set_apply_state(ApplyState::Applied);
@@ -617,6 +637,7 @@ pub fn settings_only(
                     remember_settings_position(&window);
                     return Ok(());
                 }
+                drop(config_lock);
                 // SAFETY: This loop owns the thread timer and kills it after the rebuild.
                 tick = unsafe { SetTimer(None, 0, REBUILD_TICK_MS, None) };
                 if tick == 0 {
@@ -1677,6 +1698,10 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: Option<&Path>, config_
     // SAFETY: This FFI call has no preconditions and always succeeds.
     // It returns the ID of the thread that calls it.
     let main_tid = unsafe { GetCurrentThreadId() };
+    let (control_tx, control_rx) = mpsc::channel::<crate::control::ControlRequest>();
+    if let Err(error) = crate::control::spawn_listener(config_path, main_tid, control_tx) {
+        eprintln!("chibipop: the control pipe is unavailable: {error:#}");
+    }
     let initial_resolved = cfg.resolved(None)?;
     let mut live = derive(&initial_resolved);
     let ocr_monitor = OcrMonitor::default();
@@ -3033,6 +3058,30 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: Option<&Path>, config_
                     config_path,
                     save_sequence,
                 );
+            }
+        } else if msg.message == WM_APP_CONTROL {
+            while let Ok(request) = control_rx.try_recv() {
+                // Each error becomes an ERR reply.
+                let reply = if request.line != "reload" {
+                    "ERR unknown verb".to_string()
+                } else {
+                    match crate::config::load_or_create(config_path) {
+                        Err(error) => format!("ERR {error:#}"),
+                        Ok(updated) => match ProfileCatalog::new(&updated, &dicts) {
+                            Err(error) => format!("ERR {error:#}"),
+                            Ok(_) if pending_ocr_reload.lock().is_err() => {
+                                "ERR poisoned OCR reload lock".to_string()
+                            }
+                            Ok(_) => {
+                                let previous = cfg.clone();
+                                let previous_dicts = dicts.clone();
+                                install_runtime_catalog!(updated, previous, previous_dicts);
+                                "OK reload".to_string()
+                            }
+                        },
+                    }
+                };
+                let _ = request.reply.send(reply);
             }
         } else if msg.message == WM_APP_SCREENSHOT_DONE {
             while let Ok(result) = screenshot_done_rx.try_recv() {
@@ -4453,7 +4502,8 @@ fn save_in_background(
     *sequence = sequence.wrapping_add(1);
     let sequence = *sequence;
     *prev = Some(thread::spawn(move || {
-        let _ = tx.send(SaveResult { sequence, generation, result: cfg.save(&path) });
+        let result = ConfigLock::acquire(&path).and_then(|_lock| cfg.save(&path));
+        let _ = tx.send(SaveResult { sequence, generation, result });
         // SAFETY: This call wakes the main loop.
         unsafe {
             let _ = PostThreadMessageW(main_tid, WM_APP_SAVED, WPARAM(0), LPARAM(0));
@@ -4467,6 +4517,7 @@ fn update_profile_settings(
     profile_id: &str,
     update: impl FnOnce(&mut crate::config::ProfileSettings) -> bool,
 ) -> Result<Option<Config>> {
+    let _lock = ConfigLock::acquire(config_path)?;
     let mut latest = crate::config::load_or_create(config_path)?;
     if !latest.profiles.iter().any(|profile| profile.id == profile_id) {
         return Ok(None);
@@ -4560,6 +4611,7 @@ fn join_save_if_finished(job: &mut Option<thread::JoinHandle<()>>) {
 
 /// Loads, validates, and saves the selected default profile.
 fn persist_default_profile(config_path: &Path, id: &str) -> Result<Option<Config>> {
+    let _lock = ConfigLock::acquire(config_path)?;
     let mut latest = crate::config::load_or_create(config_path)?;
     if !latest.profiles.iter().any(|profile| profile.id == id) {
         return Ok(None);

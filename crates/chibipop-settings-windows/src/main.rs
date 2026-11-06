@@ -1,9 +1,13 @@
 #[cfg(windows)]
+mod control;
+#[cfg(windows)]
 mod fonts;
 #[cfg(windows)]
 mod ipc;
 #[cfg(windows)]
 mod layout;
+#[cfg(windows)]
+mod lock;
 #[cfg(windows)]
 mod session;
 

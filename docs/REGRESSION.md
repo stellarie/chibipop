@@ -37,7 +37,7 @@ Raise a ceiling only in a reviewed pull request.
 
 ## Recent feature case index
 
-Cases 1.31-1.44 cover Search, hover, clipboard, furigana, sentence-field,
+Cases 1.31-1.45 cover Search, hover, clipboard, furigana, sentence-field,
 audit-isolation, cache invalidation, profile catalog, and Tauri settings behavior.
 Cases 1.30.11-1.30.16 cover screenshot modes and saved targets.
 Existing settings, plugin, and live-log cases retain their identifiers.
@@ -2294,7 +2294,8 @@ WebView2 runtime. Run as a user who can edit the `pv` registry value.
 
 1. **Tauri window opens.** Run `chibipop.exe settings --tauri`. A Tauri window opens
    on the Popup tab. It shows four sections. Every label and help string matches
-   `crates/chibipop-windows/assets/settings-layout.toml`. The values are read-only.
+   `crates/chibipop-windows/assets/settings-layout.toml`. Four entries are editable
+   (case 1.45). The other values are read-only.
 2. **Missing runtime falls back.** Rename the `pv` value under
    `HKLM\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}`.
    Rename the same value in every other EdgeUpdate location that holds one.
@@ -2311,6 +2312,33 @@ WebView2 runtime. Run as a user who can edit the `pv` registry value.
 
 **Evidence and cleanup.** Record the tested revision, the stderr lines, and a
 screenshot of step 1. Restore every renamed registry value and file.
+
+<a id="case-1-45"></a>
+### 1.45 Tauri settings write path
+
+**Prerequisites.** Windows only. Use the scratch folder of case 1.44. The four
+editable entries are `popup-highlight`, `popup-max-width`, `popup-layout`, and
+`popup-font`.
+
+1. **Save persists.** Stop every daemon, then run `chibipop.exe settings --tauri`. Change
+   the four editable entries and press Save. The status line reads "Settings saved to"
+   followed by the config path. Close the window and open it again. Every value persists in
+   the window and in the TOML file.
+2. **Apply reaches the daemon.** Run `chibipop.exe run`, then open
+   `chibipop.exe settings --tauri`. Change the popup layout and press Apply. The status line
+   reads "Settings saved and daemon reloaded". Hover a word. The popup uses the new layout.
+3. **Apply without a daemon.** Stop the daemon. Press Apply. The status line reads
+   "Settings saved and will take effect next time the daemon starts (daemon is not
+   running)".
+4. **Frozen daemon.** Run `chibipop.exe run` and suspend its process. Press Apply. The
+   window stays responsive. After 10 seconds the status line reads "Settings saved. The
+   daemon did not answer within 10 seconds. Restart it to use them." Resume the process.
+5. **Two settings processes.** Run `chibipop.exe settings` and
+   `chibipop.exe settings --tauri` at the same time. Save a different field in each
+   window. Close both windows. The TOML file holds both values.
+
+**Evidence and cleanup.** Record the tested revision, the config path, and a screenshot of
+each status line. Resume every suspended process. Restore the TOML file.
 
 ---
 

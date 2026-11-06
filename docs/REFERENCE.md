@@ -808,6 +808,11 @@ Two Linux exceptions. `chibipop ctl reload` makes the running daemon re-read
 the file, and `anki.static_region` is picked up the moment it is written, with
 no restart and no Apply.
 
+One Windows exception. In the Tauri settings window
+(`chibipop.exe settings --tauri`), Save writes the file only. Apply writes the
+file and then asks the running daemon to re-read it over a named pipe. When no
+daemon runs, the saved file takes effect at the next start.
+
 ### `exclude_from_capture`
 
 **Off by default**, so the popup records normally. Set it to `true` and the OS

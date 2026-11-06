@@ -1,4 +1,4 @@
-// Documentation only. No compiler reads this file in stage 1.
+// Documentation only. No compiler reads this file.
 // Each type mirrors a Rust type in `src/ipc.rs` or `src/layout.rs`.
 
 type ErrorKind =
@@ -81,6 +81,9 @@ interface ApplyReport {
   saved_to: string;
   notices: string[];
   form: FormView;
+  outcome: "saved" | "applied" | "no-reply";
+  // The daemon reply line. Set only when outcome is "applied".
+  reply: string | null;
 }
 
 interface EntryView {
@@ -112,7 +115,8 @@ interface Commands {
   load_layout: { args: {}; result: LayoutView };
   load_form: { args: {}; result: FormView };
   font_families: { args: {}; result: string[] };
-  // Stage 1 rejects both with kind "read-only".
+  // Both reject a terms or frequency edit with kind "read-only".
+  // Both reject a stale generation with kind "stale".
   save_form: { args: { edits: FormEdits }; result: ApplyReport };
   apply_form: { args: { edits: FormEdits }; result: ApplyReport };
 }

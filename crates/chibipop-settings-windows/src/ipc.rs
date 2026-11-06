@@ -2,11 +2,13 @@
 //!
 //! `ui/types.d.ts` documents the serialized shape of every type here.
 
+use crate::control::{self, ReloadOutcome};
 use crate::fonts;
 use crate::layout::LayoutView;
+use crate::lock::ConfigLock;
 use crate::session::Session;
 use anyhow::Error;
-use chibipop::config::{self, Config, ProfileCatalog, ResolvedConfig};
+use chibipop::config::{self, Config, Platform, ProfileCatalog, ResolvedConfig};
 use chibipop::library::Library;
 use chibipop::lookup::model::Dictionary;
 use chibipop::lookup::sqlite::SqliteDictionary;
@@ -24,8 +26,6 @@ pub enum ErrorKind {
     Parse,
     Dictionary,
     Validation,
-    // Stage 2 raises this on a stale generation.
-    #[allow(dead_code)]
     Stale,
     ReadOnly,
     Internal,
@@ -78,11 +78,27 @@ pub struct FormEdits {
     pub background_on_close: Option<bool>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ApplyOutcomeView {
+    Saved,
+    Applied,
+    NoReply,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ApplyReport {
     pub saved_to: String,
     pub notices: Vec<String>,
     pub form: FormView,
+    pub outcome: ApplyOutcomeView,
+    pub reply: Option<String>,
+}
+
+struct Saved {
+    saved_to: String,
+    notices: Vec<String>,
+    form: FormView,
 }
 
 #[tauri::command]
@@ -101,27 +117,102 @@ pub fn font_families() -> Result<Vec<String>, IpcError> {
     fonts::japanese_font_families()
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn save_form(
-    _state: State<'_, Mutex<Session>>,
+    state: State<'_, Mutex<Session>>,
     edits: FormEdits,
 ) -> Result<ApplyReport, IpcError> {
-    write(edits)
+    let mut session = lock(&state)?;
+    write(&mut session, edits, false)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn apply_form(
-    _state: State<'_, Mutex<Session>>,
+    state: State<'_, Mutex<Session>>,
     edits: FormEdits,
 ) -> Result<ApplyReport, IpcError> {
-    write(edits)
+    let mut session = lock(&state)?;
+    write(&mut session, edits, true)
 }
 
-fn write(_edits: FormEdits) -> Result<ApplyReport, IpcError> {
-    Err(IpcError::new(
-        ErrorKind::ReadOnly,
-        "the settings page is read-only in this build",
-    ))
+fn write(session: &mut Session, edits: FormEdits, reload: bool) -> Result<ApplyReport, IpcError> {
+    if session.form.is_none() {
+        return Err(IpcError::new(ErrorKind::Internal, "load the form first"));
+    }
+    if edits.generation != session.generation {
+        return Err(IpcError::new(
+            ErrorKind::Stale,
+            "the settings changed since this page loaded; reload the form",
+        ));
+    }
+    let saved = {
+        let _guard = ConfigLock::acquire(&session.config_path)?;
+        save_locked(session, edits)?
+    };
+    let (outcome, reply) = if reload {
+        match control::send_reload(&session.config_path) {
+            ReloadOutcome::Live { reply } => (ApplyOutcomeView::Applied, Some(reply)),
+            ReloadOutcome::ConfigOnly => (ApplyOutcomeView::Saved, None),
+            ReloadOutcome::NoReply => (ApplyOutcomeView::NoReply, None),
+        }
+    } else {
+        (ApplyOutcomeView::Saved, None)
+    };
+    Ok(ApplyReport {
+        saved_to: saved.saved_to,
+        notices: saved.notices,
+        form: saved.form,
+        outcome,
+        reply,
+    })
+}
+
+fn save_locked(session: &mut Session, edits: FormEdits) -> Result<Saved, IpcError> {
+    let mut form = session
+        .form
+        .clone()
+        .ok_or_else(|| IpcError::new(ErrorKind::Internal, "load the form first"))?;
+    let fresh = config::load_or_create(&session.config_path).map_err(config_error)?;
+    let reindex = edits.terms != form.terms || edits.frequency != form.frequency;
+    form.cfg = edits.cfg;
+    form.terms = edits.terms;
+    form.frequency = edits.frequency;
+    form.pitch = edits.pitch;
+    form.background_on_close = edits.background_on_close;
+    if reindex {
+        return Err(IpcError::new(
+            ErrorKind::ReadOnly,
+            "dictionary terms and frequency need a reindex, which this build lacks",
+        ));
+    }
+    let applied = settings::apply_to(&form, &fresh);
+    let validation = |e: Error| IpcError::new(ErrorKind::Validation, format!("{e:#}"));
+    let resolved = applied
+        .config
+        .resolved(Some(&applied.profile_id))
+        .map_err(validation)?;
+    applied
+        .config
+        .validate_hotkeys(Platform::Windows)
+        .map_err(validation)?;
+    let notices: Vec<String> = settings::clamp_notice(&form, &resolved).into_iter().collect();
+    applied.config.save(&session.config_path).map_err(|e| {
+        IpcError::new(
+            ErrorKind::Io,
+            format!("writing {}: {e:#}", session.config_path.display()),
+        )
+    })?;
+    session.generation += 1;
+    form.accept_applied(applied, &session.dicts).map_err(|e| {
+        IpcError::new(ErrorKind::Internal, format!("saved; reload the form: {e:#}"))
+    })?;
+    let view = view_of(&form, &form.catalog, &session.dicts, session.generation);
+    session.form = Some(form);
+    Ok(Saved {
+        saved_to: session.config_path.display().to_string(),
+        notices,
+        form: view,
+    })
 }
 
 fn lock(session: &Mutex<Session>) -> Result<MutexGuard<'_, Session>, IpcError> {
@@ -208,21 +299,123 @@ fn config_error(e: Error) -> IpcError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chibipop::config::LayoutMode;
+    use std::sync::Barrier;
+
+    fn temp_config(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("chibipop-ipc-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir should be created");
+        dir.join("chibipop.toml")
+    }
+
+    fn session_at(path: &Path) -> Session {
+        let cfg = config::load_or_create(path).expect("config should load");
+        let mut session = Session::new(path.to_path_buf(), PathBuf::new());
+        session.form = Some(settings::from_config(&cfg, &[]));
+        session
+    }
+
+    fn edits_of(session: &Session) -> FormEdits {
+        let form = session.form.as_ref().expect("form should be loaded");
+        FormEdits {
+            generation: session.generation,
+            cfg: form.cfg.clone(),
+            terms: form.terms.clone(),
+            frequency: form.frequency.clone(),
+            pitch: form.pitch.clone(),
+            background_on_close: form.background_on_close,
+        }
+    }
+
+    fn saved_popup(path: &Path) -> chibipop::config::PopupConfig {
+        let cfg = config::load_or_create(path).expect("config should load");
+        cfg.resolved(None).expect("config should resolve").popup
+    }
 
     #[test]
-    fn stage_one_rejects_writes() {
-        let cfg = Config::default()
-            .resolved(None)
-            .expect("default config should resolve");
-        let edits = FormEdits {
-            generation: 0,
-            cfg,
-            terms: Vec::new(),
-            frequency: Vec::new(),
-            pitch: Vec::new(),
-            background_on_close: None,
-        };
-        let err = write(edits).expect_err("stage one must reject writes");
+    fn concurrent_saves_both_survive() {
+        let path = temp_config("concurrent");
+        for _ in 0..20 {
+            Config::default().save(&path).expect("reset should save");
+            let mut left = session_at(&path);
+            let mut right = session_at(&path);
+            let mut left_edits = edits_of(&left);
+            let mut right_edits = edits_of(&right);
+            left_edits.cfg.popup.highlight_match = !left_edits.cfg.popup.highlight_match;
+            right_edits.cfg.popup.layout_mode = LayoutMode::Compact;
+            let start = Barrier::new(2);
+            std::thread::scope(|scope| {
+                scope.spawn(|| {
+                    start.wait();
+                    write(&mut left, left_edits.clone(), false).expect("left save should work");
+                });
+                scope.spawn(|| {
+                    start.wait();
+                    write(&mut right, right_edits.clone(), false).expect("right save should work");
+                });
+            });
+            let popup = saved_popup(&path);
+            assert_eq!(popup.highlight_match, left_edits.cfg.popup.highlight_match);
+            assert_eq!(popup.layout_mode, LayoutMode::Compact);
+        }
+    }
+
+    #[test]
+    fn stale_generation_rejected() {
+        let path = temp_config("stale");
+        let mut session = session_at(&path);
+        let edits = edits_of(&session);
+        session.generation = 1;
+        let before = std::fs::read_to_string(&path).expect("file should read");
+        let err = write(&mut session, edits, false).expect_err("a stale page must be rejected");
+        assert_eq!(err.kind, ErrorKind::Stale);
+        assert_eq!(std::fs::read_to_string(&path).expect("file should read"), before);
+    }
+
+    #[test]
+    fn failed_save_keeps_file() {
+        let path = temp_config("failed");
+        let mut session = session_at(&path);
+        let mut edits = edits_of(&session);
+        edits.cfg.popup.highlight_match = !edits.cfg.popup.highlight_match;
+        std::fs::create_dir(path.with_extension("toml.tmp")).expect("blocker should be created");
+        let before = std::fs::read_to_string(&path).expect("file should read");
+        let err = write(&mut session, edits, false).expect_err("the save must fail");
+        assert_eq!(err.kind, ErrorKind::Io);
+        assert_eq!(std::fs::read_to_string(&path).expect("file should read"), before);
+        assert_eq!(session.generation, 0);
+    }
+
+    #[test]
+    fn validation_blocks_save() {
+        let path = temp_config("validation");
+        let mut config = Config::default();
+        assert!(config.binds.len() >= 2, "the default config should hold two binds");
+        for bind in config.binds.iter_mut().take(2) {
+            bind.windows = "Ctrl+Shift+F9".to_string();
+            bind.enabled = true;
+        }
+        config.save(&path).expect("duplicate chords still save");
+        let mut session = session_at(&path);
+        let mut edits = edits_of(&session);
+        edits.cfg.popup.highlight_match = !edits.cfg.popup.highlight_match;
+        let before = std::fs::read_to_string(&path).expect("file should read");
+        let err = write(&mut session, edits, false).expect_err("a duplicate chord must fail");
+        assert_eq!(err.kind, ErrorKind::Validation);
+        assert_eq!(std::fs::read_to_string(&path).expect("file should read"), before);
+    }
+
+    #[test]
+    fn reindex_edits_stay_read_only() {
+        let path = temp_config("reindex");
+        let mut session = session_at(&path);
+        let mut edits = edits_of(&session);
+        edits.frequency.push(DictRow {
+            name: "frequency".to_string(),
+            enabled: true,
+        });
+        let err = write(&mut session, edits, false).expect_err("a reindex edit must be rejected");
         assert_eq!(err.kind, ErrorKind::ReadOnly);
     }
 }
