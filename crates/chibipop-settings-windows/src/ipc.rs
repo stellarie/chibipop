@@ -179,13 +179,17 @@ fn save_locked(session: &mut Session, edits: FormEdits) -> Result<Saved, IpcErro
     form.frequency = edits.frequency;
     form.pitch = edits.pitch;
     form.background_on_close = edits.background_on_close;
-    if reindex {
+    let applied = settings::apply_to(&form, &fresh);
+    // `dictionary_work` owns the real rule. The row compare above is
+    // kept because it refuses more, not less.
+    let needs_reindex =
+        settings::dictionary_work(&fresh, &applied.config) != settings::DictionaryWork::None;
+    if reindex || needs_reindex {
         return Err(IpcError::new(
             ErrorKind::ReadOnly,
-            "dictionary terms and frequency need a reindex, which this build lacks",
+            "this change needs a dictionary reindex, which this build lacks",
         ));
     }
-    let applied = settings::apply_to(&form, &fresh);
     let validation = |e: Error| IpcError::new(ErrorKind::Validation, format!("{e:#}"));
     let resolved = applied
         .config
@@ -299,6 +303,7 @@ fn config_error(e: Error) -> IpcError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chibipop::dict::frequency::RankingStrategy;
     use chibipop::config::LayoutMode;
     use std::sync::Barrier;
 
@@ -417,5 +422,25 @@ mod tests {
         });
         let err = write(&mut session, edits, false).expect_err("a reindex edit must be rejected");
         assert_eq!(err.kind, ErrorKind::ReadOnly);
+    }
+
+    #[test]
+    fn ranking_strategy_change_stays_read_only() {
+        let path = temp_config("ranking");
+        let mut session = session_at(&path);
+        let before = std::fs::read_to_string(&path).expect("file should read");
+        let mut edits = edits_of(&session);
+        let next = match edits.cfg.dictionaries.ranking_strategy {
+            RankingStrategy::Priority => RankingStrategy::Median,
+            _ => RankingStrategy::Priority,
+        };
+        edits.cfg.dictionaries.ranking_strategy = next;
+        let err = write(&mut session, edits, false)
+            .expect_err("a ranking strategy change needs a reindex");
+        assert_eq!(err.kind, ErrorKind::ReadOnly);
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("file should read"),
+            before
+        );
     }
 }
