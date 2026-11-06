@@ -35,6 +35,8 @@ pub mod rebuild;
 pub mod text;
 #[cfg(windows)]
 pub mod ui;
+#[cfg(windows)]
+pub mod webview2;
 
 // This file imports core modules at the crate root. The platform modules
 // above can address them as `crate::…`, as they did before the workspace split.

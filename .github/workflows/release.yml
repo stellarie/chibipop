@@ -101,6 +101,7 @@ jobs:
           cp data/ipadic/NOTICE        "dist/$name/data/ipadic/"
           cp data/ipadic/SHA256SUMS.txt "dist/$name/data/ipadic/"
           cp target/release/chibipop.exe "dist/$name/"
+          cp target/release/chibipop-settings.exe "dist/$name/"
           cp README.md                  "dist/$name/"
           cp LICENSE                    "dist/$name/"
           cp -r plugins                 "dist/$name/"

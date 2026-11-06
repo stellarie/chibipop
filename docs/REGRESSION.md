@@ -37,8 +37,8 @@ Raise a ceiling only in a reviewed pull request.
 
 ## Recent feature case index
 
-Cases 1.31-1.43 cover Search, hover, clipboard, furigana, sentence-field,
-audit-isolation, cache invalidation, and profile catalog behavior.
+Cases 1.31-1.44 cover Search, hover, clipboard, furigana, sentence-field,
+audit-isolation, cache invalidation, profile catalog, and Tauri settings behavior.
 Cases 1.30.11-1.30.16 cover screenshot modes and saved targets.
 Existing settings, plugin, and live-log cases retain their identifiers.
 Record the exact feature-bearing revision.
@@ -1819,8 +1819,9 @@ Case **1.26** and its interactive subcases require the visible window; audit suc
 Maximize the window, then restore it. The controls must adapt and keep their values.
 Dynamic field rows and screenshot-target text must respect the size selected by the user.
 
-1. **The Apply row stays fixed across tabs at a given window size.** Visit Popup, Shortcuts,
-   Dictionaries, Text recognition, Anki, Extensions, and Debug. Repeat the visible check after resizing.
+1. **The Apply row stays fixed across tabs at a given window size.** Visit Popup, General,
+   Shortcuts, Profiles, Dictionaries, Text recognition, Anki, Extensions, and
+   Debug. Repeat the visible check after resizing.
    The footer must remain reachable. `settings --audit` checks a separate, newly opened window.
 2. **Scrolling depends on page height.** The reserved scrollbar is disabled when the page fits. Tall pages scroll inside the viewport.
    Group frames, help text, lists, and combo boxes must fit the client width.
@@ -1879,8 +1880,8 @@ true first-run path, before any config exists.
    unchanged without spawning a plugin. The stderr startup line reads
    `chibipop: OCR engine: windows-ocr` (`WindowsOcr::name()` at
    `src/text/ocr.rs:275`).
-2. `chibipop.exe settings` opens with eight tabs: Popup, General, Shortcuts, Dictionaries,
-   Text recognition, Anki, Extensions, and Debug. The layout asset defines their order.
+2. `chibipop.exe settings` opens with nine tabs: Popup, General, Shortcuts, Profiles,
+   Dictionaries, Text recognition, Anki, Extensions, and Debug. The layout asset defines their order.
 3. The **Text reader** dropdown on Text recognition lists **"Built-in (Windows OCR)"**
    and **"meikiocr"**. The list is `["builtin"]` extended by
    `discovered_text_providers(found)` (`src/ui/settings_window.rs`), which
@@ -2283,6 +2284,33 @@ Use configured hotkeys or `chibipop ctl` on Linux.
 
 **Evidence and cleanup.** Record the profile IDs, Bind IDs, config path,
 screenshots, logs, and tested revision. Restore only disposable changes.
+
+<a id="case-1-44"></a>
+### 1.44 Tauri settings window and fallback
+
+**Prerequisites.** Windows only. Use a scratch folder that holds `chibipop.exe`,
+`chibipop-settings.exe`, and a disposable `chibipop.toml`. Use an installed
+WebView2 runtime. Run as a user who can edit the `pv` registry value.
+
+1. **Tauri window opens.** Run `chibipop.exe settings --tauri`. A Tauri window opens
+   on the Popup tab. It shows four sections. Every label and help string matches
+   `crates/chibipop-windows/assets/settings-layout.toml`. The values are read-only.
+2. **Missing runtime falls back.** Rename the `pv` value under
+   `HKLM\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}`.
+   Rename the same value in every other EdgeUpdate location that holds one.
+   Run `chibipop.exe settings --tauri`. One stderr line reports the missing runtime.
+   The Win32 settings window opens. Restore every renamed value.
+3. **Missing child falls back.** Rename `chibipop-settings.exe`. Run
+   `chibipop.exe settings --tauri`. One stderr line names the missing file. The Win32
+   settings window opens. Restore the file name.
+4. **Child outlives the daemon.** Run `chibipop.exe run`. Start
+   `chibipop.exe settings --tauri` in a second shell. Stop the daemon process. The
+   Tauri window still renders.
+5. **Audit wins.** Run `chibipop.exe settings --tauri --audit`. One stderr line names
+   the ignored `--tauri` flag. The command writes the audit JSON and opens no Tauri window.
+
+**Evidence and cleanup.** Record the tested revision, the stderr lines, and a
+screenshot of step 1. Restore every renamed registry value and file.
 
 ---
 

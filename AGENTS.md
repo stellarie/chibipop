@@ -7,13 +7,17 @@ and paints a popup. `ARCHITECTURE.md` describes the structure and the rules.
 ## Commands
 
 Linux is the development platform. CI verifies Windows. Every link command
-must exclude one bin crate. Both bin crates produce a binary named `chibipop`.
+must exclude one of the two `chibipop` bin crates. `chibipop-linux` and
+`chibipop-windows` each produce a binary named `chibipop`.
+
 Cargo puts every binary into one target directory. Therefore, a command that
 spans both crates causes two linkers to race for one file path.
+`chibipop-settings-windows` produces `chibipop-settings`, so it never races.
 
 ```bash
 cargo build --release -p chibipop-linux
 cargo build --release -p chibipop-windows
+cargo build --release -p chibipop-settings-windows
 
 # The test gates, as ci.yml and release.yml run them.
 cargo test --workspace --exclude chibipop-windows   # Linux
@@ -74,6 +78,7 @@ src/analysis/            Japanese analysis service and model checks
 src/select/              Card selection and gesture state
 crates/chibipop-linux/   Wayland bin, tray, OCR engine under src/ocr/
 crates/chibipop-windows/ Win32 bin, DirectWrite measurement, geometry goldens
+crates/chibipop-settings-windows/ Tauri settings child, Windows only
 docs/                    REFERENCE, LINUX, REGRESSION, RELEASING, BACKLOG
 ```
 

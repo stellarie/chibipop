@@ -88,7 +88,7 @@ pub struct SettingsForm {
 /// Enabled state belongs to each role, not to the Dictionary. A mixed archive
 /// can provide definitions and frequency data, so one checkbox affects only
 /// its own role list (ARCHITECTURE.md#dictionary-and-lookup).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DictRow {
     pub name: String,
     pub enabled: bool,

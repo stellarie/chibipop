@@ -304,7 +304,7 @@ scripts/package-linux.sh v0.8.2        # -> dist/chibipop-v0.8.2-linux-x64.tar.g
 
 `.github/workflows/ci.yml` runs the [`REGRESSION.md`](REGRESSION.md) automated gate on
 every push to `main` and every pull request, plus a mirrored Linux gate on
-ubuntu (both bins are named `chibipop`, so link-producing steps
+ubuntu (the two platform bins are named `chibipop`, so link-producing steps
 exclude the foreign bin crate — see the workspace `Cargo.toml`):
 
 - `cargo test --workspace --exclude chibipop-linux` **three times** — the

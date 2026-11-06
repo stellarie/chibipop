@@ -14,10 +14,12 @@ the limits that were measured rather than assumed.
 - The Linux OCR models ship with the repository too
   (`crates/chibipop-linux/models/meiki/`). Nothing is downloaded.
 
-**One repository, two binaries**
+**One repository, three binaries**
 ([`ARCHITECTURE.md`](../ARCHITECTURE.md#workspace-and-seams)). The core
 library is the root package. One bin crate per platform sits under `crates/`,
 and both produce a binary named `chibipop`, so cargo uplifts both to one path.
+The Windows settings window is a third bin crate. It produces
+`chibipop-settings`, so it joins no race.
 Any command that links must exclude the foreign bin crate:
 
 | Command | Windows | Linux |
@@ -44,7 +46,8 @@ dictionary, ranked in filename order. Roughly 70 seconds.
 
 ## Subcommands
 
-The two binaries do not share a command line. Windows first, then Linux.
+The two platform binaries do not share a command line. Windows first, then
+Linux.
 
 ### Windows
 
@@ -304,8 +307,8 @@ be compared with a plain line diff on their output — a clean diff after a
 change that should not move anything is the evidence, not an argument.
 `--dict` and `--config` are inherited from `settings`.
 
-Windows settings use eight tabs: Popup, General, Shortcuts, Dictionaries, Text recognition,
-Anki, Extensions, and Debug. All shortcut controls appear together on Shortcuts.
+Windows settings use nine tabs: Popup, General, Shortcuts, Profiles,
+Dictionaries, Text recognition, Anki, Extensions, and Debug. All shortcut controls appear together on Shortcuts.
 Optional shortcuts have Clear buttons. Escape remains reserved for closing the popup.
 General > Window behavior controls background-on-close. The setting defaults off.
 Enable it only after the tray menu passes physical Windows acceptance.

@@ -1,0 +1,24 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "chibipop-settings",
+  "identifier": "com.chibipop.settings",
+  "build": {
+    "frontendDist": "ui"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "label": "main",
+        "title": "chibipop settings",
+        "width": 960,
+        "height": 720
+      }
+    ]
+  },
+  "bundle": {
+    "icon": [
+      "../chibipop-windows/assets/chibipop.ico"
+    ]
+  }
+}

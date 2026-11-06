@@ -893,9 +893,10 @@ A Linux release binary also needs its model files. The
 [Linux build instructions](docs/LINUX.md#quick-start-hyprland) include the
 required model-copy step.
 
-**One repository, two binaries.** The core library is the root package.
-One binary crate for each platform lives in `crates/`. Both binaries have
-the name `chibipop`. A command that links both crates can write to the same
+**One repository, three binaries.** The core library is the root package.
+One binary crate for each platform lives in `crates/`, and the Windows
+settings window has its own. The two platform binaries have the name
+`chibipop`. The settings binary is `chibipop-settings`. A command that links both crates can write to the same
 output path. Exclude the other platform:
 
 ```bash

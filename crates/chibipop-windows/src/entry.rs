@@ -93,6 +93,9 @@ enum Command {
         /// Write the tree as JSON.
         #[arg(long)]
         audit: bool,
+        /// Open the Tauri settings window.
+        #[arg(long)]
+        tauri: bool,
     },
     /// Print lookups on hover.
     Watch {
@@ -159,6 +162,23 @@ enum PluginCmd {
 enum ActionCmd {
     /// Test the selection overlay.
     TestSelection,
+}
+
+// Return None when the Win32 window must open instead.
+fn launch_tauri_settings(
+    config_path: &Path,
+    dict: &Path,
+) -> Result<Option<std::process::ExitStatus>> {
+    if !chibipop_windows::webview2::runtime_present() {
+        eprintln!("chibipop: WebView2 runtime not found; opening the Win32 settings window");
+        return Ok(None);
+    }
+    let exe = chibipop_windows::webview2::settings_exe();
+    if !exe.is_file() {
+        eprintln!("chibipop: {} not found; opening the Win32 settings window", exe.display());
+        return Ok(None);
+    }
+    chibipop_windows::webview2::spawn_settings(&exe, config_path, dict).map(Some)
 }
 
 pub fn run() -> Result<()> {
@@ -495,11 +515,21 @@ pub fn run() -> Result<()> {
             }
             Ok(())
         }
-        Command::Settings { dict, config, audit } => {
+        Command::Settings { dict, config, audit, tauri } => {
             let dict = dict_path(dict);
             let config_path = config.unwrap_or_else(default_config_path);
             let cfg = chibipop::config::load_or_create(&config_path)
                 .with_context(|| format!("loading config from {}", config_path.display()))?;
+            if tauri && audit {
+                eprintln!("chibipop: --tauri ignored because --audit is set");
+            } else if tauri {
+                if let Some(status) = launch_tauri_settings(&config_path, &dict)? {
+                    if !status.success() {
+                        std::process::exit(status.code().unwrap_or(1));
+                    }
+                    return Ok(());
+                }
+            }
             // The database path supplies only the Dictionary names.
             // A rebuild replaces the file at the same path.
             let dicts = {

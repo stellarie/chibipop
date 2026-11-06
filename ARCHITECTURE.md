@@ -39,9 +39,10 @@ tools/ scripts/         Benchmarks and censuses; package-linux.sh.
 
 ## Workspace and seams
 
-The workspace has three crates. Core owns the behavior, and a platform bin owns the OS.
-Both platform bins use `[[bin]] name = "chibipop"`. Therefore, one link command must
-never build both binaries.
+The workspace has four crates. Core owns the behavior, and a platform bin owns the OS.
+The Windows bin and the Linux bin use `[[bin]] name = "chibipop"`. Therefore, one link
+command must never build both binaries. The fourth crate, `chibipop-settings-windows`,
+builds `chibipop-settings` and does not race.
 
 ```
 platform bin --Event--> Controller --Command--> platform bin
@@ -360,6 +361,13 @@ Worker: capture -> mask -> OCR -> lookup -> present --result--> Controller
   Native compositor bindings remain external configuration.
 - Linux settings run as a separate `chibipop settings` process with iced. The daemon
   contains no GUI toolkit.
+- `chibipop settings --tauri` on Windows starts `chibipop-settings.exe` from the daemon
+  directory and waits for it. The child opens a Tauri window and reads the shared
+  `SettingsForm`. The daemon first reads the registry for a WebView2 runtime. When the
+  runtime or the child is missing, it prints one line and opens the Win32 window.
+  `--audit` wins over `--tauri`.
+- The Windows daemon package links no GUI toolkit. Only `chibipop-settings-windows`
+  names `tauri`.
 - The shared `Config` and `SettingsForm` model lives in core. Both platform bins render
   widgets only.
 - Live-apply saves the configuration and sends `reload` over the control socket. Windows
