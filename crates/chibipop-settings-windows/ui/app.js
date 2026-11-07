@@ -16,8 +16,8 @@ const FIELD_SOURCES = [
 ];
 const WIDE_KINDS = new Set(["list", "field-map", "screenshot", "binds", "catalog", "plugins"]);
 const ENGINE_BUILTIN = "Built-in (Windows OCR)";
-const DAEMON_NOTE = "The chibipop daemon owns this. This window cannot do it yet.";
-const daemonButton = () => ({ kind: "action", disabled: true, note: () => DAEMON_NOTE });
+const PENDING_NOTE = "This window cannot do this yet.";
+const daemonButton = () => ({ kind: "action", disabled: true, note: () => PENDING_NOTE });
 const LIBRARY_NOTE =
   "chibipop is using a dictionary built outside the app. Adding or removing here " +
   "rebuilds from this list only. Import the original ZIP files first.";
