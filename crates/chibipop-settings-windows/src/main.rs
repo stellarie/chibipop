@@ -38,7 +38,7 @@ fn main() -> anyhow::Result<()> {
         .unwrap_or_else(|| chibipop::paths::beside_exe("chibipop.toml"));
     let dict_path = args
         .dict
-        .unwrap_or_else(|| chibipop::paths::data_file("data/chibipop.sqlite"));
+        .unwrap_or_else(|| chibipop::paths::data_file(r"data\chibipop.sqlite"));
     tauri::Builder::default()
         .manage(Mutex::new(session::Session::new(config_path, dict_path)))
         .invoke_handler(tauri::generate_handler![

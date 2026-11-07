@@ -532,12 +532,14 @@ pub fn run() -> Result<()> {
             }
             // The database path supplies only the Dictionary names.
             // A rebuild replaces the file at the same path.
-            let dicts = {
+            let dicts = if dict.exists() {
                 let dictionary = SqliteDictionary::open(&dict).with_context(|| {
                     format!("opening {} - rebuild it in the settings window",
                             dict.display())
                 })?;
                 dictionary.dicts().context("reading dictionary identities")?
+            } else {
+                Vec::new()
             };
             if audit {
                 chibipop_windows::text::capture::init_dpi_awareness()?;
@@ -676,7 +678,7 @@ fn dump_bmp(path: &Path, buf: &[u8], w: i32, h: i32) -> Result<()> {
 
 /// Returns `--dict` or the default path.
 fn dict_path(given: Option<PathBuf>) -> PathBuf {
-    given.unwrap_or_else(|| chibipop::paths::data_file("data/chibipop.sqlite"))
+    given.unwrap_or_else(|| chibipop::paths::data_file(r"data\chibipop.sqlite"))
 }
 
 /// Returns the file name, or an empty string if no file name exists.

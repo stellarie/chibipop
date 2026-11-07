@@ -2295,8 +2295,9 @@ screenshots, logs, and tested revision. Restore only disposable changes.
 ### 1.44 Tauri settings window and fallback
 
 **Prerequisites.** Windows only. Use a scratch folder that holds `chibipop.exe`,
-`chibipop-settings.exe`, and a disposable `chibipop.toml`. Use an installed
-WebView2 runtime. Run as a user who can edit the `pv` registry value.
+`chibipop-settings.exe`, and a disposable `chibipop.toml`. The folder needs no
+dictionary. Use an installed WebView2 runtime. Run as a user who can edit the
+`pv` registry value.
 
 1. **Tauri window opens.** Run `chibipop.exe settings --tauri`. A Tauri window opens
    on the Popup tab. It shows four sections. Every label and help string matches
@@ -2315,6 +2316,10 @@ WebView2 runtime. Run as a user who can edit the `pv` registry value.
    Tauri window still renders.
 5. **Audit wins.** Run `chibipop.exe settings --tauri --audit`. One stderr line names
    the ignored `--tauri` flag. The command writes the audit JSON and opens no Tauri window.
+6. **A missing dictionary still opens.** Remove `data\chibipop.sqlite`. Run
+   `chibipop.exe settings --tauri`. The window opens on the Popup tab. The Dictionary
+   lists are empty. No error banner appears. Run `chibipop.exe settings`. The Win32
+   window opens the same way. Both paths match `chibipop.exe run` on a first run.
 
 **Evidence and cleanup.** Record the tested revision, the stderr lines, and a
 screenshot of step 1. Restore every renamed registry value and file.

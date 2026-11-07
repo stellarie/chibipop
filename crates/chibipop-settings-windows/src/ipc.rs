@@ -238,6 +238,10 @@ fn load(session: &mut Session) -> Result<FormView, IpcError> {
 }
 
 fn read_dicts(path: &Path) -> Result<Vec<DictInfo>, IpcError> {
+    // The Dictionary does not exist on a first run.
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
     let open_error = |e: Error| {
         IpcError::new(
             ErrorKind::Dictionary,
