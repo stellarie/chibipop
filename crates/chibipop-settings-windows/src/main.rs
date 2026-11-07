@@ -11,6 +11,8 @@ mod layout;
 #[cfg(windows)]
 mod lock;
 #[cfg(windows)]
+mod ocr;
+#[cfg(windows)]
 mod session;
 
 #[cfg(windows)]
@@ -54,6 +56,15 @@ fn main() -> anyhow::Result<()> {
             ipc::cancel_capture,
             ipc::new_bind,
             ipc::validate_form,
+            ipc::select_profile,
+            ipc::create_profile,
+            ipc::duplicate_profile,
+            ipc::rename_profile,
+            ipc::delete_profile,
+            ipc::set_default_profile,
+            ipc::reset_profile_override,
+            ipc::plugin_options,
+            ipc::ocr_languages,
         ])
         .run(tauri::generate_context!())
         .context("running the settings window")

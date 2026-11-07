@@ -13,6 +13,7 @@ pub mod image;
 pub mod library;
 pub mod lookup;
 pub mod paths;
+pub mod plugin;
 pub mod present;
 pub mod select;
 pub mod search;

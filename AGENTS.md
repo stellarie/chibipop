@@ -60,8 +60,8 @@ cargo clippy --workspace --color never --all-targets --all-features -- -D warnin
 - **Automated gate** — runs without a screen. CI runs the sweep three times to
   find process-global races. The pass count has a ceiling, not a floor. CI
   fails when the count is greater than the ceiling.
-- **Ceilings** — Windows allows 400: 220 core tests, 157 for the platform
-  crate, and 23 for `chibipop-settings-windows`. Linux allows 360, because
+- **Ceilings** — Windows allows 400: 225 core tests, 147 for the platform
+  crate, and 28 for `chibipop-settings-windows`. Linux allows 360, because
   it builds no settings crate. The Windows ceiling rose from 360 on
   2026-11-07, for the control-pipe tests.
 - **Manual tests** — a person tests each feature by hand. No test launches the
@@ -79,6 +79,7 @@ of `workflow_dispatch` with `bless=true` rewrites the goldens into an artifact. 
 src/                     core library `chibipop`: behavior, no OS calls
 src/analysis/            Japanese analysis service and model checks
 src/select/              Card selection and gesture state
+src/plugin/              Plugin discovery and manifest parsing
 crates/chibipop-linux/   Wayland bin, tray, OCR engine under src/ocr/
 crates/chibipop-windows/ Win32 bin, DirectWrite measurement, geometry goldens
 crates/chibipop-settings-windows/ Tauri settings child, Windows only

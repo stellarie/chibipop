@@ -14,7 +14,10 @@ const FIELD_SOURCES = [
   "screenshot",
   "sentence",
 ];
-const WIDE_KINDS = new Set(["list", "field-map", "screenshot", "binds"]);
+const WIDE_KINDS = new Set(["list", "field-map", "screenshot", "binds", "catalog", "plugins"]);
+const ENGINE_BUILTIN = "Built-in (Windows OCR)";
+const DAEMON_NOTE = "The chibipop daemon owns this. This window cannot do it yet.";
+const daemonButton = () => ({ kind: "action", disabled: true, note: () => DAEMON_NOTE });
 const LIBRARY_NOTE =
   "chibipop is using a dictionary built outside the app. Adding or removing here " +
   "rebuilds from this list only. Import the original ZIP files first.";
@@ -122,6 +125,20 @@ const EDITORS = {
   "popup-theme": choice("popup", "theme", THEMES),
   "popup-font": { kind: "font", ...at("popup", "font") },
   "popup-custom-style": { kind: "action", disabled: true },
+  "profile-catalog": { kind: "catalog" },
+  "open-dictionary-search": daemonButton(),
+  "open-sentence-search": daemonButton(),
+  "show-live-logs": daemonButton(),
+  "clear-lookup-cache": daemonButton(),
+  "ocr-engine": { kind: "engine", ...at("ocr", "engine") },
+  "ocr-language": { kind: "language", ...at("ocr", "language") },
+  "plugin-list": {
+    kind: "plugins",
+    get: (draft) => draft.cfg.plugins.enabled,
+    set: (draft, names) => {
+      draft.cfg.plugins.enabled = names;
+    },
+  },
   "popup-max-width": range("popup", "max_width_percent", { min: 10, max: 90, step: 5 }, "%"),
   "popup-max-height": range("popup", "max_height_percent", { min: 10, max: 90, step: 5 }, "%"),
   "popup-summary-length": range(
@@ -242,7 +259,10 @@ const EDITORS = {
 
 // `draft` is the `FormEdits` the editors edit.
 // `anki` holds the last Anki refresh.
+// `options` holds the plugin and OCR language lists for the loaded form.
 const state = {
+  options: { plugins: null, languages: null, languagesError: "" },
+  profileName: "",
   layout: null,
   fonts: [],
   form: null,
@@ -526,7 +546,7 @@ function actionControl(entry, editor) {
   button.id = controlId(entry);
   if (editor.disabled) {
     button.disabled = true;
-    button.title = "Not available in this window yet";
+    button.title = "Not available in this window";
   } else {
     button.addEventListener("click", () => editor.run(button));
   }
@@ -766,7 +786,211 @@ function bindsControl(entry, editor) {
   return box;
 }
 
+function errorText(error) {
+  const kind = error && error.kind ? error.kind : "internal";
+  const message = error && error.message ? error.message : String(error);
+  return `${kind}: ${message}`;
+}
+
+async function loadOptions(form) {
+  const options = { plugins: null, languages: null, languagesError: "" };
+  try {
+    options.plugins = await invoke("plugin_options", { engine: form.cfg.ocr.engine });
+  } catch (error) {
+    showError(error);
+  }
+  try {
+    options.languages = await invoke("ocr_languages", { language: form.cfg.ocr.language });
+  } catch (error) {
+    options.languagesError = errorText(error);
+  }
+  return options;
+}
+
+// An unenabled reader never runs.
+// Choosing a reader enables it.
+function currentEdits() {
+  const providers = state.options.plugins ? state.options.plugins.providers : [];
+  const engine = state.draft.cfg.ocr.engine;
+  const enabled = state.draft.cfg.plugins.enabled;
+  if (providers.includes(engine) && !enabled.includes(engine)) enabled.push(engine);
+  return state.draft;
+}
+
+async function profileAction(command, args, clearName) {
+  if (state.busy) return;
+  state.busy = true;
+  clearError();
+  setStatus("");
+  try {
+    const form = await invoke(command, { edits: currentEdits(), ...args });
+    if (clearName) state.profileName = "";
+    await adopt(form);
+  } catch (error) {
+    showError(error);
+  } finally {
+    state.busy = false;
+  }
+}
+
+function catalogButton(text, run, disabled) {
+  const button = element("button", "action", text);
+  button.disabled = Boolean(disabled);
+  button.addEventListener("click", run);
+  return button;
+}
+
+function catalogControl(entry) {
+  const form = state.form;
+  const box = element("div", "catalog");
+  const nameOf = (id) => form.profiles.find((profile) => profile.id === id)?.name ?? id;
+  const rows = form.profiles.map((profile) => [
+    profile.id,
+    profile.id === form.default_profile ? `${profile.name} (default)` : profile.name,
+  ]);
+  const select = selectOf(controlId(entry), rows, form.profile_id);
+  select.addEventListener("change", () => profileAction("select_profile", { id: select.value }));
+  const selected = form.profiles.find((profile) => profile.id === form.profile_id);
+  const kind = selected && selected.parent ? `Derived from ${nameOf(selected.parent)}.` : "Full profile.";
+  const manage = element("div", "control-group");
+  manage.append(
+    catalogButton(
+      "Set as default",
+      () => profileAction("set_default_profile", { id: form.profile_id }),
+      form.profile_id === form.default_profile,
+    ),
+    catalogButton("Delete", () => profileAction("delete_profile", { id: form.profile_id })),
+  );
+  box.append(select, element("div", "entry-note", kind), manage);
+
+  const name = element("input", "control wide-input");
+  name.type = "text";
+  name.value = state.profileName;
+  name.placeholder = "Profile name";
+  name.setAttribute("aria-label", "Profile name");
+  name.addEventListener("input", () => {
+    state.profileName = name.value;
+  });
+  const fulls = form.profiles.filter((profile) => !profile.parent);
+  const fallback = fulls.length > 0 ? fulls[0].id : "";
+  const inherited = fulls.some((profile) => profile.id === form.profile_id)
+    ? form.profile_id
+    : fallback;
+  const parent = selectOf(
+    `${controlId(entry)}-parent`,
+    fulls.map((profile) => [profile.id, profile.name]),
+    inherited,
+  );
+  parent.setAttribute("aria-label", "Parent profile");
+  const named = (command, extra) => () =>
+    profileAction(command, { name: state.profileName, ...extra }, true);
+  const make = element("div", "control-group");
+  make.append(
+    name,
+    catalogButton("Create", named("create_profile", { parent: null })),
+    parent,
+    catalogButton("Create derived", () =>
+      named("create_profile", { parent: parent.value })(),
+    ),
+    catalogButton("Duplicate", named("duplicate_profile", {})),
+    catalogButton("Rename", named("rename_profile", {})),
+  );
+  box.append(make);
+
+  if (form.overrides.length > 0) {
+    box.append(element("div", "entry-note", "Settings that differ from the parent:"));
+    const resets = element("div", "control-group");
+    for (const path of form.overrides) {
+      const label = path.split(".").pop().replaceAll("_", " ");
+      const reset = catalogButton(`Reset ${label}`, () =>
+        profileAction("reset_profile_override", { path }),
+      );
+      reset.title = path;
+      resets.append(reset);
+    }
+    box.append(resets);
+  }
+  return box;
+}
+
+function syncLanguage() {
+  const select = document.getElementById("control-ocr-language");
+  if (select) select.disabled = state.draft.cfg.ocr.engine !== "builtin";
+}
+
+function engineControl(entry, editor) {
+  const current = editor.get(state.draft);
+  const names = state.options.plugins ? state.options.plugins.engines : ["builtin"];
+  const rows = names.map((name) => [name, name === "builtin" ? ENGINE_BUILTIN : name]);
+  const select = selectControl(entry, editor, withCurrent(rows, current), current, (v) => v);
+  select.addEventListener("change", syncLanguage);
+  return select;
+}
+
+function languageControl(entry, editor) {
+  const group = element("div", "control-group stacked");
+  const { languages, languagesError } = state.options;
+  const current = editor.get(state.draft);
+  const rows = languages ? languages.choices.map((choice) => [choice.tag, choice.name]) : [];
+  const unchanged = current === state.form.cfg.ocr.language;
+  const shown = languages && unchanged ? languages.current : current;
+  const select = selectControl(entry, editor, withCurrent(rows, shown), shown, (v) => v);
+  select.disabled = state.draft.cfg.ocr.engine !== "builtin";
+  group.append(select);
+  if (languagesError) {
+    group.append(element("div", "entry-note", `Could not list OCR languages. ${languagesError}`));
+  } else if (rows.length === 0) {
+    group.append(element("div", "entry-note", "Windows reports no installed OCR language."));
+  }
+  return group;
+}
+
+function pluginsControl(entry, editor) {
+  const box = element("div", "plugins");
+  box.id = controlId(entry);
+  const info = state.options.plugins;
+  if (!info) {
+    box.append(element("div", "entry-note", "Could not read the plugins folder."));
+    return box;
+  }
+  if (info.plugins.length === 0) {
+    box.append(element("div", "entry-note", `No plugins found in ${info.root}.`));
+    return box;
+  }
+  for (const plugin of info.plugins) {
+    const row = element("div", "plugin-row");
+    const check = element("input", "control");
+    check.type = "checkbox";
+    check.checked = !plugin.refused && editor.get(state.draft).includes(plugin.key);
+    check.disabled = Boolean(plugin.refused);
+    check.setAttribute("aria-label", `Enable: ${plugin.label}`);
+    const status = element("span", "entry-note", "");
+    const show = () => {
+      if (plugin.refused) status.textContent = `Refused: ${plugin.refused}`;
+      else status.textContent = check.checked ? "Enabled" : "Disabled";
+    };
+    show();
+    check.addEventListener("change", () => {
+      const rest = editor.get(state.draft).filter((name) => name !== plugin.key);
+      editor.set(state.draft, check.checked ? [...rest, plugin.key] : rest);
+      show();
+    });
+    const configure = element("button", "action", "Configure");
+    configure.disabled = true;
+    configure.title = "Not available in this window";
+    configure.setAttribute("aria-label", `Configure: ${plugin.label}`);
+    const label = element("span", "list-name", plugin.roles ? `${plugin.label} - ${plugin.roles}` : plugin.label);
+    row.append(check, label, status, configure);
+    box.append(row);
+  }
+  return box;
+}
+
 const BUILDERS = {
+  catalog: catalogControl,
+  engine: engineControl,
+  language: languageControl,
+  plugins: pluginsControl,
   bool: boolControl,
   number: (entry, editor) => {
     const current = editor.get(state.draft);
@@ -865,7 +1089,8 @@ function draftOf(form) {
   };
 }
 
-function adopt(form) {
+async function adopt(form) {
+  state.options = await loadOptions(form);
   state.form = form;
   state.draft = draftOf(form);
   state.bindMessage = "";
@@ -904,8 +1129,8 @@ async function submit(command) {
   clearError();
   setStatus(command === "apply_form" ? "Applying..." : "Saving...");
   try {
-    const report = await invoke(command, { edits: state.draft });
-    adopt(report.form);
+    const report = await invoke(command, { edits: currentEdits() });
+    await adopt(report.form);
     setStatus(statusLine(report, command));
   } catch (error) {
     setStatus("");
@@ -919,7 +1144,7 @@ async function reloadForm() {
   clearError();
   setStatus("");
   try {
-    adopt(await invoke("load_form"));
+    await adopt(await invoke("load_form"));
   } catch (error) {
     showError(error);
   }
@@ -940,7 +1165,7 @@ async function main() {
     state.tab = first ? first.id : null;
     const form = await invoke("load_form");
     state.fonts = await invoke("font_families");
-    adopt(form);
+    await adopt(form);
     renderActions();
   } catch (error) {
     showError(error);

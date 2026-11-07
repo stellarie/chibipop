@@ -26,6 +26,7 @@ crates/chibipop-linux/src/    Linux bin: a calloop daemon.
   popup/                SCTK layer surface, tiny-skia, cosmic-text.
   settings/             The iced settings process and its rebuild path.
   tray/ lock.rs paths.rs  SNI tray, per-display flock, XDG paths.
+  plugin/               Plugin discovery and manifest parsing.
 crates/chibipop-windows/src/  Windows bin: a GetMessageW loop.
   input/ action/ plugin/  Hooks, the actions they drive, the plugin host.
   ui/render/            Direct2D paint, DirectWrite TextMeasure adapter.

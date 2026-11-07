@@ -68,8 +68,8 @@ jobs:
           done
           n=$(awk '/^test result: ok\./ {s+=$4} END {print s+0}' test-3.log)
           echo "passing tests: $n"
-          # A ceiling, not a floor: 400 is 220 core tests, plus 160 for
-          # this platform crate, plus 20 for the settings crate. The
+          # A ceiling, not a floor: 400 is 225 core tests, plus 147 for
+          # this platform crate, plus 28 for the settings crate. The
           # Linux job keeps 360, because it builds no settings crate.
           # A new test must justify itself.
           # Raised from 360 on 2026-11-07, for the control-pipe tests.
@@ -186,7 +186,7 @@ jobs:
       # Three runs and a ceiling for the same reasons as tier0; --exclude
       # chibipop-windows for the same bin-name-collision reason tier0
       # excludes chibipop-linux (see the workspace Cargo.toml). The ceiling
-      # is 360: 220 core tests plus 140 for the Linux crate. Windows allows
+      # is 360: 225 core tests plus 135 for the Linux crate. Windows allows
       # 400, because it also builds the settings crate.
       - name: Tests, three times
         shell: bash

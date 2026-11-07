@@ -165,6 +165,21 @@ input.control[type="checkbox"] {
   overflow-wrap: anywhere;
 }
 
+.catalog,
+.plugins {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.plugin-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
 .binds {
   display: flex;
   flex-direction: column;

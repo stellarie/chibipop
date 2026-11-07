@@ -33,7 +33,7 @@ process. No automated test needs a real screen or desktop.
 The pass count has a ceiling, not a floor. CI fails when the count passes the
 ceiling of its platform.
 
-Windows allows 400: 220 core tests, 157 for the platform crate, and 23 for
+Windows allows 400: 225 core tests, 147 for the platform crate, and 28 for
 `chibipop-settings-windows`. Linux allows 360, because it builds no settings
 crate. The Windows ceiling rose from 360 on 2026-11-07, for the control-pipe
 tests.
@@ -43,7 +43,7 @@ reproduced bug. Raise a ceiling only in a reviewed pull request.
 
 ## Recent feature case index
 
-Cases 1.31-1.47 cover Search, hover, clipboard, furigana, sentence-field,
+Cases 1.31-1.48 cover Search, hover, clipboard, furigana, sentence-field,
 audit-isolation, cache invalidation, profile catalog, and Tauri settings behavior.
 Cases 1.30.11-1.30.16 cover screenshot modes and saved targets.
 Existing settings, plugin, and live-log cases retain their identifiers.
@@ -2410,6 +2410,28 @@ or after 10 seconds. Keep a pointer within reach. Step 1.47.4 needs a Lookup bin
 
 **Evidence and cleanup.** Record the tested revision, the config path, and a screenshot of
 the status line after step 1.47.7. Restore the TOML file. Stop the daemon.
+
+### 1.48 Tauri settings catalogs and option lists
+
+**Prerequisites.** Windows only. Use the scratch folder of case 1.44. Step 1.48.4 needs
+a folder `plugins\` beside the executable. It holds one valid plugin with the
+`text-provider` role and one plugin with a broken `plugin.toml`. Step 1.48.3 needs at
+least one Windows OCR language.
+
+| ID | Case | Steps and expected result |
+|---|---|---|
+| 1.48 | Profile actions persist | Open the Profiles tab. Create a Full profile, a Derived profile, and a copy of one profile. Rename one profile. Set another as the default. Press Save, close the window, and open it again. The list, the names, and the default marker match the TOML file. Delete a profile that nothing references. Press Save. The file loses it. |
+| 1.48.1 | A profile action keeps unsaved edits | Change **Color theme** on the Popup tab. Do not save. Create a profile on the Profiles tab. Select the first profile again. The changed theme is still present. |
+| 1.48.2 | A blocked delete changes nothing | Change **Maximum width** and do not save. Press **Delete** on the default profile. The error line shows the core message. The changed width stays on the Popup tab. Press Save. The file holds the changed width and keeps the profile. Repeat for a profile that a bind, a nested lookup, or a Derived profile names. |
+| 1.48.3 | Text reader and language lists | Open the Text recognition tab. **Text reader** lists Built-in and every text provider under `plugins\`. **Text language** lists every Windows OCR language. Choose a plugin reader. **Text language** becomes disabled. Choose Built-in. **Text language** works again. |
+| 1.48.4 | Unknown saved values stay | Put `engine = "ghost"` and `language = "xx"` in the TOML file and open the window. **Text reader** shows `ghost`. **Text language** shows `xx (not installed)`. Press Save without a change. The file keeps both values. |
+| 1.48.5 | Extensions list | Open the Extensions tab. The valid plugin shows its name, its version, and its roles. The broken plugin shows a refusal and a disabled box. Check the valid plugin and press Save. The TOML file lists it under `plugins.enabled`. Every **Configure** button is disabled. |
+| 1.48.6 | A chosen reader becomes enabled | Choose a plugin reader on the Text recognition tab and press Save. The Extensions tab shows that plugin as enabled. |
+| 1.48.7 | Daemon buttons stay disabled | Open the Dictionaries tab and the Debug tab. **Open dictionary search**, **Open sentence search**, **Show live logs**, and **Clear lookup cache** are disabled. Each one shows a note that names the daemon. Clicking one does nothing. |
+
+**Evidence and cleanup.** Record the tested revision and the config path. Attach a
+screenshot of the Profiles tab after step 1.48.2 and of the Text recognition tab after
+step 1.48.4. Restore the TOML file and remove the test plugins.
 
 ---
 

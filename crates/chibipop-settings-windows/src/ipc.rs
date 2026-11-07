@@ -7,15 +7,18 @@ use crate::control::{self, ReloadOutcome};
 use crate::fonts;
 use crate::layout::LayoutView;
 use crate::lock::ConfigLock;
+use crate::ocr;
 use crate::session::Session;
 use anyhow::Error;
 use chibipop::anki;
 use chibipop::config::{
-    self, Bind, BindAction, Config, FieldMapping, Platform, ProfileCatalog, ResolvedConfig,
+    self, Bind, BindAction, Config, FieldMapping, Platform, ProfileCatalog, ProfileData,
+    ResolvedConfig,
 };
 use chibipop::library::Library;
 use chibipop::lookup::model::Dictionary;
 use chibipop::lookup::sqlite::SqliteDictionary;
+use chibipop::plugin::{discover, manifest};
 use chibipop::present::DictInfo;
 use chibipop::settings::{self, DictRow, SettingsForm};
 use serde::{Deserialize, Serialize};
@@ -57,11 +60,14 @@ impl IpcError {
 pub struct ProfileRef {
     pub id: String,
     pub name: String,
+    pub parent: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct FormView {
     pub profile_id: String,
+    pub default_profile: String,
+    pub overrides: Vec<String>,
     pub profiles: Vec<ProfileRef>,
     pub cfg: ResolvedConfig,
     pub terms: Vec<DictRow>,
@@ -87,6 +93,34 @@ pub struct FormEdits {
     pub binds: Vec<Bind>,
     pub field_map: Option<Vec<FieldMapping>>,
     pub screenshot_reset_targets: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PluginRow {
+    pub key: String,
+    pub label: String,
+    pub roles: String,
+    pub refused: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PluginOptions {
+    pub root: String,
+    pub engines: Vec<String>,
+    pub providers: Vec<String>,
+    pub plugins: Vec<PluginRow>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct LanguageChoice {
+    pub name: String,
+    pub tag: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct LanguageOptions {
+    pub choices: Vec<LanguageChoice>,
+    pub current: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -208,6 +242,80 @@ pub fn validate_form(
     validate(&session, edits)
 }
 
+#[tauri::command]
+pub fn select_profile(
+    state: State<'_, Mutex<Session>>,
+    edits: FormEdits,
+    id: String,
+) -> Result<FormView, IpcError> {
+    profile_action(&mut *lock(&state)?, edits, ProfileAction::Select { id })
+}
+
+#[tauri::command]
+pub fn create_profile(
+    state: State<'_, Mutex<Session>>,
+    edits: FormEdits,
+    name: String,
+    parent: Option<String>,
+) -> Result<FormView, IpcError> {
+    profile_action(&mut *lock(&state)?, edits, ProfileAction::Create { name, parent })
+}
+
+#[tauri::command]
+pub fn duplicate_profile(
+    state: State<'_, Mutex<Session>>,
+    edits: FormEdits,
+    name: String,
+) -> Result<FormView, IpcError> {
+    profile_action(&mut *lock(&state)?, edits, ProfileAction::Duplicate { name })
+}
+
+#[tauri::command]
+pub fn rename_profile(
+    state: State<'_, Mutex<Session>>,
+    edits: FormEdits,
+    name: String,
+) -> Result<FormView, IpcError> {
+    profile_action(&mut *lock(&state)?, edits, ProfileAction::Rename { name })
+}
+
+#[tauri::command]
+pub fn delete_profile(
+    state: State<'_, Mutex<Session>>,
+    edits: FormEdits,
+    id: String,
+) -> Result<FormView, IpcError> {
+    profile_action(&mut *lock(&state)?, edits, ProfileAction::Delete { id })
+}
+
+#[tauri::command]
+pub fn set_default_profile(
+    state: State<'_, Mutex<Session>>,
+    edits: FormEdits,
+    id: String,
+) -> Result<FormView, IpcError> {
+    profile_action(&mut *lock(&state)?, edits, ProfileAction::SetDefault { id })
+}
+
+#[tauri::command]
+pub fn reset_profile_override(
+    state: State<'_, Mutex<Session>>,
+    edits: FormEdits,
+    path: String,
+) -> Result<FormView, IpcError> {
+    profile_action(&mut *lock(&state)?, edits, ProfileAction::ResetOverride { path })
+}
+
+#[tauri::command]
+pub fn plugin_options(engine: String) -> PluginOptions {
+    plugin_options_in(&plugins_dir(), &engine)
+}
+
+#[tauri::command(async)]
+pub fn ocr_languages(language: String) -> Result<LanguageOptions, IpcError> {
+    ocr::installed_recognisers().map(|installed| language_options(installed, &language))
+}
+
 #[tauri::command(async)]
 pub fn anki_refresh(url: String, model: String) -> Result<AnkiLists, IpcError> {
     anki_lists(&url, &model)
@@ -220,6 +328,145 @@ fn anki_lists(url: &str, model: &str) -> Result<AnkiLists, IpcError> {
         models: anki::model_names(url).map_err(io)?,
         fields: anki::model_field_names(url, model).map_err(io)?,
     })
+}
+
+enum ProfileAction {
+    Select { id: String },
+    Create { name: String, parent: Option<String> },
+    Duplicate { name: String },
+    Rename { name: String },
+    Delete { id: String },
+    SetDefault { id: String },
+    ResetOverride { path: String },
+}
+
+// Core mutates the form before it refuses.
+// The caller restores a snapshot.
+fn run_profile_action(
+    form: &mut SettingsForm,
+    dicts: &[DictInfo],
+    action: ProfileAction,
+) -> anyhow::Result<()> {
+    match action {
+        ProfileAction::Select { id } => form.select_profile(&id, dicts),
+        ProfileAction::Create { name, parent } => {
+            form.create_profile(name, parent.as_deref(), dicts).map(|_| ())
+        }
+        ProfileAction::Duplicate { name } => form.duplicate_profile(name, dicts).map(|_| ()),
+        ProfileAction::Rename { name } => {
+            form.save_current()?;
+            form.rename_profile(name)
+        }
+        ProfileAction::Delete { id } => form.delete_profile(&id, dicts),
+        ProfileAction::SetDefault { id } => {
+            form.save_current()?;
+            form.set_default_profile(&id)
+        }
+        ProfileAction::ResetOverride { path } => form.reset_profile_override(&path, dicts),
+    }
+}
+
+fn profile_action(
+    session: &mut Session,
+    edits: FormEdits,
+    action: ProfileAction,
+) -> Result<FormView, IpcError> {
+    check_current(session, &edits)?;
+    let form = session
+        .form
+        .as_mut()
+        .ok_or_else(|| IpcError::new(ErrorKind::Internal, "load the form first"))?;
+    apply_edits(form, edits);
+    let snapshot = form.clone();
+    if let Err(e) = run_profile_action(form, &session.dicts, action) {
+        *form = snapshot;
+        return Err(IpcError::new(ErrorKind::Validation, format!("{e:#}")));
+    }
+    Ok(view_of(form, &form.catalog, &session.dicts, session.generation))
+}
+
+fn plugins_dir() -> PathBuf {
+    chibipop::paths::beside_exe("plugins")
+}
+
+fn plugin_options_in(root: &Path, engine: &str) -> PluginOptions {
+    let found = discover::discover(root);
+    let providers = discover::text_provider_names(&found);
+    PluginOptions {
+        root: root.display().to_string(),
+        engines: engine_names(&providers, engine),
+        providers,
+        plugins: found
+            .iter()
+            .map(|(dir, parsed)| plugin_row(dir, parsed))
+            .collect(),
+    }
+}
+
+fn engine_names(providers: &[String], configured: &str) -> Vec<String> {
+    let mut names = vec!["builtin".to_string()];
+    names.extend(providers.iter().cloned());
+    if !names.iter().any(|name| name == configured) {
+        names.push(configured.to_string());
+    }
+    names
+}
+
+fn plugin_row(dir: &Path, parsed: &Result<manifest::Manifest, Error>) -> PluginRow {
+    match parsed {
+        Ok(m) => PluginRow {
+            key: m.name.clone(),
+            label: format!("{} {}", m.name, m.version),
+            roles: roles_text(&m.roles),
+            refused: None,
+        },
+        Err(e) => {
+            let label = dir
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            PluginRow {
+                key: label.clone(),
+                label,
+                roles: String::new(),
+                refused: Some(format!("{e:#}")),
+            }
+        }
+    }
+}
+
+fn roles_text(roles: &[manifest::Role]) -> String {
+    roles
+        .iter()
+        .map(|role| match role {
+            manifest::Role::TextProvider => "Reads screen text",
+            manifest::Role::FieldContributor => "Adds Anki fields",
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn language_options(installed: Vec<(String, String)>, configured: &str) -> LanguageOptions {
+    let mut choices: Vec<LanguageChoice> = installed
+        .into_iter()
+        .map(|(name, tag)| LanguageChoice { name, tag })
+        .collect();
+    let found = choices
+        .iter()
+        .find(|choice| ocr::tag_matches(&choice.tag, configured))
+        .map(|choice| choice.tag.clone());
+    let current = match found {
+        Some(tag) => tag,
+        None if configured.is_empty() => String::new(),
+        None => {
+            choices.push(LanguageChoice {
+                name: format!("{configured} (not installed)"),
+                tag: configured.to_string(),
+            });
+            configured.to_string()
+        }
+    };
+    LanguageOptions { choices, current }
 }
 
 fn add_bind(session: &mut Session) -> Result<Bind, IpcError> {
@@ -301,12 +548,7 @@ fn save_locked(session: &mut Session, edits: FormEdits) -> Result<Saved, IpcErro
     })
 }
 
-// Writes nothing. `fresh` is the config that the caller loaded.
-fn merge_edits(session: &Session, fresh: &Config, edits: FormEdits) -> Result<Merged, IpcError> {
-    let mut form = session
-        .form
-        .clone()
-        .ok_or_else(|| IpcError::new(ErrorKind::Internal, "load the form first"))?;
+fn apply_edits(form: &mut SettingsForm, edits: FormEdits) {
     form.cfg = edits.cfg;
     form.terms = edits.terms;
     form.frequency = edits.frequency;
@@ -315,6 +557,15 @@ fn merge_edits(session: &Session, fresh: &Config, edits: FormEdits) -> Result<Me
     form.catalog.binds = edits.binds;
     form.field_map = edits.field_map;
     form.screenshot_reset_targets = edits.screenshot_reset_targets;
+}
+
+// Writes nothing. `fresh` is the config that the caller loaded.
+fn merge_edits(session: &Session, fresh: &Config, edits: FormEdits) -> Result<Merged, IpcError> {
+    let mut form = session
+        .form
+        .clone()
+        .ok_or_else(|| IpcError::new(ErrorKind::Internal, "load the form first"))?;
+    apply_edits(&mut form, edits);
     let applied = settings::apply_to(&form, fresh);
     let mut before = fresh.clone();
     before.migrate_dictionary_lists(&session.dicts);
@@ -393,6 +644,8 @@ fn library_dir() -> PathBuf {
 fn view_of(form: &SettingsForm, cfg: &Config, dicts: &[DictInfo], generation: u64) -> FormView {
     FormView {
         profile_id: form.profile_id.clone(),
+        default_profile: form.catalog.default_profile.clone(),
+        overrides: override_paths(form),
         profiles: form
             .catalog
             .profiles
@@ -400,6 +653,10 @@ fn view_of(form: &SettingsForm, cfg: &Config, dicts: &[DictInfo], generation: u6
             .map(|p| ProfileRef {
                 id: p.id.clone(),
                 name: p.name.clone(),
+                parent: match &p.data {
+                    ProfileData::Derived { parent, .. } => Some(parent.clone()),
+                    ProfileData::Full { .. } => None,
+                },
             })
             .collect(),
         cfg: form.cfg.clone(),
@@ -413,6 +670,14 @@ fn view_of(form: &SettingsForm, cfg: &Config, dicts: &[DictInfo], generation: u6
         binds: form.catalog.binds.clone(),
         stale: settings::stale_order_entries(cfg, dicts),
         generation,
+    }
+}
+
+fn override_paths(form: &SettingsForm) -> Vec<String> {
+    let selected = form.catalog.profiles.iter().find(|p| p.id == form.profile_id);
+    match selected.map(|p| &p.data) {
+        Some(ProfileData::Derived { overrides, .. }) => overrides.keys().cloned().collect(),
+        _ => Vec::new(),
     }
 }
 
@@ -430,7 +695,7 @@ fn config_error(e: Error) -> IpcError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chibipop::config::{LayoutMode, ProfileData, ScreenshotWindow, TriggerMode};
+    use chibipop::config::{LayoutMode, ScreenshotWindow, TriggerMode};
     use chibipop::dict::frequency::RankingStrategy;
     use chibipop::present::DictInfo;
     use std::sync::Barrier;
@@ -746,5 +1011,113 @@ mod tests {
             .expect("the lookup bind should persist");
         assert_eq!(saved.windows, "ctrl+f9");
         assert!(saved.enabled);
+    }
+
+    fn act(session: &mut Session, action: ProfileAction) -> Result<FormView, IpcError> {
+        let edits = edits_of(session);
+        profile_action(session, edits, action)
+    }
+
+    fn profile_id(session: &Session) -> String {
+        session.form.as_ref().expect("form should be loaded").profile_id.clone()
+    }
+
+    fn width_of(session: &Session) -> u8 {
+        session.form.as_ref().expect("form should be loaded").cfg.popup.max_width_percent
+    }
+
+    #[test]
+    fn select_profile_returns_the_new_form() {
+        let path = temp_config("select");
+        let mut session = session_at(&path);
+        let first = profile_id(&session);
+        let first_width = width_of(&session);
+        let created = act(
+            &mut session,
+            ProfileAction::Create { name: "Second".to_string(), parent: None },
+        )
+        .expect("a full profile should be created");
+        let second = created.profile_id.clone();
+        assert_ne!(first, second);
+        let changed = [55, 60, 65]
+            .into_iter()
+            .find(|width| *width != first_width && *width != width_of(&session))
+            .expect("a distinct width should exist");
+        let mut edits = edits_of(&session);
+        edits.cfg.popup.max_width_percent = changed;
+        let view = profile_action(&mut session, edits, ProfileAction::Select { id: first.clone() })
+            .expect("the first profile should be selected");
+        assert_eq!(view.profile_id, first);
+        assert_eq!(view.cfg.popup.max_width_percent, first_width);
+        assert_eq!(profile_id(&session), first);
+        let back = act(&mut session, ProfileAction::Select { id: second })
+            .expect("the second profile should be selected");
+        assert_eq!(back.cfg.popup.max_width_percent, changed);
+    }
+
+    #[test]
+    fn rename_profile_saves() {
+        let path = temp_config("rename");
+        let mut session = session_at(&path);
+        let id = profile_id(&session);
+        act(&mut session, ProfileAction::Rename { name: "Renamed".to_string() })
+            .expect("a rename should work");
+        let edits = edits_of(&session);
+        write(&mut session, edits, false).expect("the renamed catalog should save");
+        let cfg = config::load_or_create(&path).expect("config should load");
+        let profile = cfg
+            .profiles
+            .iter()
+            .find(|profile| profile.id == id)
+            .expect("the profile should persist");
+        assert_eq!(profile.name, "Renamed");
+    }
+
+    #[test]
+    fn blocked_delete_restores_the_form() {
+        let path = temp_config("blocked");
+        let mut session = session_at(&path);
+        let id = profile_id(&session);
+        let mut edits = edits_of(&session);
+        edits.cfg.popup.max_width_percent = if width_of(&session) == 55 { 60 } else { 55 };
+        let mut expected = session.form.clone().expect("form should be loaded");
+        apply_edits(&mut expected, edits.clone());
+        let err = profile_action(&mut session, edits, ProfileAction::Delete { id })
+            .expect_err("the default profile cannot be deleted");
+        assert_eq!(err.kind, ErrorKind::Validation);
+        assert_eq!(session.form, Some(expected));
+    }
+
+    #[test]
+    fn profile_action_keeps_the_draft() {
+        let path = temp_config("draft");
+        let mut session = session_at(&path);
+        let id = profile_id(&session);
+        let mut edits = edits_of(&session);
+        let changed = if width_of(&session) == 55 { 60 } else { 55 };
+        edits.cfg.popup.max_width_percent = changed;
+        let view = profile_action(&mut session, edits, ProfileAction::Select { id })
+            .expect("the same profile should be selected");
+        assert_eq!(view.cfg.popup.max_width_percent, changed);
+    }
+
+    #[test]
+    fn unknown_engine_survives() {
+        let dir = std::env::temp_dir().join(format!("chibipop-ipc-engine-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let plugin = dir.join("alpha");
+        std::fs::create_dir_all(&plugin).expect("plugin dir should be created");
+        let manifest = "name = \"alpha\"\nversion = \"0.1.0\"\nprotocol = 1\ncommand = \"cmd\"\n\
+            roles = [\"text-provider\"]\n[text_provider]\n";
+        std::fs::write(plugin.join("plugin.toml"), manifest).expect("manifest should write");
+        let options = plugin_options_in(&dir, "ghost");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(options.providers, vec!["alpha".to_string()]);
+        assert_eq!(
+            options.engines,
+            vec!["builtin".to_string(), "alpha".to_string(), "ghost".to_string()]
+        );
+        assert_eq!(options.plugins.len(), 1);
+        assert!(options.plugins[0].refused.is_none());
     }
 }

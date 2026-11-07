@@ -18,6 +18,8 @@ interface IpcError {
 interface ProfileRef {
   id: string;
   name: string;
+  // The Full profile this one inherits. Null for a Full profile.
+  parent: string | null;
 }
 
 interface DictRow {
@@ -140,6 +142,9 @@ type CaptureResult =
 
 interface FormView {
   profile_id: string;
+  default_profile: string;
+  // Field paths that the selected Derived profile overrides.
+  overrides: string[];
   profiles: ProfileRef[];
   cfg: ResolvedConfig;
   terms: DictRow[];
@@ -166,6 +171,34 @@ interface FormEdits {
   field_map: FieldMapping[] | null;
   // True clears both saved screenshot targets.
   screenshot_reset_targets: boolean;
+}
+
+// One discovered plugin. A refused manifest carries its error.
+interface PluginRow {
+  key: string;
+  label: string;
+  roles: string;
+  refused: string | null;
+}
+
+interface PluginOptions {
+  root: string;
+  // "builtin", each text provider, then the saved engine if unknown.
+  engines: string[];
+  providers: string[];
+  plugins: PluginRow[];
+}
+
+interface LanguageChoice {
+  name: string;
+  tag: string;
+}
+
+interface LanguageOptions {
+  // The saved language is appended as "not installed" when absent.
+  choices: LanguageChoice[];
+  // The tag of the row that matches the saved language.
+  current: string;
 }
 
 interface AnkiLists {
@@ -228,4 +261,20 @@ interface Commands {
   // Rejects with kind "validation" for any settings problem, not only a chord conflict.
   // Rejects with kind "read-only" while an unrelated reindex edit is pending.
   validate_form: { args: { edits: FormEdits }; result: string[] };
+  // Each profile command copies `edits` into the form first.
+  // Each rejects with kind "validation" and restores the form on a refusal.
+  // None writes the file.
+  select_profile: { args: { edits: FormEdits; id: string }; result: FormView };
+  create_profile: {
+    args: { edits: FormEdits; name: string; parent: string | null };
+    result: FormView;
+  };
+  duplicate_profile: { args: { edits: FormEdits; name: string }; result: FormView };
+  rename_profile: { args: { edits: FormEdits; name: string }; result: FormView };
+  delete_profile: { args: { edits: FormEdits; id: string }; result: FormView };
+  set_default_profile: { args: { edits: FormEdits; id: string }; result: FormView };
+  reset_profile_override: { args: { edits: FormEdits; path: string }; result: FormView };
+  plugin_options: { args: { engine: string }; result: PluginOptions };
+  // Rejects with kind "io" when the Windows OCR call fails.
+  ocr_languages: { args: { language: string }; result: LanguageOptions };
 }
