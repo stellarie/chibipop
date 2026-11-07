@@ -49,8 +49,63 @@ interface ResolvedConfig {
     hide_on_cursor_exit: boolean;
   };
   nested_profile: string | null;
-  // Other sections exist. Stage 1 reads none of them.
+  trigger: {
+    mode: "live" | "hold-key" | "toggle" | "press" | "hold-shift";
+    per_character_lookup: boolean;
+  };
+  dictionaries: {
+    ranking_strategy: "best-rank" | "priority" | "median";
+  };
+  // The key is kebab-case in the serialized form.
+  application: { "background-on-close": boolean };
+  ocr: {
+    max_ocr_passes: number;
+    prefer_vertical: boolean;
+    capture_width: number;
+    capture_height: number;
+    scan_alphanumeric: boolean;
+    discard_furigana: boolean;
+    language: string;
+    engine: string;
+  };
+  debug: {
+    show_scan_region: boolean;
+    show_engine_log: boolean;
+    show_adapter_log: boolean;
+  };
+  anki: {
+    enabled: boolean;
+    overwrite_duplicates: boolean;
+    url: string;
+    deck: string;
+    model: string;
+    notify_on_add: boolean;
+    field_map: FieldMapping[];
+    sentence_mode: "sentence" | "line" | "all" | "static";
+    show_static_overlay: boolean;
+    include_dictionary_name: boolean;
+    first_dict_only: boolean;
+    selection_buttons: "primary-additive" | "primary-replacing";
+    selection_separator: "ellipsis" | "space" | "line-break" | "list-items";
+    triple_click: "sense" | "sense-with-examples" | "line";
+  };
+  actions: {
+    screenshot: {
+      include_on_add: boolean;
+      capture_mode: "region" | "window" | "fixed-region" | "fixed-window";
+      fixed_region: [number, number, number, number] | null;
+      fixed_window: { app_id: string; title: string } | null;
+    };
+    ocr_clipboard: { open_sentence_search: boolean } | null;
+    search: { selected_opens_sentence_search: boolean };
+  };
+  // Other sections exist. The page ignores them.
   [section: string]: unknown;
+}
+
+interface FieldMapping {
+  anki_field: string;
+  source: string;
 }
 
 interface FormView {
@@ -75,6 +130,16 @@ interface FormEdits {
   frequency: DictRow[];
   pitch: DictRow[];
   background_on_close: boolean | null;
+  // Null keeps the saved map.
+  field_map: FieldMapping[] | null;
+  // True clears both saved screenshot targets.
+  screenshot_reset_targets: boolean;
+}
+
+interface AnkiLists {
+  decks: string[];
+  models: string[];
+  fields: string[];
 }
 
 interface ApplyReport {
@@ -115,8 +180,10 @@ interface Commands {
   load_layout: { args: {}; result: LayoutView };
   load_form: { args: {}; result: FormView };
   font_families: { args: {}; result: string[] };
-  // Both reject a terms or frequency edit with kind "read-only".
-  // Both reject a stale generation with kind "stale".
+  // Both reject a reindex edit: "read-only".
+  // Both reject a stale generation: "stale".
   save_form: { args: { edits: FormEdits }; result: ApplyReport };
   apply_form: { args: { edits: FormEdits }; result: ApplyReport };
+  // Rejects with kind "io" when Anki is down.
+  anki_refresh: { args: { url: string; model: string }; result: AnkiLists };
 }

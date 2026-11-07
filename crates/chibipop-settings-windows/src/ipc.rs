@@ -8,7 +8,8 @@ use crate::layout::LayoutView;
 use crate::lock::ConfigLock;
 use crate::session::Session;
 use anyhow::Error;
-use chibipop::config::{self, Config, Platform, ProfileCatalog, ResolvedConfig};
+use chibipop::anki;
+use chibipop::config::{self, Config, FieldMapping, Platform, ProfileCatalog, ResolvedConfig};
 use chibipop::library::Library;
 use chibipop::lookup::model::Dictionary;
 use chibipop::lookup::sqlite::SqliteDictionary;
@@ -76,6 +77,15 @@ pub struct FormEdits {
     pub frequency: Vec<DictRow>,
     pub pitch: Vec<DictRow>,
     pub background_on_close: Option<bool>,
+    pub field_map: Option<Vec<FieldMapping>>,
+    pub screenshot_reset_targets: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AnkiLists {
+    pub decks: Vec<String>,
+    pub models: Vec<String>,
+    pub fields: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -135,6 +145,20 @@ pub fn apply_form(
     write(&mut session, edits, true)
 }
 
+#[tauri::command(async)]
+pub fn anki_refresh(url: String, model: String) -> Result<AnkiLists, IpcError> {
+    anki_lists(&url, &model)
+}
+
+fn anki_lists(url: &str, model: &str) -> Result<AnkiLists, IpcError> {
+    let io = |e: Error| IpcError::new(ErrorKind::Io, format!("{e:#}"));
+    Ok(AnkiLists {
+        decks: anki::deck_names(url).map_err(io)?,
+        models: anki::model_names(url).map_err(io)?,
+        fields: anki::model_field_names(url, model).map_err(io)?,
+    })
+}
+
 fn write(session: &mut Session, edits: FormEdits, reload: bool) -> Result<ApplyReport, IpcError> {
     if session.form.is_none() {
         return Err(IpcError::new(ErrorKind::Internal, "load the form first"));
@@ -173,18 +197,17 @@ fn save_locked(session: &mut Session, edits: FormEdits) -> Result<Saved, IpcErro
         .clone()
         .ok_or_else(|| IpcError::new(ErrorKind::Internal, "load the form first"))?;
     let fresh = config::load_or_create(&session.config_path).map_err(config_error)?;
-    let reindex = edits.terms != form.terms || edits.frequency != form.frequency;
     form.cfg = edits.cfg;
     form.terms = edits.terms;
     form.frequency = edits.frequency;
     form.pitch = edits.pitch;
     form.background_on_close = edits.background_on_close;
+    form.field_map = edits.field_map;
+    form.screenshot_reset_targets = edits.screenshot_reset_targets;
     let applied = settings::apply_to(&form, &fresh);
-    // `dictionary_work` owns the real rule. The row compare above is
-    // kept because it refuses more, not less.
-    let needs_reindex =
-        settings::dictionary_work(&fresh, &applied.config) != settings::DictionaryWork::None;
-    if reindex || needs_reindex {
+    let mut before = fresh.clone();
+    before.migrate_dictionary_lists(&session.dicts);
+    if settings::dictionary_work(&before, &applied.config) != settings::DictionaryWork::None {
         return Err(IpcError::new(
             ErrorKind::ReadOnly,
             "this change needs a dictionary reindex, which this build lacks",
@@ -307,8 +330,9 @@ fn config_error(e: Error) -> IpcError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chibipop::config::{LayoutMode, ProfileData, ScreenshotWindow, TriggerMode};
     use chibipop::dict::frequency::RankingStrategy;
-    use chibipop::config::LayoutMode;
+    use chibipop::present::DictInfo;
     use std::sync::Barrier;
 
     fn temp_config(tag: &str) -> PathBuf {
@@ -334,7 +358,14 @@ mod tests {
             frequency: form.frequency.clone(),
             pitch: form.pitch.clone(),
             background_on_close: form.background_on_close,
+            field_map: None,
+            screenshot_reset_targets: false,
         }
+    }
+
+    fn saved(path: &Path) -> ResolvedConfig {
+        let cfg = config::load_or_create(path).expect("config should load");
+        cfg.resolved(None).expect("config should resolve")
     }
 
     fn saved_popup(path: &Path) -> chibipop::config::PopupConfig {
@@ -446,5 +477,117 @@ mod tests {
             std::fs::read_to_string(&path).expect("file should read"),
             before
         );
+    }
+
+    #[test]
+    fn terms_edit_saves() {
+        let path = temp_config("terms");
+        let mut session = session_at(&path);
+        let mut edits = edits_of(&session);
+        edits.terms.push(DictRow {
+            name: "Terms".to_string(),
+            enabled: true,
+        });
+        write(&mut session, edits, false).expect("a terms edit needs no reindex");
+        assert_eq!(saved(&path).dictionaries.terms, vec!["Terms".to_string()]);
+    }
+
+    #[test]
+    fn legacy_config_still_saves() {
+        let path = temp_config("legacy");
+        let legacy = "[trigger]\n[popup]\n[dictionaries]\nfrequency = [\"Freq\"]\n";
+        std::fs::write(&path, legacy).expect("legacy file should write");
+        let dicts = vec![
+            DictInfo {
+                dict_id: 1,
+                name: "Freq".to_string(),
+            },
+            DictInfo {
+                dict_id: 2,
+                name: "Other".to_string(),
+            },
+        ];
+        let cfg = config::load_or_create(&path).expect("legacy config should load");
+        let mut session = Session::new(path.clone(), PathBuf::new());
+        session.form = Some(settings::from_config(&cfg, &dicts));
+        session.dicts = dicts;
+        let mut edits = edits_of(&session);
+        edits.cfg.popup.highlight_match = !edits.cfg.popup.highlight_match;
+        let flipped = edits.cfg.popup.highlight_match;
+        write(&mut session, edits, false).expect("an edit that touches no Dictionary must save");
+        assert_eq!(saved_popup(&path).highlight_match, flipped);
+    }
+
+    #[test]
+    fn shared_branch_round_trips() {
+        let path = temp_config("shared");
+        let mut session = session_at(&path);
+        let mut edits = edits_of(&session);
+        edits.background_on_close = Some(true);
+        edits.cfg.debug.show_engine_log = true;
+        write(&mut session, edits, false).expect("a shared edit should save");
+        let cfg = config::load_or_create(&path).expect("config should load");
+        assert!(cfg.application.background_on_close);
+        assert!(cfg.debug.show_engine_log);
+    }
+
+    #[test]
+    fn trigger_mode_writes_live_lookup() {
+        let path = temp_config("trigger");
+        let mut session = session_at(&path);
+        assert!(config::load_or_create(&path).expect("config should load").live_lookup);
+        let mut edits = edits_of(&session);
+        edits.cfg.trigger.mode = TriggerMode::Press;
+        write(&mut session, edits, false).expect("a trigger mode change should save");
+        assert!(!config::load_or_create(&path).expect("config should load").live_lookup);
+    }
+
+    #[test]
+    fn screenshot_reset_clears_targets() {
+        let path = temp_config("screenshot");
+        let mut config = Config::default();
+        let ProfileData::Full { settings } = &mut config.profiles[0].data else {
+            panic!("the default profile should be Full");
+        };
+        settings.actions.screenshot.fixed_region = Some([1, 2, 3, 4]);
+        settings.actions.screenshot.fixed_window = Some(ScreenshotWindow {
+            app_id: "reader".to_string(),
+            title: "book".to_string(),
+        });
+        config.save(&path).expect("targets should save");
+        let mut session = session_at(&path);
+        let mut edits = edits_of(&session);
+        assert!(edits.cfg.actions.screenshot.fixed_region.is_some());
+        edits.screenshot_reset_targets = true;
+        write(&mut session, edits, false).expect("a reset should save");
+        let shot = saved(&path).actions.screenshot;
+        assert_eq!(shot.fixed_region, None);
+        assert_eq!(shot.fixed_window, None);
+    }
+
+    #[test]
+    fn anki_refresh_reports_io() {
+        let path = temp_config("anki");
+        let mut config = Config::default();
+        let ProfileData::Full { settings } = &mut config.profiles[0].data else {
+            panic!("the default profile should be Full");
+        };
+        let map = vec![FieldMapping {
+            anki_field: "Front".to_string(),
+            source: "glossary".to_string(),
+        }];
+        settings.anki.field_map = map.clone();
+        config.save(&path).expect("field map should save");
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a port should bind");
+        let port = listener.local_addr().expect("address should read").port();
+        drop(listener);
+        let err = anki_lists(&format!("http://127.0.0.1:{port}"), "Lapis")
+            .expect_err("no server answers on the port");
+        assert_eq!(err.kind, ErrorKind::Io);
+        let mut session = session_at(&path);
+        let mut edits = edits_of(&session);
+        edits.cfg.popup.highlight_match = !edits.cfg.popup.highlight_match;
+        write(&mut session, edits, false).expect("a save after a failed refresh should work");
+        assert_eq!(saved(&path).anki.field_map, map);
     }
 }

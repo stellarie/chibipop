@@ -47,6 +47,7 @@ fn main() -> anyhow::Result<()> {
             ipc::font_families,
             ipc::save_form,
             ipc::apply_form,
+            ipc::anki_refresh,
         ])
         .run(tauri::generate_context!())
         .context("running the settings window")

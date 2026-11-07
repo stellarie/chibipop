@@ -39,6 +39,7 @@ main {
 
 #tabs {
   display: flex;
+  flex-wrap: wrap;
   gap: 4px;
   border-bottom: 1px solid var(--border);
 }
@@ -89,6 +90,11 @@ main {
   text-align: right;
 }
 
+.entry-value.wide {
+  grid-column: 1 / -1;
+  text-align: left;
+}
+
 .entry-help {
   grid-column: 1 / -1;
   color: var(--muted);
@@ -115,6 +121,59 @@ input.control[type="checkbox"] {
   width: 18px;
   height: 18px;
   accent-color: var(--accent);
+}
+
+.control:disabled {
+  opacity: 0.5;
+}
+
+.control-group {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.control-group.stacked {
+  flex-direction: column;
+  align-items: flex-end;
+}
+
+.wide-input {
+  width: 22em;
+}
+
+.number-input {
+  width: 6em;
+}
+
+.list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.list-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.list-name {
+  flex: 1;
+  overflow-wrap: anywhere;
+}
+
+.field-map {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  align-items: center;
+  gap: 4px 12px;
+}
+
+.entry-note {
+  overflow-wrap: anywhere;
 }
 
 #actions {

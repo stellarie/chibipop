@@ -43,7 +43,7 @@ reproduced bug. Raise a ceiling only in a reviewed pull request.
 
 ## Recent feature case index
 
-Cases 1.31-1.45 cover Search, hover, clipboard, furigana, sentence-field,
+Cases 1.31-1.46 cover Search, hover, clipboard, furigana, sentence-field,
 audit-isolation, cache invalidation, profile catalog, and Tauri settings behavior.
 Cases 1.30.11-1.30.16 cover screenshot modes and saved targets.
 Existing settings, plugin, and live-log cases retain their identifiers.
@@ -2301,8 +2301,8 @@ dictionary. Use an installed WebView2 runtime. Run as a user who can edit the
 
 1. **Tauri window opens.** Run `chibipop.exe settings --tauri`. A Tauri window opens
    on the Popup tab. It shows four sections. Every label and help string matches
-   `crates/chibipop-windows/assets/settings-layout.toml`. Four entries are editable
-   (case 1.45). The other values are read-only.
+   `crates/chibipop-windows/assets/settings-layout.toml`. Every Popup entry except
+   Custom popup style is editable (cases 1.45 and 1.46).
 2. **Missing runtime falls back.** Rename the `pv` value under
    `HKLM\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}`.
    Rename the same value in every other EdgeUpdate location that holds one.
@@ -2350,6 +2350,44 @@ editable entries are `popup-highlight`, `popup-max-width`, `popup-layout`, and
 
 **Evidence and cleanup.** Record the tested revision, the config path, and a screenshot of
 each status line. Resume every suspended process. Restore the TOML file.
+
+<a id="case-1-46"></a>
+### 1.46 Tauri settings tabs and value entries
+
+**Prerequisites.** Windows only. Use the scratch folder of case 1.44. Steps 5 and 6 need
+two installed Dictionaries. Step 7 needs Anki with AnkiConnect, and a second run without Anki.
+
+1. **Nine tabs switch.** Run `chibipop.exe settings --tauri`. Nine tab buttons show:
+   Popup, General, Shortcuts, Profiles, Dictionaries, Text recognition, Anki, Extensions,
+   and Debug. Click each button. The panel changes each time. Every label and help string
+   matches `crates/chibipop-windows/assets/settings-layout.toml`, tab by tab.
+2. **A list edit survives a tab switch.** On Dictionaries, press Move up on the second
+   definition row and clear one checkbox. Switch to Popup and back. The order and the
+   checkbox keep the edit.
+3. **The shared write path works.** On General, set **Keep Chibipop running when Settings
+   closes** and press Save. The TOML file holds `background-on-close = true` under
+   `[application]`.
+4. **Every edited value persists.** Change one entry on each of Popup, Shortcuts,
+   Dictionaries, Text recognition, Anki, and Debug. Press Save. Close the window and open it
+   again. Every value persists in the window and in the TOML file.
+5. **Apply reaches the daemon.** Run `chibipop.exe run`, then edit one entry and press
+   Apply. The status line reads "Settings saved and daemon reloaded".
+6. **Frequency stays read-only.** On Dictionaries, the Frequency lists entry shows its
+   lists and the ranking as text. No control edits them. The TOML file keeps its frequency
+   and ranking values after a Save.
+7. **Anki reload.** On Anki, press **Reload decks and fields** with Anki running. The line
+   beside the button counts decks, note types, and fields. The Deck and Note type boxes
+   suggest the loaded names, and the Card fields list shows the note type fields. Stop Anki
+   and press the button again. An `io` error shows. Press Save. The TOML file keeps its
+   saved field map.
+8. **Capture size.** On Text recognition, clear the width box and press Save. The save
+   works and the saved width stays. Set the width to 2000 and press Save. The status line
+   names the clamp and the TOML file holds 1600.
+9. **Saved screenshot targets reset.** With a saved region or window in the TOML file, open
+   Anki and press **Clear saved targets**. Press Save. The TOML file holds neither target.
+
+**Evidence and cleanup.** Record the tested revision, the config path, and a screenshot of
+tabs Dictionaries and Anki. Stop the daemon. Restore the TOML file.
 
 ---
 
