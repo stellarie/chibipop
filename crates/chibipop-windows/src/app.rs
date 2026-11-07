@@ -1843,9 +1843,8 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: Option<&Path>, config_
     let theme = theme_from_config(&live.popup);
     let alpha = (theme.opacity * 255.0).round().clamp(0.0, 255.0) as u8;
     popup.set_alpha(alpha);
-    if live.show_lookup_log {
-        crate::ui::console::show();
-    }
+    // The console starts hidden every run. Only the tray item shows it.
+    let mut lookup_log_shown = false;
 
     let mut hooks = Some(Hooks::install().context("installing the low-level input hooks")?);
     Hooks::set_configured_binds(&catalog.config.binds);
@@ -2056,11 +2055,6 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: Option<&Path>, config_
                 Some(default_session.clone());
             Hooks::set_configured_binds(&catalog.config.binds);
             tray.update_profiles(&cfg);
-            if live.show_lookup_log {
-                crate::ui::console::show();
-            } else {
-                crate::ui::console::hide();
-            }
             let controller_cfg = Box::new(controller_config(&live));
             if shared_resources_changed(&previous, &cfg, &previous_dicts, &dicts) {
                 drive!(Event::SharedResourcesReloaded {
@@ -3118,6 +3112,15 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: Option<&Path>, config_
                             eprintln!("chibipop: setting default profile failed: {error:#}");
                         }
                     }
+                }
+                TrayCommand::ToggleLookupLog => {
+                    lookup_log_shown = !lookup_log_shown;
+                    if lookup_log_shown {
+                        crate::ui::console::show();
+                    } else {
+                        crate::ui::console::hide();
+                    }
+                    tray.set_lookup_log_shown(lookup_log_shown);
                 }
                 TrayCommand::OpenSettings => drive!(Event::TrayAction(TrayAction::OpenSettings)),
                 TrayCommand::Quit => {
