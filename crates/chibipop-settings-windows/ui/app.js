@@ -14,7 +14,7 @@ const FIELD_SOURCES = [
   "screenshot",
   "sentence",
 ];
-const WIDE_KINDS = new Set(["list", "field-map", "screenshot"]);
+const WIDE_KINDS = new Set(["list", "field-map", "screenshot", "binds"]);
 const LIBRARY_NOTE =
   "chibipop is using a dictionary built outside the app. Adding or removing here " +
   "rebuilds from this list only. Import the original ZIP files first.";
@@ -54,6 +54,35 @@ const SCREENSHOT_MODES = [
   ["fixed-region", "Reuse one region"],
   ["fixed-window", "Reuse one window"],
 ];
+
+const BIND_ACTIONS = [
+  ["lookup", "Screen lookup"],
+  ["selected-text", "Selected text"],
+  ["search", "Search"],
+  ["sentence-search", "Sentence search"],
+  ["ocr-clipboard", "OCR to clipboard"],
+  ["anki-add", "Anki add"],
+  ["static-region", "Set sentence area"],
+];
+const NO_PROFILE_ACTIONS = new Set(["anki-add", "static-region"]);
+const LOOKUP_MODES = [
+  ["hold-key", "Hold"],
+  ["toggle", "Toggle"],
+];
+const MODIFIER_NAMES = {
+  ctrl: "Ctrl",
+  control: "Ctrl",
+  shift: "Shift",
+  alt: "Alt",
+  win: "Win",
+  super: "Win",
+};
+const KEY_NAMES = { 0x09: "Tab", 0x14: "CapsLock", 0x20: "Space", 0x1b: "Esc" };
+const CAPTURE_HINT =
+  "Press a key with Ctrl, Shift, or Alt. Escape cancels. Backspace clears. " +
+  "Capture ends after 10 seconds.";
+const REJECTED_HINT =
+  "Use a key with Ctrl, Shift, or Alt. Escape cancels capture. Backspace clears.";
 
 const VALUES = {
   "dictionary-frequency": (f) => {
@@ -145,6 +174,13 @@ const EDITORS = {
     },
   },
   "selected-text-sentence-search": bool("actions.search", "selected_opens_sentence_search"),
+  "configured-binds": {
+    kind: "binds",
+    get: (draft) => draft.binds,
+    set: (draft, rows) => {
+      draft.binds = rows;
+    },
+  },
   "dictionary-terms": {
     kind: "list",
     libraryNote: true,
@@ -214,6 +250,9 @@ const state = {
   tab: null,
   anki: null,
   busy: false,
+  capturing: null,
+  bindMessage: "",
+  bindCheck: 0,
 };
 
 function element(tag, className, text) {
@@ -516,6 +555,217 @@ async function refreshAnki(button) {
   }
 }
 
+function keyLabel(part) {
+  const trimmed = part.trim();
+  const lower = trimmed.toLowerCase();
+  if (MODIFIER_NAMES[lower]) return MODIFIER_NAMES[lower];
+  if (/^f([1-9]|1[0-9]|2[0-4])$/.test(lower)) return lower.toUpperCase();
+  const code = /^0x[0-9a-f]+$/.test(lower) ? Number.parseInt(lower, 16) : -1;
+  if (KEY_NAMES[code]) return KEY_NAMES[code];
+  return trimmed.length === 1 ? trimmed.toUpperCase() : trimmed;
+}
+
+function chordLabel(chord) {
+  return chord ? chord.split("+").map(keyLabel).join("+") : "Not set";
+}
+
+function setBindMessage(text) {
+  state.bindMessage = text;
+  const node = document.getElementById("bind-status");
+  if (node) node.textContent = text;
+}
+
+// Apply repeats this check, so a failed check never blocks a save.
+async function checkBinds() {
+  state.bindCheck += 1;
+  const mine = state.bindCheck;
+  let message;
+  try {
+    await invoke("validate_form", { edits: state.draft });
+    message = "Shortcut check passed.";
+  } catch (error) {
+    message =
+      error && error.kind === "validation"
+        ? `Settings check failed: ${error.message}`
+        : "Shortcut check unavailable.";
+  }
+  if (mine === state.bindCheck) setBindMessage(message);
+}
+
+function cancelCapture() {
+  if (!state.capturing) return;
+  invoke("cancel_capture").catch(showError);
+}
+
+document.addEventListener(
+  "pointerdown",
+  (event) => {
+    const inside = event.target instanceof Element && event.target.closest("[data-capturing]");
+    if (!inside) cancelCapture();
+  },
+  true,
+);
+window.addEventListener("blur", cancelCapture);
+
+function bindSelect(label, options, current, onChange) {
+  const select = element("select", "control");
+  for (const [value, text] of withCurrent(options, current)) {
+    const option = element("option", null, text);
+    option.value = value;
+    select.append(option);
+  }
+  select.value = current;
+  select.setAttribute("aria-label", label);
+  select.addEventListener("change", () => onChange(select.value));
+  return select;
+}
+
+function bindsControl(entry, editor) {
+  const box = element("div", "binds");
+  box.id = controlId(entry);
+
+  const edit = (id, change) => {
+    const bind = editor.get(state.draft).find((item) => item.id === id);
+    if (!bind) return;
+    change(bind);
+    redraw();
+    checkBinds();
+  };
+
+  const capture = async (id) => {
+    if (state.capturing) return;
+    state.capturing = id;
+    clearError();
+    redraw();
+    setBindMessage(CAPTURE_HINT);
+    let result;
+    try {
+      result = await invoke("capture_chord");
+    } catch (error) {
+      state.capturing = null;
+      redraw();
+      setBindMessage("");
+      showError(error);
+      return;
+    }
+    state.capturing = null;
+    setBindMessage("");
+    if (result.kind === "chord") {
+      edit(id, (bind) => {
+        bind.windows = result.chord;
+      });
+      return;
+    }
+    if (result.kind === "cleared") {
+      edit(id, (bind) => {
+        bind.windows = "";
+      });
+      return;
+    }
+    redraw();
+    if (result.kind === "rejected") {
+      setBindMessage(`${chordLabel(result.chord)} is not a valid chord. ${REJECTED_HINT}`);
+    } else if (result.kind === "timed-out") {
+      setBindMessage("Capture timed out. Press Capture to try again.");
+    } else {
+      setBindMessage("");
+    }
+  };
+
+  const row = (bind) => {
+    const line = element("div", "bind-row");
+    const enabled = element("input", "control");
+    enabled.type = "checkbox";
+    enabled.checked = bind.enabled;
+    enabled.setAttribute("aria-label", `Enabled: ${bind.id}`);
+    enabled.addEventListener("change", () =>
+      edit(bind.id, (item) => {
+        item.enabled = enabled.checked;
+      }),
+    );
+    line.append(
+      enabled,
+      bindSelect("Action", BIND_ACTIONS, bind.action, (action) =>
+        edit(bind.id, (item) => {
+          item.action = action;
+          item.mode = action === "lookup" ? "hold-key" : "press";
+          if (NO_PROFILE_ACTIONS.has(action)) item.profile = null;
+        }),
+      ),
+    );
+    if (bind.action === "lookup") {
+      line.append(
+        bindSelect("Mode", LOOKUP_MODES, bind.mode, (mode) =>
+          edit(bind.id, (item) => {
+            item.mode = mode;
+          }),
+        ),
+      );
+    }
+    if (!NO_PROFILE_ACTIONS.has(bind.action)) {
+      const current = bind.profile ?? "";
+      line.append(
+        bindSelect("Profile", profileChoices(current), current, (id) =>
+          edit(bind.id, (item) => {
+            item.profile = id === "" ? null : id;
+          }),
+        ),
+      );
+    }
+    const active = state.capturing === bind.id;
+    const label = active ? "Press keys…" : chordLabel(bind.windows);
+    const chord = element("span", "bind-chord", label);
+    const capturing = element("button", "action", "Capture");
+    capturing.setAttribute("aria-label", `Capture chord: ${bind.id}`);
+    if (active) capturing.dataset.capturing = "true";
+    capturing.addEventListener("click", () => capture(bind.id));
+    const clear = element("button", "action", "Clear");
+    clear.setAttribute("aria-label", `Clear chord: ${bind.id}`);
+    clear.disabled = !bind.windows;
+    clear.addEventListener("click", () =>
+      edit(bind.id, (item) => {
+        item.windows = "";
+      }),
+    );
+    const remove = element("button", "action", "Remove");
+    remove.setAttribute("aria-label", `Remove bind: ${bind.id}`);
+    remove.addEventListener("click", () => {
+      const rest = editor.get(state.draft).filter((item) => item.id !== bind.id);
+      editor.set(state.draft, rest);
+      redraw();
+      checkBinds();
+    });
+    line.append(chord, capturing, clear, remove);
+    return line;
+  };
+
+  const add = element("button", "action", "Add bind");
+  add.addEventListener("click", async () => {
+    clearError();
+    try {
+      const bind = await invoke("new_bind");
+      editor.set(state.draft, [...editor.get(state.draft), bind]);
+      redraw();
+      checkBinds();
+    } catch (error) {
+      showError(error);
+    }
+  });
+
+  const status = element("div", "entry-note bind-status", state.bindMessage);
+  status.id = "bind-status";
+
+  const redraw = () => {
+    const rows = editor.get(state.draft);
+    const children = rows.map(row);
+    if (rows.length === 0) children.push(element("div", "entry-note", "No binds."));
+    children.push(add, status);
+    box.replaceChildren(...children);
+  };
+  redraw();
+  return box;
+}
+
 const BUILDERS = {
   bool: boolControl,
   number: (entry, editor) => {
@@ -542,6 +792,7 @@ const BUILDERS = {
   "number-free": freeNumberControl,
   list: listControl,
   "field-map": fieldMapControl,
+  binds: bindsControl,
   screenshot: screenshotControl,
   action: actionControl,
 };
@@ -608,6 +859,7 @@ function draftOf(form) {
     frequency: structuredClone(form.frequency),
     pitch: structuredClone(form.pitch),
     background_on_close: form.background_on_close,
+    binds: structuredClone(form.binds),
     field_map: null,
     screenshot_reset_targets: false,
   };
@@ -616,6 +868,7 @@ function draftOf(form) {
 function adopt(form) {
   state.form = form;
   state.draft = draftOf(form);
+  state.bindMessage = "";
   render();
 }
 

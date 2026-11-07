@@ -2,6 +2,7 @@
 //!
 //! `ui/types.d.ts` documents the serialized shape of every type here.
 
+use crate::capture::{self, CaptureResult};
 use crate::control::{self, ReloadOutcome};
 use crate::fonts;
 use crate::layout::LayoutView;
@@ -9,7 +10,9 @@ use crate::lock::ConfigLock;
 use crate::session::Session;
 use anyhow::Error;
 use chibipop::anki;
-use chibipop::config::{self, Config, FieldMapping, Platform, ProfileCatalog, ResolvedConfig};
+use chibipop::config::{
+    self, Bind, BindAction, Config, FieldMapping, Platform, ProfileCatalog, ResolvedConfig,
+};
 use chibipop::library::Library;
 use chibipop::lookup::model::Dictionary;
 use chibipop::lookup::sqlite::SqliteDictionary;
@@ -18,7 +21,10 @@ use chibipop::settings::{self, DictRow, SettingsForm};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
+use std::time::Duration;
 use tauri::State;
+
+const CAPTURE_LIMIT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -65,6 +71,7 @@ pub struct FormView {
     pub unreadable: Vec<String>,
     pub library_empty: bool,
     pub background_on_close: Option<bool>,
+    pub binds: Vec<Bind>,
     pub stale: Vec<String>,
     pub generation: u64,
 }
@@ -77,6 +84,7 @@ pub struct FormEdits {
     pub frequency: Vec<DictRow>,
     pub pitch: Vec<DictRow>,
     pub background_on_close: Option<bool>,
+    pub binds: Vec<Bind>,
     pub field_map: Option<Vec<FieldMapping>>,
     pub screenshot_reset_targets: bool,
 }
@@ -109,6 +117,34 @@ struct Saved {
     saved_to: String,
     notices: Vec<String>,
     form: FormView,
+}
+
+struct Merged {
+    form: SettingsForm,
+    applied: settings::AppliedSettings,
+    notices: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum CaptureResultView {
+    Chord { chord: String },
+    Cleared,
+    Cancelled,
+    Rejected { chord: String },
+    TimedOut,
+}
+
+impl From<CaptureResult> for CaptureResultView {
+    fn from(result: CaptureResult) -> Self {
+        match result {
+            CaptureResult::Chord { chord } => Self::Chord { chord },
+            CaptureResult::Cleared => Self::Cleared,
+            CaptureResult::Cancelled => Self::Cancelled,
+            CaptureResult::Rejected { chord } => Self::Rejected { chord },
+            CaptureResult::TimedOut => Self::TimedOut,
+        }
+    }
 }
 
 #[tauri::command]
@@ -146,6 +182,33 @@ pub fn apply_form(
 }
 
 #[tauri::command(async)]
+pub fn capture_chord() -> Result<CaptureResultView, IpcError> {
+    capture::capture(CAPTURE_LIMIT)
+        .map(CaptureResultView::from)
+        .map_err(|e| IpcError::new(ErrorKind::Internal, e.to_string()))
+}
+
+#[tauri::command]
+pub fn cancel_capture() {
+    capture::cancel();
+}
+
+#[tauri::command]
+pub fn new_bind(state: State<'_, Mutex<Session>>) -> Result<Bind, IpcError> {
+    let mut session = lock(&state)?;
+    add_bind(&mut session)
+}
+
+#[tauri::command(async)]
+pub fn validate_form(
+    state: State<'_, Mutex<Session>>,
+    edits: FormEdits,
+) -> Result<Vec<String>, IpcError> {
+    let session = lock(&state)?;
+    validate(&session, edits)
+}
+
+#[tauri::command(async)]
 pub fn anki_refresh(url: String, model: String) -> Result<AnkiLists, IpcError> {
     anki_lists(&url, &model)
 }
@@ -159,7 +222,16 @@ fn anki_lists(url: &str, model: &str) -> Result<AnkiLists, IpcError> {
     })
 }
 
-fn write(session: &mut Session, edits: FormEdits, reload: bool) -> Result<ApplyReport, IpcError> {
+fn add_bind(session: &mut Session) -> Result<Bind, IpcError> {
+    let form = session
+        .form
+        .as_mut()
+        .ok_or_else(|| IpcError::new(ErrorKind::Internal, "load the form first"))?;
+    let id = form.catalog.next_bind_id();
+    Ok(Bind::new(id, BindAction::Lookup))
+}
+
+fn check_current(session: &Session, edits: &FormEdits) -> Result<(), IpcError> {
     if session.form.is_none() {
         return Err(IpcError::new(ErrorKind::Internal, "load the form first"));
     }
@@ -169,6 +241,18 @@ fn write(session: &mut Session, edits: FormEdits, reload: bool) -> Result<ApplyR
             "the settings changed since this page loaded; reload the form",
         ));
     }
+    Ok(())
+}
+
+fn validate(session: &Session, edits: FormEdits) -> Result<Vec<String>, IpcError> {
+    check_current(session, &edits)?;
+    let _guard = ConfigLock::acquire(&session.config_path)?;
+    let fresh = config::load_or_create(&session.config_path).map_err(config_error)?;
+    merge_edits(session, &fresh, edits).map(|merged| merged.notices)
+}
+
+fn write(session: &mut Session, edits: FormEdits, reload: bool) -> Result<ApplyReport, IpcError> {
+    check_current(session, &edits)?;
     let saved = {
         let _guard = ConfigLock::acquire(&session.config_path)?;
         save_locked(session, edits)?
@@ -192,19 +276,46 @@ fn write(session: &mut Session, edits: FormEdits, reload: bool) -> Result<ApplyR
 }
 
 fn save_locked(session: &mut Session, edits: FormEdits) -> Result<Saved, IpcError> {
+    let fresh = config::load_or_create(&session.config_path).map_err(config_error)?;
+    let Merged {
+        mut form,
+        applied,
+        notices,
+    } = merge_edits(session, &fresh, edits)?;
+    applied.config.save(&session.config_path).map_err(|e| {
+        IpcError::new(
+            ErrorKind::Io,
+            format!("writing {}: {e:#}", session.config_path.display()),
+        )
+    })?;
+    session.generation += 1;
+    form.accept_applied(applied, &session.dicts).map_err(|e| {
+        IpcError::new(ErrorKind::Internal, format!("saved; reload the form: {e:#}"))
+    })?;
+    let view = view_of(&form, &form.catalog, &session.dicts, session.generation);
+    session.form = Some(form);
+    Ok(Saved {
+        saved_to: session.config_path.display().to_string(),
+        notices,
+        form: view,
+    })
+}
+
+// Writes nothing. `fresh` is the config that the caller loaded.
+fn merge_edits(session: &Session, fresh: &Config, edits: FormEdits) -> Result<Merged, IpcError> {
     let mut form = session
         .form
         .clone()
         .ok_or_else(|| IpcError::new(ErrorKind::Internal, "load the form first"))?;
-    let fresh = config::load_or_create(&session.config_path).map_err(config_error)?;
     form.cfg = edits.cfg;
     form.terms = edits.terms;
     form.frequency = edits.frequency;
     form.pitch = edits.pitch;
     form.background_on_close = edits.background_on_close;
+    form.catalog.binds = edits.binds;
     form.field_map = edits.field_map;
     form.screenshot_reset_targets = edits.screenshot_reset_targets;
-    let applied = settings::apply_to(&form, &fresh);
+    let applied = settings::apply_to(&form, fresh);
     let mut before = fresh.clone();
     before.migrate_dictionary_lists(&session.dicts);
     if settings::dictionary_work(&before, &applied.config) != settings::DictionaryWork::None {
@@ -223,22 +334,10 @@ fn save_locked(session: &mut Session, edits: FormEdits) -> Result<Saved, IpcErro
         .validate_hotkeys(Platform::Windows)
         .map_err(validation)?;
     let notices: Vec<String> = settings::clamp_notice(&form, &resolved).into_iter().collect();
-    applied.config.save(&session.config_path).map_err(|e| {
-        IpcError::new(
-            ErrorKind::Io,
-            format!("writing {}: {e:#}", session.config_path.display()),
-        )
-    })?;
-    session.generation += 1;
-    form.accept_applied(applied, &session.dicts).map_err(|e| {
-        IpcError::new(ErrorKind::Internal, format!("saved; reload the form: {e:#}"))
-    })?;
-    let view = view_of(&form, &form.catalog, &session.dicts, session.generation);
-    session.form = Some(form);
-    Ok(Saved {
-        saved_to: session.config_path.display().to_string(),
+    Ok(Merged {
+        form,
+        applied,
         notices,
-        form: view,
     })
 }
 
@@ -311,6 +410,7 @@ fn view_of(form: &SettingsForm, cfg: &Config, dicts: &[DictInfo], generation: u6
         unreadable: form.unreadable.clone(),
         library_empty: form.library_empty,
         background_on_close: form.background_on_close,
+        binds: form.catalog.binds.clone(),
         stale: settings::stale_order_entries(cfg, dicts),
         generation,
     }
@@ -358,6 +458,7 @@ mod tests {
             frequency: form.frequency.clone(),
             pitch: form.pitch.clone(),
             background_on_close: form.background_on_close,
+            binds: form.catalog.binds.clone(),
             field_map: None,
             screenshot_reset_targets: false,
         }
@@ -589,5 +690,61 @@ mod tests {
         edits.cfg.popup.highlight_match = !edits.cfg.popup.highlight_match;
         write(&mut session, edits, false).expect("a save after a failed refresh should work");
         assert_eq!(saved(&path).anki.field_map, map);
+    }
+
+    #[test]
+    fn new_bind_ids_are_unique() {
+        let path = temp_config("newbind");
+        let mut session = session_at(&path);
+        let before = session.form.as_ref().expect("form should load").catalog.next_id;
+        let first = add_bind(&mut session).expect("a bind should be created");
+        let second = add_bind(&mut session).expect("a bind should be created");
+        assert_ne!(first.id, second.id);
+        let after = session.form.as_ref().expect("form should load").catalog.next_id;
+        assert!(after >= before + 2, "next_id must advance for each call");
+    }
+
+    #[test]
+    fn validate_form_reports_a_conflict() {
+        let path = temp_config("conflict");
+        let session = session_at(&path);
+        let mut edits = edits_of(&session);
+        let mut extra = Bind::new("extra".to_string(), BindAction::Lookup);
+        extra.windows = "f9".to_string();
+        edits.binds.push(extra);
+        let lookup = edits
+            .binds
+            .iter_mut()
+            .find(|bind| bind.id == "lookup")
+            .expect("the default config should hold a lookup bind");
+        lookup.windows = "f9".to_string();
+        lookup.enabled = true;
+        let before = std::fs::read_to_string(&path).expect("file should read");
+        let err = validate(&session, edits).expect_err("two Lookup binds on f9 must conflict");
+        assert_eq!(err.kind, ErrorKind::Validation);
+        assert_eq!(std::fs::read_to_string(&path).expect("file should read"), before);
+    }
+
+    #[test]
+    fn bind_row_saves() {
+        let path = temp_config("bindrow");
+        let mut session = session_at(&path);
+        let mut edits = edits_of(&session);
+        let row = edits
+            .binds
+            .iter_mut()
+            .find(|bind| bind.id == "lookup")
+            .expect("the default config should hold a lookup bind");
+        row.windows = "ctrl+f9".to_string();
+        row.enabled = true;
+        write(&mut session, edits, false).expect("a bind row edit should save");
+        let cfg = config::load_or_create(&path).expect("config should load");
+        let saved = cfg
+            .binds
+            .iter()
+            .find(|bind| bind.id == "lookup")
+            .expect("the lookup bind should persist");
+        assert_eq!(saved.windows, "ctrl+f9");
+        assert!(saved.enabled);
     }
 }

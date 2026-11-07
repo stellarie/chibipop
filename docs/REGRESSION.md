@@ -33,7 +33,7 @@ process. No automated test needs a real screen or desktop.
 The pass count has a ceiling, not a floor. CI fails when the count passes the
 ceiling of its platform.
 
-Windows allows 400: 220 core tests, 160 for the platform crate, and 20 for
+Windows allows 400: 220 core tests, 157 for the platform crate, and 23 for
 `chibipop-settings-windows`. Linux allows 360, because it builds no settings
 crate. The Windows ceiling rose from 360 on 2026-11-07, for the control-pipe
 tests.
@@ -43,7 +43,7 @@ reproduced bug. Raise a ceiling only in a reviewed pull request.
 
 ## Recent feature case index
 
-Cases 1.31-1.46 cover Search, hover, clipboard, furigana, sentence-field,
+Cases 1.31-1.47 cover Search, hover, clipboard, furigana, sentence-field,
 audit-isolation, cache invalidation, profile catalog, and Tauri settings behavior.
 Cases 1.30.11-1.30.16 cover screenshot modes and saved targets.
 Existing settings, plugin, and live-log cases retain their identifiers.
@@ -2388,6 +2388,28 @@ two installed Dictionaries. Step 7 needs Anki with AnkiConnect, and a second run
 
 **Evidence and cleanup.** Record the tested revision, the config path, and a screenshot of
 tabs Dictionaries and Anki. Stop the daemon. Restore the TOML file.
+
+<a id="case-1-47"></a>
+### 1.47 Tauri settings shortcuts and key capture
+
+**Prerequisites.** Windows only. Use the scratch folder of case 1.44. The capture hook
+swallows every key edge while it runs. The keyboard works again when the capture ends
+or after 10 seconds. Keep a pointer within reach. Step 1.47.4 needs a Lookup bind and
+`chibipop.exe run`.
+
+| ID | Case | Steps and expected result |
+|---|---|---|
+| 1.47 | Add, edit, and remove a bind | Open the Shortcuts tab. Press **Add bind**. Set its action, then press **Capture** and press a chord. Press Save. Close the window and open it again. The window and the TOML file hold the row. Remove the row, press Save, and check that both lose it. |
+| 1.47.1 | Alt+F4 is captured | Press **Capture**, then `Alt+F4`. The window stays open, and the chord reads `Alt+F4`. |
+| 1.47.2 | The Win key is swallowed | Press **Capture**, then the `Win` key alone. The Start menu stays closed, and the capture stays armed. No chord commits. Press Escape to cancel. Press **Capture**, then `Win+F9`. The status line says the chord is not valid, and no chord commits. |
+| 1.47.3 | A held modifier counts | Hold Ctrl and press **Capture** with the pointer. Press F9. The chord reads `Ctrl+F9`. |
+| 1.47.4 | A daemon bind does not fire | Run `chibipop.exe run` with a Lookup bind enabled. Press **Capture**, then the chord of that bind. No popup appears. |
+| 1.47.5 | A click ends the capture | Press **Capture**, then click Save. The capture ends, and the keyboard works in every window. |
+| 1.47.6 | Time limit and second capture | Press **Capture**, then press no key. After 10 seconds the capture ends, and the keyboard works. Press **Capture** on one row and **Capture** on another row. The second press starts no hook and shows an error. |
+| 1.47.7 | Conflicts show before Apply | Give two enabled Lookup binds the same chord. The status line below the table reports the conflict. Apply stays enabled, and Apply refuses to save. |
+
+**Evidence and cleanup.** Record the tested revision, the config path, and a screenshot of
+the status line after step 1.47.7. Restore the TOML file. Stop the daemon.
 
 ---
 

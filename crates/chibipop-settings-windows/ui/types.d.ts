@@ -108,6 +108,36 @@ interface FieldMapping {
   source: string;
 }
 
+type BindAction =
+  | "lookup"
+  | "selected-text"
+  | "search"
+  | "sentence-search"
+  | "ocr-clipboard"
+  | "anki-add"
+  | "static-region";
+
+// Mirrors `Bind` in the core crate, which denies unknown fields.
+// The page edits `windows` only and returns `linux` unchanged.
+interface Bind {
+  id: string;
+  action: BindAction;
+  windows: string;
+  linux: string;
+  mode: "live" | "hold-key" | "toggle" | "press" | "hold-shift";
+  profile: string | null;
+  enabled: boolean;
+}
+
+// The result of one `capture_chord` call.
+type CaptureResult =
+  | { kind: "chord"; chord: string }
+  | { kind: "cleared" }
+  | { kind: "cancelled" }
+  // `parse_hotkey` refused the chord, for example a Win chord.
+  | { kind: "rejected"; chord: string }
+  | { kind: "timed-out" };
+
 interface FormView {
   profile_id: string;
   profiles: ProfileRef[];
@@ -119,6 +149,7 @@ interface FormView {
   unreadable: string[];
   library_empty: boolean;
   background_on_close: boolean | null;
+  binds: Bind[];
   stale: string[];
   generation: number;
 }
@@ -130,6 +161,7 @@ interface FormEdits {
   frequency: DictRow[];
   pitch: DictRow[];
   background_on_close: boolean | null;
+  binds: Bind[];
   // Null keeps the saved map.
   field_map: FieldMapping[] | null;
   // True clears both saved screenshot targets.
@@ -186,4 +218,14 @@ interface Commands {
   apply_form: { args: { edits: FormEdits }; result: ApplyReport };
   // Rejects with kind "io" when Anki is down.
   anki_refresh: { args: { url: string; model: string }; result: AnkiLists };
+  // Arms a global keyboard hook for up to 10 seconds.
+  // Rejects with kind "internal" when a capture already runs.
+  capture_chord: { args: {}; result: CaptureResult };
+  cancel_capture: { args: {}; result: void };
+  // Returns a Lookup bind with a fresh id. The page appends it to `binds`.
+  new_bind: { args: {}; result: Bind };
+  // Dry run of a save. Writes nothing.
+  // Rejects with kind "validation" for any settings problem, not only a chord conflict.
+  // Rejects with kind "read-only" while an unrelated reindex edit is pending.
+  validate_form: { args: { edits: FormEdits }; result: string[] };
 }

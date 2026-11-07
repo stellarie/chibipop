@@ -1,4 +1,6 @@
 #[cfg(windows)]
+mod capture;
+#[cfg(windows)]
 mod control;
 #[cfg(windows)]
 mod fonts;
@@ -48,6 +50,10 @@ fn main() -> anyhow::Result<()> {
             ipc::save_form,
             ipc::apply_form,
             ipc::anki_refresh,
+            ipc::capture_chord,
+            ipc::cancel_capture,
+            ipc::new_bind,
+            ipc::validate_form,
         ])
         .run(tauri::generate_context!())
         .context("running the settings window")

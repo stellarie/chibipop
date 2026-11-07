@@ -60,8 +60,8 @@ cargo clippy --workspace --color never --all-targets --all-features -- -D warnin
 - **Automated gate** — runs without a screen. CI runs the sweep three times to
   find process-global races. The pass count has a ceiling, not a floor. CI
   fails when the count is greater than the ceiling.
-- **Ceilings** — Windows allows 400: 220 core tests, 160 for the platform
-  crate, and 20 for `chibipop-settings-windows`. Linux allows 360, because
+- **Ceilings** — Windows allows 400: 220 core tests, 157 for the platform
+  crate, and 23 for `chibipop-settings-windows`. Linux allows 360, because
   it builds no settings crate. The Windows ceiling rose from 360 on
   2026-11-07, for the control-pipe tests.
 - **Manual tests** — a person tests each feature by hand. No test launches the
