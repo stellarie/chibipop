@@ -7,6 +7,7 @@
 use crate::config::{SentenceMode, ProfileSession};
 use crate::controller::{LookupOutcome, RequestId};
 use crate::geom::{PhysPoint, PhysRect, ScanDisplay, ScanKind, ScanRect};
+use crate::lookup::enabled::EnabledDictionary;
 use crate::lookup::engine::LookupEngine;
 use crate::lookup::model::Dictionary;
 use crate::present::{self, DictInfo, OcrSurface, PresentConfig};
@@ -811,7 +812,8 @@ fn present_lookup(
 ) -> LookupOutcome {
     let text = &resolved.span.text[resolved.span.cursor_byte_offset..];
     let lookup_started = Instant::now();
-    let hits = match engine.run(dict, text) {
+    let enabled = EnabledDictionary::new(dict, &state.dicts, state.session.present_config());
+    let hits = match engine.run(&enabled, text) {
         Ok(hits) => {
             if let Some(id) = log.request_id {
                 let elapsed_ms = lookup_started.elapsed().as_secs_f64() * 1000.0;
@@ -909,7 +911,8 @@ fn resolve_drilldown(
     text: &str,
 ) -> LookupOutcome {
     let lookup_started = Instant::now();
-    let hits = match engine.run(dict, text) {
+    let enabled = EnabledDictionary::new(dict, dicts, present_cfg);
+    let hits = match engine.run(&enabled, text) {
         Ok(hits) => {
             let elapsed_ms = lookup_started.elapsed().as_secs_f64() * 1000.0;
             let outcome = if hits.is_empty() { "empty" } else { "complete" };
@@ -1294,6 +1297,84 @@ mod tests {
 
     fn engine() -> LookupEngine {
         LookupEngine::new(Deconjugator::new(Vec::new()))
+    }
+
+    /// Dictionary 1 is off with 11 rows. Dictionary 2 is on with 1 row.
+    fn off_and_on_dicts() -> (FakeDictionary, Vec<DictInfo>) {
+        let mut d = FakeDictionary::new();
+        d.add_dict(1, "Off");
+        d.add_dict(2, "On");
+        for i in 0..11 {
+            let written = format!("食{i}");
+            d.add_term("食", Some(&written), None, "", None, 100 + i, 1);
+            d.add_entry(100 + i, 1, r#"["off"]"#);
+        }
+        d.add_term("食", Some("食"), None, "", None, 200, 2);
+        d.add_entry(200, 2, r#"["on"]"#);
+        (d, vec![di(1, "Off"), di(2, "On")])
+    }
+
+    fn state_enabling(all: &[DictInfo], enabled: &[DictInfo]) -> ProfileRequestSettings {
+        let session = profile_session(enabled);
+        lookup_state_with(all.to_vec()).for_session(&session).clone()
+    }
+
+    fn hover_resolved() -> Resolved {
+        Resolved {
+            span: crate::text::TextSpan {
+                text: "食".to_string(),
+                cursor_byte_offset: 0,
+                anchor: PhysRect { x: 0, y: 0, w: 10, h: 10 },
+                geom: Vec::new(),
+            },
+            orientation: Orientation::Horizontal,
+        }
+    }
+
+    fn hover_lookup(dict: &FakeDictionary, state: &ProfileRequestSettings) -> LookupOutcome {
+        present_lookup(
+            dict,
+            &engine(),
+            state,
+            &hover_resolved(),
+            String::new,
+            Vec::new(),
+            PresentLog { request_id: None, outline_match: false },
+        )
+    }
+
+    #[test]
+    fn hover_lookup_ignores_disabled_dictionary_rows() {
+        let (dict, all) = off_and_on_dicts();
+        let state = state_enabling(&all, &all[1..]);
+        let LookupOutcome::Ready { presentation, .. } = hover_lookup(&dict, &state) else {
+            panic!("the enabled Dictionary must keep its Card");
+        };
+        let top = presentation.top.as_ref().expect("the enabled Card must be on top");
+        assert_eq!(top.written.as_deref(), Some("食"));
+        assert_eq!(presentation.all_cards.len(), 1);
+
+        let none_enabled = state_enabling(&all, &[]);
+        assert!(matches!(hover_lookup(&dict, &none_enabled), LookupOutcome::Hide));
+    }
+
+    #[test]
+    fn drilldown_ignores_disabled_dictionary_rows() {
+        let (dict, all) = off_and_on_dicts();
+        let state = state_enabling(&all, &all[1..]);
+        let outcome = resolve_drilldown(
+            RequestId(1),
+            &dict,
+            &engine(),
+            &state.dicts,
+            state.session.present_config(),
+            "食",
+        );
+        let LookupOutcome::DrillDown(presentation) = outcome else {
+            panic!("the enabled Dictionary must keep its Card");
+        };
+        let top = presentation.top.as_ref().expect("the enabled Card must be on top");
+        assert_eq!(top.written.as_deref(), Some("食"));
     }
 
 }
