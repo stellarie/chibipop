@@ -20,6 +20,7 @@ const WM_TRAYICON: u32 = WM_APP + 2;
 const ID_SETTINGS: u32 = 1001;
 const ID_SEARCH: u32 = 1004;
 const ID_QUIT: u32 = 1003;
+const ID_LOOKUP_LOG: u32 = 1005;
 const ID_PROFILE_BASE: u32 = 2000;
 
 /// The icon id. This process adds one icon only.
@@ -40,6 +41,8 @@ pub enum TrayCommand {
     OpenSettings,
     OpenSearch,
     SetDefaultProfile(String),
+    /// Shows or hides the Lookup log console for this run only.
+    ToggleLookupLog,
     Quit,
 }
 
@@ -123,6 +126,8 @@ pub struct Tray {
     hicon_owned: bool,
     profiles: Vec<TrayProfile>,
     default_profile: String,
+    /// Drives the check mark of the Lookup log item. It starts off every run.
+    lookup_log_shown: bool,
 }
 
 impl Tray {
@@ -207,6 +212,7 @@ impl Tray {
                 hicon_owned,
                 profiles,
                 default_profile,
+                lookup_log_shown: false,
             })
         }
     }
@@ -215,6 +221,11 @@ impl Tray {
     pub fn update_profiles(&mut self, config: &crate::config::Config) {
         self.profiles = tray_profiles(config);
         self.default_profile.clone_from(&config.default_profile);
+    }
+
+    /// Records whether the Lookup log console is on screen.
+    pub fn set_lookup_log_shown(&mut self, shown: bool) {
+        self.lookup_log_shown = shown;
     }
 
     /// Handles the callback message of the tray.
@@ -265,7 +276,8 @@ impl Tray {
     /// messages.
     fn show_menu(&self, before_blocking: impl FnOnce()) -> Option<TrayCommand> {
         unsafe {
-            let hmenu = match build_menu(&self.profiles, &self.default_profile) {
+            let hmenu = match build_menu(&self.profiles, &self.default_profile, self.lookup_log_shown)
+            {
                 Ok(h) => h,
                 Err(e) => {
                     eprintln!("chibipop: building the tray menu failed: {e:#}");
@@ -287,12 +299,7 @@ impl Tray {
             let _ = PostMessageW(Some(self.menu_owner), WM_NULL, WPARAM(0), LPARAM(0));
             let _ = DestroyMenu(hmenu);
 
-            match cmd.0 as u32 {
-                ID_SETTINGS => Some(TrayCommand::OpenSettings),
-                ID_SEARCH => Some(TrayCommand::OpenSearch),
-                ID_QUIT => Some(TrayCommand::Quit),
-                value => profile_menu_command(&self.profiles, value),
-            }
+            menu_command(&self.profiles, cmd.0 as u32)
         }
     }
 }
@@ -364,6 +371,19 @@ fn tray_profiles(config: &crate::config::Config) -> Vec<TrayProfile> {
         .collect()
 }
 
+/// Maps the id that `TrackPopupMenuEx` returns to a command.
+///
+/// Zero means the user dismissed the menu.
+fn menu_command(profiles: &[TrayProfile], command: u32) -> Option<TrayCommand> {
+    match command {
+        ID_SETTINGS => Some(TrayCommand::OpenSettings),
+        ID_SEARCH => Some(TrayCommand::OpenSearch),
+        ID_LOOKUP_LOG => Some(TrayCommand::ToggleLookupLog),
+        ID_QUIT => Some(TrayCommand::Quit),
+        value => profile_menu_command(profiles, value),
+    }
+}
+
 fn profile_menu_command(profiles: &[TrayProfile], command: u32) -> Option<TrayCommand> {
     let index = usize::try_from(command.checked_sub(ID_PROFILE_BASE)?).ok()?;
     profiles
@@ -379,10 +399,14 @@ fn profile_menu_id(index: usize) -> Result<u32> {
 }
 
 /// Builds the right-click menu.
-unsafe fn build_menu(profiles: &[TrayProfile], default_profile: &str) -> Result<HMENU> {
+unsafe fn build_menu(
+    profiles: &[TrayProfile],
+    default_profile: &str,
+    lookup_log_shown: bool,
+) -> Result<HMENU> {
     unsafe {
         let hmenu = CreatePopupMenu().context("CreatePopupMenu")?;
-        if let Err(e) = populate_menu(hmenu, profiles, default_profile) {
+        if let Err(e) = populate_menu(hmenu, profiles, default_profile, lookup_log_shown) {
             let _ = DestroyMenu(hmenu);
             return Err(e);
         }
@@ -394,6 +418,7 @@ unsafe fn populate_menu(
     hmenu: HMENU,
     profiles: &[TrayProfile],
     default_profile: &str,
+    lookup_log_shown: bool,
 ) -> Result<()> {
     unsafe {
         AppendMenuW(hmenu, MF_STRING, ID_SEARCH as usize, w!("Dictionary search…"))
@@ -420,6 +445,13 @@ unsafe fn populate_menu(
         }
         AppendMenuW(hmenu, MF_STRING, ID_SETTINGS as usize, w!("Settings…"))
             .context("AppendMenuW Settings")?;
+        let lookup_log_flags = if lookup_log_shown {
+            MF_STRING | MF_CHECKED
+        } else {
+            MF_STRING
+        };
+        AppendMenuW(hmenu, lookup_log_flags, ID_LOOKUP_LOG as usize, w!("Lookup log"))
+            .context("AppendMenuW Lookup log")?;
         AppendMenuW(hmenu, MF_SEPARATOR, 0, PCWSTR::null())
             .context("AppendMenuW separator")?;
         AppendMenuW(hmenu, MF_STRING, ID_QUIT as usize, w!("Quit"))
@@ -513,6 +545,15 @@ mod tests {
         assert_eq!(Some(TrayCommand::OpenSettings), left_click_command(WM_LBUTTONUP));
         assert_eq!(None, left_click_command(WM_MOUSEMOVE));
         assert_eq!(None, left_click_command(WM_RBUTTONUP));
+    }
+
+    #[test]
+    fn the_menu_maps_every_fixed_item_and_ignores_a_dismissal() {
+        assert_eq!(Some(TrayCommand::OpenSettings), menu_command(&[], ID_SETTINGS));
+        assert_eq!(Some(TrayCommand::OpenSearch), menu_command(&[], ID_SEARCH));
+        assert_eq!(Some(TrayCommand::ToggleLookupLog), menu_command(&[], ID_LOOKUP_LOG));
+        assert_eq!(Some(TrayCommand::Quit), menu_command(&[], ID_QUIT));
+        assert_eq!(None, menu_command(&[], 0));
     }
 
     use super::*;
