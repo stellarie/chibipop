@@ -288,7 +288,8 @@ pub const PROFILE_FIELDS: &[&str] = &[
     "anki.include_dictionary_name", "anki.first_dict_only", "anki.selection_buttons",
     "anki.selection_separator", "anki.triple_click", "actions.enabled", "actions.screenshot.save_dir",
     "actions.screenshot.include_on_add", "actions.screenshot.capture_mode", "actions.screenshot.fixed_region",
-    "actions.screenshot.fixed_window", "actions.ocr_clipboard", "actions.search.selected_opens_sentence_search",
+    "actions.screenshot.fixed_window", "actions.screenshot.image_format", "actions.screenshot.jpeg_quality",
+    "actions.screenshot.max_size", "actions.ocr_clipboard", "actions.search.selected_opens_sentence_search",
     "nested_profile",
 ];
 

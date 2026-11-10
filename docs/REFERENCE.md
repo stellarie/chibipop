@@ -711,6 +711,20 @@ waits until you select or cancel. Press Esc to cancel. On Windows, you can also
 right-click. If screenshot-on-add selection or capture fails, chibipop files the card
 without an image.
 
+### `image_format`, `jpeg_quality`, and `max_size`
+
+These `[actions.screenshot]` keys control the screenshot file. The saved copy and the
+Anki copy are the same file.
+
+| Key | Values | Default |
+|---|---|---|
+| `image_format` | `"png"` or `"jpeg"` | `"png"` |
+| `jpeg_quality` | 1 to 100. Only `"jpeg"` reads it. | `85` |
+| `max_size` | The longest side in physical pixels. `0` keeps the full size. | `0` |
+
+A capture with a longer side than `max_size` is scaled down. It keeps its aspect ratio.
+A smaller capture is not enlarged. The file name ends in `.png` or `.jpg`.
+
 ### `sentence_mode`
 
 `sentence` is the default. On add, chibipop hides the popup before a live

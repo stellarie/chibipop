@@ -39,7 +39,7 @@ Raise a ceiling only in a reviewed pull request.
 
 Cases 1.31-1.43 cover Search, hover, clipboard, furigana, sentence-field,
 audit-isolation, cache invalidation, and profile catalog behavior.
-Cases 1.30.11-1.30.16 cover screenshot modes and saved targets.
+Cases 1.30.11-1.30.16 and 1.30.18 cover screenshot modes, saved targets, and picture format.
 Existing settings, plugin, and live-log cases retain their identifiers.
 Record the exact feature-bearing revision.
 Chinese sentence segmentation and Search resize repaint require their
@@ -2069,6 +2069,7 @@ The following registered cases cover the saved-target behavior independently:
 | 1.30.15 | Reset targets | Reset and Apply. Clear summaries, hide conditional static-overlay Reset buttons with their entry, require a new fixed-mode target, and preserve unrelated settings. |
 | 1.30.16 | Optional screenshot cancellation | Cancel include-on-add capture and save the requested card without an image. |
 | 1.30.17 | Verified duplicate overwrite | Enable overwrite. Update one exact note in a literal `current` deck and a filtered deck. Test reserved first field names. Reject ambiguous matches and confirm default-off duplicate rejection. |
+| 1.30.18 | Screenshot format and size | Linux: set Picture format to JPEG and Largest side to 1280 px. Add a card from a window larger than 1280 px. Require a `.jpg` in the screenshots folder and in `collection.media` with the longest side 1280 and the aspect ratio kept. Set PNG and Full size; require a full-size `.png`. |
 
 ---
 

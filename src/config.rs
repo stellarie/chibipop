@@ -828,6 +828,24 @@ pub struct ScreenshotWindow {
     pub title: String,
 }
 
+/// The file format of a saved screenshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ImageFormat {
+    #[default]
+    Png,
+    Jpeg,
+}
+
+impl ImageFormat {
+    pub fn extension(self) -> &'static str {
+        match self {
+            Self::Png => "png",
+            Self::Jpeg => "jpg",
+        }
+    }
+}
+
 /// The `[actions.screenshot]` section.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -841,6 +859,11 @@ pub struct ScreenshotConfig {
     pub fixed_region: Option<[i32; 4]>,
     /// The bin resolves this identity for each capture instead of saving stale bounds.
     pub fixed_window: Option<ScreenshotWindow>,
+    pub image_format: ImageFormat,
+    /// 1 to 100. Only JPEG reads it.
+    pub jpeg_quality: u8,
+    /// The longest side in physical pixels. 0 keeps the full size.
+    pub max_size: u32,
 }
 
 /// The `[actions.ocr_clipboard]` section.
@@ -871,6 +894,9 @@ impl Default for ScreenshotConfig {
             capture_mode: ScreenshotMode::default(),
             fixed_region: None,
             fixed_window: None,
+            image_format: ImageFormat::default(),
+            jpeg_quality: 85,
+            max_size: 0,
         }
     }
 }
