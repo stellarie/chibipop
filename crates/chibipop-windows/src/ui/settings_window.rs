@@ -4529,7 +4529,7 @@ impl SettingsWindow {
             }
         }
         let (x, y) = corner(self.hwnd)?;
-        Some(Placement { x, y })
+        Some(Placement { x, y, show_advanced: false })
     }
 
     /// Activates the Settings window.
@@ -8629,7 +8629,11 @@ mod tests {
         let form = nondefault_form();
         let mut window = SettingsWindow::open(&form, &[], ApplyMode::Standalone).unwrap();
         let area = work_area(window.hwnd).unwrap();
-        let gone = Placement { x: area.right + 5000, y: area.bottom + 5000 };
+        let gone = Placement {
+            x: area.right + 5000,
+            y: area.bottom + 5000,
+            show_advanced: false,
+        };
         // Move the window where the stale corner puts it.
         // SAFETY: The test owns this window. The call only moves it.
         unsafe {
@@ -8653,7 +8657,7 @@ mod tests {
         let area = work_area(window.hwnd).unwrap();
         // This corner fits any size, so the trim
         // does not move the window.
-        let wanted = Placement { x: area.left, y: area.top };
+        let wanted = Placement { x: area.left, y: area.top, show_advanced: false };
         window.fit_to(600, 240, target(window.hwnd, Some(wanted)));
         window.pump(|| {});
         let placed = outer_rect(&window);
