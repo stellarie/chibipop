@@ -4,7 +4,7 @@
 //! Numeric fields use combo boxes instead of spin controls.
 
 use crate::config::{
-    Bind, BindAction, LayoutMode, ProfileData, ScreenshotMode, SelectionButtons,
+    Bind, BindAction, LayoutMode, ProfileData, ResolvedConfig, ScreenshotMode, SelectionButtons,
     SelectionSeparator, SentenceMode, TriggerMode, TripleClick, FIELD_SOURCES, PROFILE_FIELDS,
 };
 use crate::dict::frequency::RankingStrategy;
@@ -3337,6 +3337,44 @@ fn overridden_profile_paths(form: &SettingsForm, id: SettingId) -> Vec<&'static 
         .copied()
         .filter(|path| overrides.contains_key(*path))
         .collect()
+}
+
+fn shared_paths(id: SettingId) -> &'static [&'static str] {
+    match id {
+        SettingId::BackgroundOnClose => &["application.background-on-close"],
+        SettingId::DebugCaptureOutline => &["debug.show_scan_region"],
+        SettingId::DebugEngine => &["debug.show_engine_log"],
+        SettingId::DebugAdapter => &["debug.show_adapter_log"],
+        SettingId::PluginList => &["plugins.enabled"],
+        _ => &[],
+    }
+}
+
+/// Counts advanced entries with a value off its default.
+#[allow(dead_code)]
+fn hidden_changes(layout: &SettingsLayout, cfg: &ResolvedConfig) -> usize {
+    let (Ok(current), Ok(default)) = (
+        toml::Value::try_from(cfg),
+        toml::Value::try_from(ResolvedConfig::default()),
+    ) else {
+        return 0;
+    };
+    fn value_at<'a>(root: &'a toml::Value, path: &str) -> Option<&'a toml::Value> {
+        path.split('.').try_fold(root, |value, key| value.get(key))
+    }
+    layout
+        .tabs
+        .iter()
+        .flat_map(|tab| &tab.sections)
+        .flat_map(|section| &section.entries)
+        .filter(|entry| entry.advanced)
+        .filter(|entry| {
+            profile_override_paths(entry.id)
+                .iter()
+                .chain(shared_paths(entry.id))
+                .any(|path| value_at(&current, path) != value_at(&default, path))
+        })
+        .count()
 }
 
 unsafe fn build_configured_binds(
@@ -7617,6 +7655,17 @@ mod tests {
             assert_eq!(window.take_search_request(), Some(mode));
             assert_eq!(window.take_search_request(), None);
         }
+    }
+
+    #[test]
+    fn sc3_hidden_changes_counts_advanced_entries_off_default() {
+        let layout = SettingsLayout::embedded().unwrap();
+        let mut cfg = ResolvedConfig::default();
+        assert_eq!(0, hidden_changes(&layout, &cfg));
+        cfg.popup.side_panel = true;
+        cfg.debug.show_engine_log = true;
+        cfg.popup.theme = "light".to_string();
+        assert_eq!(2, hidden_changes(&layout, &cfg));
     }
 
     fn remove_layout_entry(layout: &mut SettingsLayout, id: SettingId) -> EntrySpec {
