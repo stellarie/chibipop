@@ -212,12 +212,12 @@ label = "Search"
 [[tabs.sections.entries]]
 id = "open-dictionary-search"
 label = "Open dictionary search"
-help = "Opens a search window. Click the button, then press a key combination."
+help = "Opens a search window."
 
 [[tabs.sections.entries]]
 id = "open-sentence-search"
 label = "Open sentence search"
-help = "Opens a search window for a complete sentence. Click the button, then press a key combination."
+help = "Opens a search window for a complete sentence."
 
 [[tabs.sections]]
 id = "dictionary-terms"

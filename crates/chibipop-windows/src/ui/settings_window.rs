@@ -3077,14 +3077,8 @@ fn advanced_label(hidden: usize) -> String {
     }
 }
 
-/// Escapes ampersands for Windows control label display.
-fn apply_caption(mode: ApplyMode) -> &'static str {
-    if mode == ApplyMode::Live {
-        "Apply"
-    } else {
-        "Apply && Restart"
-    }
-}
+/// The Apply button caption.
+const APPLY_CAPTION: &str = "Apply";
 
 /// Returns the Apply hint text.
 #[cfg(test)]
@@ -3095,7 +3089,9 @@ fn apply_hint(mode: ApplyMode, staged: bool) -> &'static str {
             "Applying saves your settings and updates your \
              dictionaries in place."
         }
-        (ApplyMode::Standalone, _) => "Applying saves your settings and restarts chibipop.",
+        (ApplyMode::Standalone, _) => {
+            "Applying saves your settings for the next start of chibipop."
+        }
     }
 }
 
@@ -5010,7 +5006,7 @@ impl SettingsWindow {
         // SAFETY: `ID_APPLY` is a live child window.
         unsafe {
             if let Ok(c) = dlg_item(self.hwnd, ID_APPLY) {
-                let caption = wide(apply_caption(self.apply_mode));
+                let caption = wide(APPLY_CAPTION);
                 let _ = SetWindowTextW(c, PCWSTR(caption.as_ptr()));
             }
         }
@@ -7303,7 +7299,7 @@ impl SettingsWindow {
             child(
                 h,
                 w!("BUTTON"),
-                apply_caption(self.apply_mode),
+                APPLY_CAPTION,
                 WINDOW_STYLE(BS_DEFPUSHBUTTON as u32) | WS_TABSTOP,
                 WIN_W - PAD - 144,
                 self.bottom_y0 + BOTTOM_BTN_DY,
@@ -8738,18 +8734,21 @@ mod tests {
     /// Live mode applies immediately when no changes are staged.
     #[test]
     fn a_live_window_with_nothing_staged_just_applies() {
-        assert_eq!("Apply", apply_caption(ApplyMode::Live));
+        assert_eq!("Apply", APPLY_CAPTION);
         assert!(apply_hint(ApplyMode::Live, false).contains("right away"));
     }
 
     /// A staged update needs no rebuild or restart.
     #[test]
     fn a_staged_dictionary_promises_an_in_place_update() {
-        assert_eq!("Apply", apply_caption(ApplyMode::Live));
+        assert_eq!("Apply", APPLY_CAPTION);
         let hint = apply_hint(ApplyMode::Live, true);
         assert!(hint.contains("in place"), "{hint}");
         assert!(!hint.contains("rebuild"), "{hint}");
         assert!(!hint.contains("restart"), "{hint}");
+        let standalone = apply_hint(ApplyMode::Standalone, false);
+        assert!(standalone.contains("next start"), "{standalone}");
+        assert!(!standalone.contains("restarts"), "{standalone}");
     }
 
     // ---- ocr language list ----
