@@ -343,10 +343,17 @@ fn edit_close_action(
     }
 }
 
-/// Stores the corner for the next run.
+/// Stores the corner and the view for the next run.
 fn remember_settings_position(window: &SettingsWindow) {
-    if let Some(corner) = window.placement() {
-        placement::store(&placement::state_path(), corner);
+    let path = placement::state_path();
+    match window.placement() {
+        Some(corner) => placement::store(&path, corner),
+        None => {
+            if let Some(stored) = placement::load(&path) {
+                let show_advanced = window.show_advanced();
+                placement::store(&path, placement::Placement { show_advanced, ..stored });
+            }
+        }
     }
 }
 

@@ -246,6 +246,7 @@ const ID_INCLUDE_DICTIONARY_NAME: i32 = 181;
 const ID_DISCARD_FURIGANA: i32 = 186;
 const ID_SHOW_LIVE_LOGS: i32 = 192;
 const ID_CLEAR_LOOKUP_CACHE: i32 = 155;
+const ID_SHOW_ADVANCED: i32 = 189;
 const ID_APPLY_STATE: i32 = 193;
 const ID_RUNTIME_STATUS: i32 = 194;
 const ID_BACKGROUND_ON_CLOSE: i32 = 28000;
@@ -652,6 +653,8 @@ const LABEL_W: i32 = 178;
 const FIELD_X: i32 = PAD + LABEL_W;
 const FIELD_W: i32 = WIN_W - FIELD_X - PAD - 16;
 const STATUS_H: i32 = 44;
+/// The left edge of the advanced checkbox.
+const ADVANCED_X: i32 = PAD + 116 + 12;
 /// The first vertical coordinate below the tab strip.
 const CONTENT_Y: i32 = PAD + TAB_H + 4;
 /// The vertical offset below the top of the bottom row.
@@ -664,7 +667,7 @@ const BOTTOM_BTN_DY: i32 = BOTTOM_STATUS_DY + STATUS_H + 8;
 const BOTTOM_H: i32 = BOTTOM_BTN_DY + ROW_H + 8;
 /// Each bottom-row item stores a control identifier, a horizontal coordinate,
 /// and a vertical offset.
-const BOTTOM_ROW: [(i32, i32, i32); 7] = [
+const BOTTOM_ROW: [(i32, i32, i32); 8] = [
     (ID_UPDATES, PAD - 6, 0),
     (ID_CHECK_UPDATE, PAD, BOTTOM_UPDATE_DY),
     (ID_APPLY_STATE, PAD, BOTTOM_APPLY_STATE_DY),
@@ -672,6 +675,7 @@ const BOTTOM_ROW: [(i32, i32, i32); 7] = [
     (ID_STATUS, PAD, BOTTOM_STATUS_DY),
     (ID_APPLY, 0, BOTTOM_BTN_DY),
     (ID_QUIT, PAD, BOTTOM_BTN_DY),
+    (ID_SHOW_ADVANCED, ADVANCED_X, BOTTOM_BTN_DY),
 ];
 /// The height of one scroll line at 96 DPI.
 const SCROLL_LINE: i32 = 20;
@@ -977,6 +981,7 @@ fn place_bottom(hwnd: HWND) {
                 ID_CHECK_UPDATE => (136, ROW_H),
                 ID_APPLY => (136, ROW_H + 4),
                 ID_QUIT => (116, ROW_H + 4),
+                ID_SHOW_ADVANCED => ((apply_x - 12 - ADVANCED_X).max(1), ROW_H + 4),
                 _ => continue,
             };
             let _ = SetWindowPos(
@@ -1215,7 +1220,7 @@ fn user_edit_command(id: i32, notify: u16) -> bool {
     !matches!(
         id,
         ID_APPLY | ID_QUIT | ID_CHECK_UPDATE | ID_ANKI_TEST | ID_CSS_EDITOR
-            | ID_ENGINE_CONFIGURE | ID_FIELD_MAP_TOGGLE | ID_SHOW_LIVE_LOGS
+            | ID_SHOW_ADVANCED | ID_ENGINE_CONFIGURE | ID_FIELD_MAP_TOGGLE | ID_SHOW_LIVE_LOGS
             | ID_CLEAR_LOOKUP_CACHE | ID_STATUS | ID_APPLY_STATE | ID_RUNTIME_STATUS
             | ID_OPEN_DICTIONARY_SEARCH | ID_OPEN_SENTENCE_SEARCH
     ) && matches!(
@@ -3060,6 +3065,18 @@ fn field_map_toggle_label(label: &str, collapsed: bool) -> String {
     format!("{label} {}", if collapsed { '\u{25B6}' } else { '\u{25BC}' })
 }
 
+/// The checkbox label when no hidden setting differs.
+const ADVANCED_LABEL: &str = "Show advanced settings";
+
+/// Returns the checkbox label for a count of hidden changes.
+fn advanced_label(hidden: usize) -> String {
+    if hidden == 0 {
+        ADVANCED_LABEL.to_string()
+    } else {
+        format!("{ADVANCED_LABEL} ({hidden} changed)")
+    }
+}
+
 /// Escapes ampersands for Windows control label display.
 fn apply_caption(mode: ApplyMode) -> &'static str {
     if mode == ApplyMode::Live {
@@ -3388,10 +3405,13 @@ fn shared_paths(id: SettingId) -> &'static [&'static str] {
 }
 
 /// Counts advanced entries with a value off its default.
-#[allow(dead_code)]
 fn hidden_changes(layout: &SettingsLayout, cfg: &ResolvedConfig) -> usize {
+    let mut cfg = cfg.clone();
+    if cfg.actions.ocr_clipboard.as_ref().is_some_and(|action| !action.open_sentence_search) {
+        cfg.actions.ocr_clipboard = None;
+    }
     let (Ok(current), Ok(default)) = (
-        toml::Value::try_from(cfg),
+        toml::Value::try_from(&cfg),
         toml::Value::try_from(ResolvedConfig::default()),
     ) else {
         return 0;
@@ -4465,6 +4485,7 @@ impl SettingsWindow {
         place_bottom(self.hwnd);
         self.switch_tab(tab);
         self.reset_scroll();
+        self.update_advanced_label();
         self.wake();
         Ok(())
     }
@@ -4477,7 +4498,10 @@ impl SettingsWindow {
     /// `mode` sets the Apply button label and action.
     pub fn open(form: &SettingsForm, stale: &[String], mode: ApplyMode) -> Result<SettingsWindow> {
         let layout = SettingsLayout::embedded()?;
-        Self::open_with_layout(form, stale, mode, layout)
+        let window = Self::open_with_layout(form, stale, mode, layout)?;
+        let saved = placement::load(&placement::state_path());
+        window.set_show_advanced(saved.is_some_and(|saved| saved.show_advanced));
+        Ok(window)
     }
 
     pub(super) fn open_with_layout(
@@ -4606,7 +4630,7 @@ impl SettingsWindow {
             }
         }
         let (x, y) = corner(self.hwnd)?;
-        Some(Placement { x, y, show_advanced: false })
+        Some(Placement { x, y, show_advanced: self.show_advanced.get() })
     }
 
     /// Activates the Settings window.
@@ -4755,6 +4779,11 @@ impl SettingsWindow {
             place_bottom(self.hwnd);
             self.reflow_all_tabs();
             self.resize_content();
+        }
+        // SAFETY: The checkbox remains a live descendant.
+        let wanted = unsafe { checkbox_is_checked(self.hwnd, ID_SHOW_ADVANCED) };
+        if wanted != self.show_advanced.get() {
+            self.set_show_advanced(wanted);
         }
         let edited = USER_EDIT.with(|slot| slot.get() == Some(self.hwnd.0 as isize));
         if edited && self.apply_state.get() != ApplyState::Applying {
@@ -5621,14 +5650,42 @@ impl SettingsWindow {
         }
     }
 
+    /// Returns true when the window shows the advanced view.
+    pub fn show_advanced(&self) -> bool {
+        self.show_advanced.get()
+    }
+
     /// Switches between the basic and the advanced view.
-    #[allow(dead_code)]
     pub fn set_show_advanced(&self, on: bool) {
         self.show_advanced.set(on);
+        // SAFETY: The checkbox stays live until `Drop`.
+        unsafe {
+            if let Ok(check) = dlg_item(self.hwnd, ID_SHOW_ADVANCED) {
+                let state = if on { 1 } else { 0 };
+                SendMessageW(check, BM_SETCHECK, Some(WPARAM(state)), None);
+            }
+        }
         self.sync_tab_items();
         self.reflow_all_tabs();
         self.switch_tab(self.current_tab.get());
         self.resize_content();
+        self.update_advanced_label();
+    }
+
+    /// Shows the count of hidden settings off their default.
+    fn update_advanced_label(&self) {
+        let hidden = if self.show_advanced.get() {
+            0
+        } else {
+            let staged = self.staged.borrow().clone();
+            hidden_changes(&self.layout, &self.read(&staged).cfg)
+        };
+        // SAFETY: The checkbox stays live until `Drop`.
+        unsafe {
+            if let Ok(check) = dlg_item(self.hwnd, ID_SHOW_ADVANCED) {
+                let _ = SetWindowTextW(check, PCWSTR(wide(&advanced_label(hidden)).as_ptr()));
+            }
+        }
     }
 
     /// Toggles field-map collapse state and resizes the window.
@@ -7267,6 +7324,20 @@ impl SettingsWindow {
                 ID_QUIT,
                 f,
             )?;
+            let advanced = child(
+                h,
+                w!("BUTTON"),
+                ADVANCED_LABEL,
+                WINDOW_STYLE(BS_AUTOCHECKBOX as u32) | WS_TABSTOP,
+                ADVANCED_X,
+                self.bottom_y0 + BOTTOM_BTN_DY,
+                WIN_W - PAD - 144 - 12 - ADVANCED_X,
+                ROW_H + 4,
+                ID_SHOW_ADVANCED,
+                f,
+            )?;
+            let check = if self.show_advanced.get() { 1 } else { 0 };
+            SendMessageW(advanced, BM_SETCHECK, Some(WPARAM(check)), None);
         }
         Ok(())
     }
@@ -7785,6 +7856,8 @@ mod tests {
         cfg.debug.show_engine_log = true;
         cfg.popup.theme = "light".to_string();
         assert_eq!(2, hidden_changes(&layout, &cfg));
+        cfg.actions.ocr_clipboard = Some(crate::config::OcrClipboardConfig::default());
+        assert_eq!(2, hidden_changes(&layout, &cfg));
     }
 
     fn remove_layout_entry(layout: &mut SettingsLayout, id: SettingId) -> EntrySpec {
@@ -8161,6 +8234,42 @@ mod tests {
         window.switch_tab(at(TabId::Popup));
         assert!(visible(&window, ID_SIDE_PANEL));
         assert_eq!(form, window.read(&form));
+    }
+
+    #[test]
+    fn sc5_toggle_changes_view_and_label_not_apply_state() {
+        let mut form = crate::settings::from_config(&crate::config::Config::default(), &[]);
+        form.cfg.popup.side_panel = true;
+        form.cfg.debug.show_engine_log = true;
+        let layout = SettingsLayout::embedded().unwrap();
+        let mut window =
+            SettingsWindow::open_with_layout(&form, &[], ApplyMode::Standalone, layout).unwrap();
+        let text = |window: &SettingsWindow, id: i32| -> String {
+            // SAFETY: The control belongs to the live test window.
+            unsafe { window_text(dlg_item(window.hwnd, id).unwrap()) }
+        };
+        let click = |window: &mut SettingsWindow, checked: usize| {
+            // SAFETY: The checkbox belongs to the live test window.
+            unsafe {
+                let check = dlg_item(window.hwnd, ID_SHOW_ADVANCED).unwrap();
+                SendMessageW(check, BM_SETCHECK, Some(WPARAM(checked)), None);
+            }
+            send_button_click(window, ID_SHOW_ADVANCED);
+            window.pump(|| {});
+        };
+        assert!(window.show_advanced());
+        assert_eq!("Apply: Loaded", text(&window, ID_APPLY_STATE));
+        assert_eq!("Show advanced settings", text(&window, ID_SHOW_ADVANCED));
+
+        click(&mut window, 0);
+        assert!(!window.show_advanced());
+        assert_eq!("Show advanced settings (2 changed)", text(&window, ID_SHOW_ADVANCED));
+        assert_eq!("Apply: Loaded", text(&window, ID_APPLY_STATE));
+
+        click(&mut window, 1);
+        assert!(window.show_advanced());
+        assert_eq!("Show advanced settings", text(&window, ID_SHOW_ADVANCED));
+        assert_eq!("Apply: Loaded", text(&window, ID_APPLY_STATE));
     }
 
 
