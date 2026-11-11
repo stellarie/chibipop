@@ -575,7 +575,7 @@ struct TcItemW {
 }
 
 /// The list contains controls that the Apply action disables.
-const WHILE_BUSY: [i32; 26] = [
+const WHILE_BUSY: [i32; 27] = [
     ID_APPLY,
     ID_QUIT,
     ID_OCR_LANG,
@@ -602,6 +602,7 @@ const WHILE_BUSY: [i32; 26] = [
     ID_SCREENSHOT_MODE,
     ID_SCREENSHOT_RESET,
     ID_CLEAR_LOOKUP_CACHE,
+    ID_SHOW_ADVANCED,
 ];
 
 fn anki_setting_is_dependent(id: SettingId) -> bool {
@@ -653,7 +654,6 @@ const LABEL_W: i32 = 178;
 const FIELD_X: i32 = PAD + LABEL_W;
 const FIELD_W: i32 = WIN_W - FIELD_X - PAD - 16;
 const STATUS_H: i32 = 44;
-/// The left edge of the advanced checkbox.
 const ADVANCED_X: i32 = PAD + 116 + 12;
 /// The first vertical coordinate below the tab strip.
 const CONTENT_Y: i32 = PAD + TAB_H + 4;
@@ -3065,10 +3065,9 @@ fn field_map_toggle_label(label: &str, collapsed: bool) -> String {
     format!("{label} {}", if collapsed { '\u{25B6}' } else { '\u{25BC}' })
 }
 
-/// The checkbox label when no hidden setting differs.
 const ADVANCED_LABEL: &str = "Show advanced settings";
 
-/// Returns the checkbox label for a count of hidden changes.
+/// Returns the label for a hidden change count.
 fn advanced_label(hidden: usize) -> String {
     if hidden == 0 {
         ADVANCED_LABEL.to_string()
@@ -3077,7 +3076,6 @@ fn advanced_label(hidden: usize) -> String {
     }
 }
 
-/// The Apply button caption.
 const APPLY_CAPTION: &str = "Apply";
 
 /// Returns the Apply hint text.
@@ -3400,7 +3398,7 @@ fn shared_paths(id: SettingId) -> &'static [&'static str] {
     }
 }
 
-/// Counts advanced entries with a value off its default.
+/// Counts advanced entries off their default.
 fn hidden_changes(layout: &SettingsLayout, cfg: &ResolvedConfig) -> usize {
     let mut cfg = cfg.clone();
     if cfg.actions.ocr_clipboard.as_ref().is_some_and(|action| !action.open_sentence_search) {
@@ -4494,17 +4492,29 @@ impl SettingsWindow {
     /// `mode` sets the Apply button label and action.
     pub fn open(form: &SettingsForm, stale: &[String], mode: ApplyMode) -> Result<SettingsWindow> {
         let layout = SettingsLayout::embedded()?;
-        let window = Self::open_with_layout(form, stale, mode, layout)?;
         let saved = placement::load(&placement::state_path());
+        let window = Self::open_saved(form, stale, mode, layout, saved)?;
         window.set_show_advanced(saved.is_some_and(|saved| saved.show_advanced));
         Ok(window)
     }
 
+    #[cfg(test)]
     pub(super) fn open_with_layout(
         form: &SettingsForm,
         stale: &[String],
         mode: ApplyMode,
         layout: SettingsLayout,
+    ) -> Result<SettingsWindow> {
+        let saved = placement::load(&placement::state_path());
+        Self::open_saved(form, stale, mode, layout, saved)
+    }
+
+    fn open_saved(
+        form: &SettingsForm,
+        stale: &[String],
+        mode: ApplyMode,
+        layout: SettingsLayout,
+        saved: Option<Placement>,
     ) -> Result<SettingsWindow> {
         layout.validate()?;
         // SAFETY: Window creation FFI calls below use handles owned by this
@@ -4591,8 +4601,7 @@ impl SettingsWindow {
             }
             // Adjusts size, position, and visibility. Refer to `fit_to` for
             // why `ShowWindow` is not used here. The corner of the last run
-            // decides which monitor holds the window, so read it here.
-            let saved = placement::load(&placement::state_path());
+            // decides which monitor holds the window.
             let start = target(hwnd, saved);
             // Open at half the work area, not the full content. The page scrolls.
             let start_h = start.as_ref().map_or(content_h + PAD, |t| {
@@ -4616,7 +4625,7 @@ impl SettingsWindow {
         self.hwnd
     }
 
-    /// Returns the corner where the window sits.
+    /// Returns the corner and the view of the window.
     /// None while minimized or maximized.
     pub fn placement(&self) -> Option<Placement> {
         // SAFETY: `self.hwnd` is live. Both calls only read.
@@ -5597,7 +5606,7 @@ impl SettingsWindow {
         self.reset_scroll();
     }
 
-    /// Hides each control that the current view does not show.
+    /// Hides each control that the view omits.
     fn hide_unshown(&self) {
         if self.show_advanced.get() {
             return;
@@ -5617,7 +5626,7 @@ impl SettingsWindow {
         }
     }
 
-    /// Replaces the tab items with the tabs that show an entry.
+    /// Rebuilds the tab items for the current view.
     fn sync_tab_items(&self) {
         // SAFETY: The tab control stays live until `Drop`. Each text
         // buffer outlives its insert call.
@@ -5646,12 +5655,12 @@ impl SettingsWindow {
         }
     }
 
-    /// Returns true when the window shows the advanced view.
+    /// Returns true in the advanced view.
     pub fn show_advanced(&self) -> bool {
         self.show_advanced.get()
     }
 
-    /// Switches between the basic and the advanced view.
+    /// Switches between the basic and advanced view.
     pub fn set_show_advanced(&self, on: bool) {
         self.show_advanced.set(on);
         // SAFETY: The checkbox stays live until `Drop`.
@@ -5668,13 +5677,18 @@ impl SettingsWindow {
         self.update_advanced_label();
     }
 
-    /// Shows the count of hidden settings off their default.
+    /// Shows the count of hidden changes.
     fn update_advanced_label(&self) {
         let hidden = if self.show_advanced.get() {
             0
         } else {
             let staged = self.staged.borrow().clone();
-            hidden_changes(&self.layout, &self.read(&staged).cfg)
+            let form = self.read(&staged);
+            let mut cfg = form.cfg;
+            if let Some(on) = form.background_on_close {
+                cfg.application.background_on_close = on;
+            }
+            hidden_changes(&self.layout, &cfg)
         };
         // SAFETY: The checkbox stays live until `Drop`.
         unsafe {
@@ -8237,6 +8251,7 @@ mod tests {
         let mut form = crate::settings::from_config(&crate::config::Config::default(), &[]);
         form.cfg.popup.side_panel = true;
         form.cfg.debug.show_engine_log = true;
+        form.background_on_close = Some(true);
         let layout = SettingsLayout::embedded().unwrap();
         let mut window =
             SettingsWindow::open_with_layout(&form, &[], ApplyMode::Standalone, layout).unwrap();
@@ -8259,7 +8274,7 @@ mod tests {
 
         click(&mut window, 0);
         assert!(!window.show_advanced());
-        assert_eq!("Show advanced settings (2 changed)", text(&window, ID_SHOW_ADVANCED));
+        assert_eq!("Show advanced settings (3 changed)", text(&window, ID_SHOW_ADVANCED));
         assert_eq!("Apply: Loaded", text(&window, ID_APPLY_STATE));
 
         click(&mut window, 1);
@@ -8734,14 +8749,12 @@ mod tests {
     /// Live mode applies immediately when no changes are staged.
     #[test]
     fn a_live_window_with_nothing_staged_just_applies() {
-        assert_eq!("Apply", APPLY_CAPTION);
         assert!(apply_hint(ApplyMode::Live, false).contains("right away"));
     }
 
     /// A staged update needs no rebuild or restart.
     #[test]
     fn a_staged_dictionary_promises_an_in_place_update() {
-        assert_eq!("Apply", APPLY_CAPTION);
         let hint = apply_hint(ApplyMode::Live, true);
         assert!(hint.contains("in place"), "{hint}");
         assert!(!hint.contains("rebuild"), "{hint}");

@@ -1,4 +1,4 @@
-//! Remembers where the settings window sits.
+//! Remembers the settings window corner and view.
 //! Windows restores no position by itself.
 
 use serde::{Deserialize, Serialize};
@@ -9,7 +9,7 @@ const STATE_FILE: &str = "chibipop.window.toml";
 const STATE_HEADER: &str =
     "# The position and the advanced view of the settings window. chibipop writes this file.\n";
 
-/// The top-left corner in screen pixels.
+/// The top-left corner in pixels and the view.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Placement {
     pub x: i32,
@@ -36,18 +36,18 @@ impl Area {
     }
 }
 
-/// Returns the path of the position file.
+/// Returns the path of the state file.
 pub fn state_path() -> PathBuf {
     crate::paths::beside_exe(STATE_FILE)
 }
 
-/// Reads the remembered corner.
+/// Reads the remembered corner and view.
 pub fn load(path: &Path) -> Option<Placement> {
     let text = std::fs::read_to_string(path).ok()?;
     toml::from_str(&text).ok()
 }
 
-/// Writes the remembered corner.
+/// Writes the remembered corner and view.
 pub fn store(path: &Path, placement: Placement) {
     let Ok(body) = toml::to_string(&placement) else { return };
     // Write beside, then rename.

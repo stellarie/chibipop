@@ -343,7 +343,7 @@ fn edit_close_action(
     }
 }
 
-/// Stores the corner and the view for the next run.
+/// Stores the corner and the view.
 fn remember_settings_position(window: &SettingsWindow) {
     let path = placement::state_path();
     match window.placement() {
