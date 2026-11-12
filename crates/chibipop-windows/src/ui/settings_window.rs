@@ -6395,6 +6395,7 @@ impl SettingsWindow {
             SettingId::LookupMode => {
                 checkbox!(ID_MODE_LIVE, form.catalog.live_lookup);
             }
+            SettingId::LookupKey => {}
             SettingId::ConfiguredBinds => {
                 (self.bind_count, bind_tips) = build_configured_binds(
                     h,
