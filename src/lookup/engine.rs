@@ -69,10 +69,8 @@ struct Candidate {
     row: TermRow,
     match_len: usize,
     steps: usize,
-    /// This value is `true` when the deconjugator reaches a complete form. A chain that ends
-    /// with a `stem-` tag stops inside morphology. Its row matches a stem by text.
-    /// The input is not a form of that word. An unconjugated form needs no chain, so it is
-    /// whole by definition.
+    /// `true` for no tag or a terminal tag.
+    /// `false` for a tag that `dict_pos_for` does not know.
     whole: bool,
     process: Vec<String>,
 }
@@ -192,9 +190,8 @@ impl LookupEngine {
             let sb = score(b.match_len, b.row.freq, kana_bonus(b));
             b.match_len
                 .cmp(&a.match_len)
-                // For equal spans, prefer a form that the deconjugator resolves to a word
-                // class. A stem-only result loses even if its homograph is common. Rule count
-                // does not make a parse worse.
+                // For equal spans, a known word class wins.
+                // Rule count does not make a parse worse.
                 .then(b.whole.cmp(&a.whole))
                 .then(sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal))
                 // After all higher keys tie, use `steps` as a nudge, not as the main
@@ -297,10 +294,8 @@ mod tests {
     /// する wins by default. This test adds many candidates like a real
     /// frequency-less library for してしまった.
     ///
-    /// Every row consumes the full input and has no frequency. The only form that
-    /// the deconjugator resolves to a word class also uses the most rules. The
-    /// nouns are homographs of the stems: し and して. That text match makes
-    /// them candidates.
+    /// No row has a frequency. The nouns match the prefixes し and して.
+    /// The verb match uses the full input and the most rules.
     #[test]
     fn whole_parse_survives_a_crowd_of_stem_homographs() {
         const SHI: &[&str] = &[
