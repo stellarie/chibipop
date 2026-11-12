@@ -48,8 +48,8 @@ fn score(match_len: usize, freq: Option<i64>, kana_bonus: bool) -> f64 {
 }
 
 /// Map a fine `dec_tag` to a coarse POS. A mapped tag is *terminal*.
-/// `stem-` tags use the fail-open arm. The
-/// `all_terminal_dec_tags_are_handled_by_the_mapping` test guards this rule.
+/// `run` skips `stem-` tags before this call.
+/// An unknown tag uses the fail-open arm.
 fn dict_pos_for(dec_tag: &str) -> Option<Option<&'static str>> {
     match dec_tag {
         "v5aru" | "v5b" | "v5g" | "v5k" | "v5k-s" | "v5m" | "v5n" | "v5r"
@@ -126,6 +126,7 @@ impl LookupEngine {
         }
 
         let chars: Vec<char> = cleaned.chars().collect();
+        let tagged = dict.tagged_dicts()?;
         let mut best: HashMap<GroupKey, Candidate> = HashMap::new();
 
         // Do not exit early. Each prefix has different forms.
@@ -138,6 +139,10 @@ impl LookupEngine {
                 .collect();
 
             for form in &forms {
+                // A chain that ends on a stem is not a word.
+                if form.tags.last().is_some_and(|tag| tag.starts_with("stem-")) {
+                    continue;
+                }
                 // Get the POS that the chain requires. Mark a form as whole only when it has
                 // no tag or a terminal tag.
                 let (whole, required_pos) = match form.tags.last() {
@@ -149,9 +154,14 @@ impl LookupEngine {
                 };
                 for row in dict.terms_for(&form.text)? {
                     if let Some(need) = required_pos {
-                        if !row.pos.is_empty()
-                            && !row.pos.split_whitespace().any(|p| p == need)
-                        {
+                        // An untagged row passes only when its
+                        // Dictionary has no tagged row.
+                        let fits = if row.pos.is_empty() {
+                            !tagged.contains(&row.dict_id)
+                        } else {
+                            row.pos.split_whitespace().any(|p| p == need)
+                        };
+                        if !fits {
                             continue;
                         }
                     }
@@ -358,5 +368,25 @@ mod tests {
         let hits = engine().run(&dict, "治").unwrap();
         assert_eq!(hits[0].written.as_deref(), Some("治"));
         assert_eq!(hits[0].match_len, 1);
+    }
+
+    #[test]
+    fn stem_only_chain_makes_no_hit() {
+        let mut d = FakeDictionary::new();
+        d.add_term("日本人", Some("日本人"), Some("にほんじん"), "", Some(3965), 1, 1);
+        d.add_entry(1, 1, &glossary("Japanese person", ""));
+        d.add_term("ぺ", None, Some("ぺ"), "", Some(7796), 2, 1);
+        d.add_entry(2, 1, &glossary("pe", ""));
+        d.add_term("ぺん", None, Some("ぺん"), "", Some(9000), 3, 1);
+        d.add_entry(3, 1, &glossary("pen", ""));
+        // One tagged row makes the Dictionary tagged.
+        d.add_term("食べる", Some("食べる"), Some("たべる"), "v1", Some(500), 4, 1);
+        d.add_entry(4, 1, &glossary("to eat", "v1"));
+
+        let hits = engine().run(&d, "日本人で").unwrap();
+        assert_eq!(hits[0].match_len, 3);
+        assert!(hits[0].process.is_empty(), "got {:?}", hits[0].process);
+        let hits = engine().run(&d, "ぺんです").unwrap();
+        assert_eq!(hits[0].reading.as_deref(), Some("ぺん"));
     }
 }

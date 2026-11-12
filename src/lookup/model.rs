@@ -123,6 +123,11 @@ pub trait Dictionary {
     /// call.
     fn dicts(&self) -> Result<Vec<crate::present::DictInfo>>;
 
+    /// Dictionaries with a POS tag on one row or more.
+    fn tagged_dicts(&self) -> Result<Vec<i64>> {
+        Ok(Vec::new())
+    }
+
     /// Every stored Pitch pattern for one headword and reading, from each Dictionary
     /// that made a claim.
     ///
@@ -212,6 +217,11 @@ impl Dictionary for FakeDictionary {
 
     fn dicts(&self) -> Result<Vec<crate::present::DictInfo>> {
         Ok(self.dicts.clone())
+    }
+
+    fn tagged_dicts(&self) -> Result<Vec<i64>> {
+        Ok(self.terms.values().flatten().filter(|row| !row.pos.is_empty())
+            .map(|row| row.dict_id).collect())
     }
 
     fn pitch_for(&self, term: &str, reading: &str) -> Vec<PitchClaim> {
