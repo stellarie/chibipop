@@ -241,10 +241,11 @@ Worker: capture -> mask -> OCR -> lookup -> present --result--> Controller
   until toggle-off. Configured Linux Toggle Binds use `bind-down ID`.
   The fixed `chibipop ctl toggle` verb remains supported. Windows flips the
   hook latch for both configured and fixed Toggle actions.
-- Hold mode runs one lookup per key-down and ignores the key release. The popup stays
-  until an outside click (consumed by the click catcher or hook) or a later press that
-  finds no text. A press while a popup is shown performs a live masked grab, not a
-  Frozen one.
+- Hold mode runs one lookup at key-down. While the key stays down, the popup follows the
+  cursor. The key release hides the popup. An outside click (consumed by the click
+  catcher or hook) also hides it. A press while a popup is shown performs a live masked
+  grab, not a Frozen one. A desktop that cannot send a key release uses Toggle mode or
+  the `lookup` verb.
 - A Hold or Toggle activation over painted popup text performs one dictionary
   lookup without capture or OCR. Blank popup space or a popup lookup miss does not
   dismiss the chain.

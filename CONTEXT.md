@@ -306,12 +306,12 @@ popup and turns off the latch. Per-character lookup is inert in this mode, as in
 _Avoid_: latch mode, sticky mode
 
 **Hold mode**:
-One trigger-key press runs one lookup at the cursor. The key release does nothing. If a lookup finds
-text, the popup shows and stays until an outside button press, which is swallowed, or a later press
-that finds no text. Hover never follows the cursor and no Dwell re-check runs. A press while a popup
-is up reads a live grab with the popup masked. Per-character lookup is inert in this mode.
-Desktops that cannot send a key release (KDE and GNOME without a portal binding, Niri) can still
-use it through the `chibipop ctl lookup` verb or Toggle mode.
+One trigger-key press runs one lookup at the cursor. While the key stays down, the popup follows
+the cursor. The key release hides the popup. An outside button press, which is swallowed, also
+hides it. No Dwell re-check runs. A press while a popup is up reads a live grab with the popup
+masked. Per-character lookup is inert in this mode.
+Desktops that cannot send a key release (KDE and GNOME without a portal binding, Niri) cannot use
+this mode. They use Toggle mode or the `chibipop ctl lookup` verb.
 _Avoid_: press mode, one-shot mode, sticky popup
 
 **Click catcher**:

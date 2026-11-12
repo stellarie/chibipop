@@ -1783,7 +1783,7 @@ impl Controller {
         if self.selected_text_active() && !was_trigger_held {
             return Vec::new();
         }
-        if self.trigger_mode() != TriggerMode::Toggle {
+        if matches!(self.trigger_mode(), TriggerMode::Live | TriggerMode::Press) {
             return Vec::new();
         }
         self.chain_bind = None;
@@ -3337,22 +3337,19 @@ mod tests {
     }
 
     #[test]
-    fn a_hold_tap_shows_the_popup_and_it_stays_until_an_outside_click() {
+    fn the_key_coming_up_retracts_the_popup_in_hold_mode() {
         let mut c = test_controller(hold_cfg());
         let pos = PhysPoint { x: 110, y: 110 };
         bind_down(&mut c, "hold", TriggerMode::HoldKey, pos);
         let id = c.latest;
-        assert!(bind_up(&mut c, "hold").is_empty());
         c.handle(ready_id(id, "\u{732B}", ANCHOR));
         c.handle(placed(POPUP, 200, 200));
         assert!(c.is_shown());
-        assert!(c.watches_outside_clicks());
-        assert!(c.swallows_outside_clicks());
-        assert!(c.handle(Event::CursorMoved { pos: PhysPoint { x: 900, y: 900 } }).is_empty());
-        assert!(c.handle(Event::DwellElapsed).is_empty());
-        assert!(c.is_shown());
-        let out = c.handle(Event::PointerDownOutside);
-        assert!(out.contains(&Command::HidePopup), "{out:?}");
+        let away = PhysPoint { x: 900, y: 900 };
+        let out = c.handle(Event::CursorMoved { pos: away });
+        assert!(matches!(out[..], [Command::RequestLookup { point, .. }] if point == away), "{out:?}");
+        let out = bind_up(&mut c, "hold");
+        assert_eq!(out, vec![Command::HidePopup, Command::SetBackArmed(false)]);
         assert!(!c.is_shown());
     }
 
