@@ -85,8 +85,8 @@ pub fn default_ocr_language() -> String {
 #[serde(rename_all = "kebab-case")]
 pub enum TriggerMode {
     Live,
-    /// Runs one lookup at key-down and one on each
-    /// cursor move. The key release hides the popup.
+    /// Follows the cursor while the key is down.
+    /// The key release hides the popup.
     HoldKey,
     /// Shows the popup after one key press and hides it after the next press.
     /// The trigger key latches the hold, so the user can move onto the popup

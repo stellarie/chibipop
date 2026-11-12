@@ -306,8 +306,8 @@ popup and turns off the latch. Per-character lookup is inert in this mode, as in
 _Avoid_: latch mode, sticky mode
 
 **Hold mode**:
-The trigger-key press runs a lookup at the cursor. Each cursor move while the key stays down runs
-a lookup. The key release hides the popup. An outside button press does not hide the popup unless
+The trigger-key press runs a lookup at the cursor. While the key stays down, a cursor move that
+leaves the sticky region runs a lookup. The key release hides the popup. An outside button press does not hide the popup unless
 `hide_on_cursor_exit` is off. In that case the press is swallowed. No Dwell re-check runs. A press
 while a popup is up reads a live grab with the popup masked. Per-character lookup is inert in this
 mode.
