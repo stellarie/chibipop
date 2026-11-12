@@ -306,17 +306,18 @@ popup and turns off the latch. Per-character lookup is inert in this mode, as in
 _Avoid_: latch mode, sticky mode
 
 **Hold mode**:
-One trigger-key press runs one lookup at the cursor. While the key stays down, the popup follows
-the cursor. The key release hides the popup. An outside button press, which is swallowed, also
-hides it. No Dwell re-check runs. A press while a popup is up reads a live grab with the popup
-masked. Per-character lookup is inert in this mode.
+The trigger-key press runs a lookup at the cursor. Each cursor move while the key stays down runs
+a lookup. The key release hides the popup. An outside button press does not hide the popup unless
+`hide_on_cursor_exit` is off. In that case the press is swallowed. No Dwell re-check runs. A press
+while a popup is up reads a live grab with the popup masked. Per-character lookup is inert in this
+mode.
 Desktops that cannot send a key release (KDE and GNOME without a portal binding, Niri) cannot use
 this mode. They use Toggle mode or the `chibipop ctl lookup` verb.
 _Avoid_: press mode, one-shot mode, sticky popup
 
 **Click catcher**:
-The transparent full-output layer surface that the daemon gives every output while a Hold-mode popup,
-a selected-text popup, or a popup with `popup.hide_on_cursor_exit = false` is placed.
+The transparent full-output layer surface that the daemon gives every output while a Toggle-mode popup,
+a `chibipop ctl lookup` popup, a selected-text popup, or a popup with `popup.hide_on_cursor_exit = false` is placed.
 Its input region covers the output except a hole over the popup rectangle. It is never unmapped. When
 the daemon hides the popup, it clears the input region. It swallows the outside button press, so that
 press does not reach the window under it.

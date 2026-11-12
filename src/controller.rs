@@ -803,7 +803,8 @@ impl Controller {
     pub fn watches_outside_clicks(&self) -> bool {
         self.selected_text_active()
             || (self.surface.is_some()
-                && (self.trigger_mode() != TriggerMode::Live || !self.hides_on_cursor_exit()))
+                && (matches!(self.trigger_mode(), TriggerMode::Press | TriggerMode::Toggle)
+                    || !self.hides_on_cursor_exit()))
     }
 
     /// Whether the bin must consume the outside
@@ -1792,17 +1793,20 @@ impl Controller {
         self.parents.clear();
         self.pending_cursor = None;
         self.next_lookup_request();
-        if self.surface.take().is_none() {
+        if self.surface.is_none() {
             return Vec::new();
         }
+        let stop_dragging = self.end_pointer();
+        self.surface = None;
         self.awaiting = None;
         self.pending_scan.clear();
-        vec![Command::HidePopup, Command::SetBackArmed(false)]
+        let mut out = vec![Command::HidePopup, Command::SetBackArmed(false)];
+        out.extend(stop_dragging);
+        out
     }
 
-    /// One press asks for one lookup at `pos`. The popup then stays until a
-    /// later lookup misses or the user clicks outside it. The press passes
-    /// the movement gate and the sticky region because the user asked.
+    /// One press runs one lookup at `pos`. The lookup
+    /// bypasses the movement gate and sticky region.
     fn trigger_pressed(&mut self, pos: PhysPoint, session: ProfileSession) -> Vec<Command> {
         self.last_accepted = Some(pos);
         if self.surface.as_ref().is_some_and(|surface| surface.placed.is_none()) {
@@ -2185,13 +2189,19 @@ impl Controller {
         false
     }
 
-    fn hide(&mut self) -> Vec<Command> {
-        let stop_dragging = self.surface.as_ref().is_some_and(|s| s.scroll_drag.is_some());
+    /// Clear pointer state and end a scroll drag.
+    fn end_pointer(&mut self) -> Option<Command> {
+        let dragging = self.surface.as_ref().is_some_and(|s| s.scroll_drag.is_some());
         self.hover_buttons = 0;
+        self.pointer_depth = None;
+        dragging.then_some(Command::SetDragging(false))
+    }
+
+    fn hide(&mut self) -> Vec<Command> {
+        let stop_dragging = self.end_pointer();
         self.cancel_hover();
         self.chain_bind = None;
         self.parents.clear();
-        self.pointer_depth = None;
         self.surface = None;
         self.awaiting = None;
         self.pending_scan.clear();
@@ -2203,9 +2213,7 @@ impl Controller {
             .unwrap_or_else(|| self.future_session.clone());
         self.set_profile_config(&session);
         let mut out = vec![Command::HidePopup, Command::SetBackArmed(false)];
-        if stop_dragging {
-            out.push(Command::SetDragging(false));
-        }
+        out.extend(stop_dragging);
         out
     }
 
@@ -2988,6 +2996,9 @@ mod tests {
             assert_eq!(c.popup_depth(), 1);
             assert!(bind_up(&mut c, "child").is_empty());
             assert_eq!(c.popup_depth(), 1);
+            if mode == TriggerMode::HoldKey {
+                assert!(bind_up(&mut c, "root").contains(&Command::HidePopup));
+            }
         }
     }
 
@@ -3345,12 +3356,29 @@ mod tests {
         c.handle(ready_id(id, "\u{732B}", ANCHOR));
         c.handle(placed(POPUP, 200, 200));
         assert!(c.is_shown());
+        assert!(!c.watches_outside_clicks());
+        assert!(!c.swallows_outside_clicks());
         let away = PhysPoint { x: 900, y: 900 };
         let out = c.handle(Event::CursorMoved { pos: away });
         assert!(matches!(out[..], [Command::RequestLookup { point, .. }] if point == away), "{out:?}");
         let out = bind_up(&mut c, "hold");
         assert_eq!(out, vec![Command::HidePopup, Command::SetBackArmed(false)]);
         assert!(!c.is_shown());
+
+        bind_down(&mut c, "hold", TriggerMode::HoldKey, pos);
+        let id = c.latest;
+        c.handle(ready_id(id, "\u{732B}", ANCHOR));
+        c.handle(placed(POPUP, 800, 200));
+        c.handle(Event::PointerDown {
+            local: PhysPoint { x: 290, y: 40 }, button: Button::Primary,
+            hit: Some(HitAction::ScrollThumb { travel: 120 }), text: None,
+        });
+        let out = bind_up(&mut c, "hold");
+        assert_eq!(
+            out,
+            vec![Command::HidePopup, Command::SetBackArmed(false), Command::SetDragging(false)]
+        );
+        assert_eq!(c.hover_buttons, 0);
     }
 
     // -- the sticky region --

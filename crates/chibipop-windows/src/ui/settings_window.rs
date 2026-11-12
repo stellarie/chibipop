@@ -577,11 +577,9 @@ struct TcItemW {
 }
 
 /// The list contains controls that the Apply action disables.
-const WHILE_BUSY: [i32; 29] = [
+const WHILE_BUSY: [i32; 27] = [
     ID_APPLY,
     ID_QUIT,
-    ID_MODE_LIVE,
-    ID_LOOKUP_KEY,
     ID_OCR_LANG,
     ID_ENGINE,
     ID_ENGINE_CONFIGURE,
@@ -3390,9 +3388,6 @@ unsafe fn lookup_mode_changed(hwnd: HWND) {
     unsafe {
         let Ok(selector) = dlg_item(hwnd, ID_MODE_LIVE) else { return };
         let index = SendMessageW(selector, CB_GETCURSEL, None, None).0;
-        if !(0..=2).contains(&index) {
-            return;
-        }
         if let Ok(per_char) = dlg_item(hwnd, ID_PER_CHAR) {
             let _ = EnableWindow(per_char, index == 0);
         }
@@ -5196,7 +5191,6 @@ impl SettingsWindow {
             }
             self.update_anki_controls(checkbox_is_checked(self.hwnd, ID_ANKI_ENABLED));
             if !busy {
-                sync_lookup_summary(self.hwnd);
                 update_list_buttons(self.hwnd);
                 update_engine_controls(self.hwnd);
                 self.hide_unshown();
