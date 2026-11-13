@@ -141,9 +141,9 @@ impl LookupEngine {
                 if form.tags.last().is_some_and(|tag| tag.starts_with("stem-")) {
                     continue;
                 }
-                // A suru noun has two or more characters.
+                // A suru noun is not all hiragana.
                 if form.tags.last().is_some_and(|tag| tag == "vs-noun")
-                    && form.text.chars().count() < 2
+                    && form.text.chars().all(|c| matches!(c, '\u{3040}'..='\u{309F}'))
                 {
                     continue;
                 }
@@ -442,5 +442,13 @@ mod tests {
         assert_eq!(hits[0].process.last().map(String::as_str), Some("suru"));
         let hits = engine().run(&d, "をした").unwrap();
         assert!(!hits.iter().any(|h| h.match_len == 3), "got {hits:?}");
+
+        d.add_term("そう", None, Some("そう"), "", None, 4, 1);
+        d.add_entry(4, 1, &glossary("so", ""));
+        d.add_term("そうした", None, Some("そうした"), "", None, 5, 1);
+        d.add_entry(5, 1, &glossary("such", ""));
+        let hits = engine().run(&d, "そうした").unwrap();
+        assert_eq!(hits[0].reading.as_deref(), Some("そうした"));
+        assert!(hits.iter().all(|h| !h.process.iter().any(|p| p == "suru")), "got {hits:?}");
     }
 }
