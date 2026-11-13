@@ -150,12 +150,18 @@ impl LookupEngine {
                         None => (false, None),
                     },
                 };
-                for row in dict.terms_for(&form.text)? {
+                let rows = dict.terms_for(&form.text)?;
+                for row in rows.iter().cloned() {
                     if let Some(need) = required_pos {
-                        // An untagged row passes only when its
-                        // Dictionary has no tagged row.
+                        // An untagged row passes if its Dictionary
+                        // has no tagged row or a same-headword row fits.
                         let fits = if row.pos.is_empty() {
                             !tagged.contains(&row.dict_id)
+                                || rows.iter().any(|other| {
+                                    other.written == row.written
+                                        && other.reading == row.reading
+                                        && other.pos.split_whitespace().any(|p| p == need)
+                                })
                         } else {
                             row.pos.split_whitespace().any(|p| p == need)
                         };
@@ -383,5 +389,33 @@ mod tests {
         assert!(hits[0].process.is_empty(), "got {:?}", hits[0].process);
         let hits = engine().run(&d, "ぺんです").unwrap();
         assert_eq!(hits[0].reading.as_deref(), Some("ぺん"));
+    }
+
+    #[test]
+    fn untagged_row_takes_pos_from_same_headword_row() {
+        let mut d = FakeDictionary::new();
+        d.add_term("構わない", Some("構わない"), Some("かまわない"), "adj-i", None, 1, 1);
+        d.add_entry(1, 1, &glossary("not mind", "adj-i"));
+        d.add_term("構わない", Some("構わない"), Some("かまわない"), "", None, 2, 2);
+        d.add_entry(2, 2, &glossary("be all right", ""));
+        // One tagged row makes Dictionary 2 tagged.
+        d.add_term("食べる", Some("食べる"), Some("たべる"), "v1", None, 3, 2);
+        d.add_entry(3, 2, &glossary("to eat", "v1"));
+        let hits = engine().run(&d, "構わなかった").unwrap();
+        let ids: Vec<i64> = hits.iter().filter(|h| h.match_len == 6)
+            .map(|h| h.entry.entry_id).collect();
+        assert!(ids.contains(&1) && ids.contains(&2), "got {ids:?}");
+
+        // 悪 shares the reading of 開く but not the written form.
+        let mut d = FakeDictionary::new();
+        d.add_term("あく", Some("開く"), Some("あく"), "v5", None, 1, 1);
+        d.add_entry(1, 1, &glossary("to open", "v5"));
+        d.add_term("あく", Some("悪"), Some("あく"), "", None, 2, 2);
+        d.add_entry(2, 2, &glossary("evil", ""));
+        d.add_term("食べる", Some("食べる"), Some("たべる"), "v1", None, 3, 2);
+        d.add_entry(3, 2, &glossary("to eat", "v1"));
+        let hits = engine().run(&d, "あいて").unwrap();
+        assert!(hits.iter().any(|h| h.written.as_deref() == Some("開く") && h.match_len == 3));
+        assert!(!hits.iter().any(|h| h.written.as_deref() == Some("悪") && h.match_len == 3));
     }
 }
