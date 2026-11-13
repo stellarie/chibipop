@@ -191,7 +191,7 @@ impl LookupEngine {
         let stem_spans: HashSet<usize> =
             ranked.iter().filter(|c| bare_stem(c)).map(|c| c.match_len).collect();
         let copula_follows = |len: usize| {
-            matches!(chars[len..], ['で' | 'だ', ..] | ['じ', 'ゃ', ..])
+            matches!(chars[len..], ['で' | 'だ' | 'な', ..] | ['じ', 'ゃ', ..])
         };
         let leads = |c: &Candidate| {
             c.steps == 0 && copula_follows(c.match_len) && stem_spans.contains(&c.match_len)
@@ -396,6 +396,14 @@ mod tests {
         let hits = engine().run(&d, "休みます").unwrap();
         assert_eq!(hits[0].written.as_deref(), Some("休む"), "got {hits:?}");
         assert_eq!(hits[0].match_len, 4);
+
+        let mut d = FakeDictionary::new();
+        d.add_term("上手い", Some("上手い"), Some("うまい"), "adj-i", Some(100), 1, 1);
+        d.add_entry(1, 1, &glossary("skillful", "adj-i"));
+        d.add_term("上手", Some("上手"), Some("じょうず"), "", Some(5000), 2, 1);
+        d.add_entry(2, 1, &glossary("skill", ""));
+        let hits = engine().run(&d, "上手な").unwrap();
+        assert_eq!(hits[0].written.as_deref(), Some("上手"), "got {hits:?}");
     }
 
     #[test]
