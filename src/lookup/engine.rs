@@ -59,7 +59,9 @@ fn dict_pos_for(dec_tag: &str) -> Option<Option<&'static str>> {
         "v1" => Some(Some("v1")),
         "vk" => Some(Some("vk")),
         // These tags have no POS signal.
-        "exp" | "topic-condition" | "uninflectable" | "vs-noun" => Some(None),
+        "exp" | "topic-condition" | "uninflectable" => Some(None),
+        // A suru noun is not whole. A verb row leads.
+        "vs-noun" => None,
         // Unrecognized tags use the fail-open path.
         _ => None,
     }
@@ -450,5 +452,12 @@ mod tests {
         let hits = engine().run(&d, "そうした").unwrap();
         assert_eq!(hits[0].reading.as_deref(), Some("そうした"));
         assert!(hits.iter().all(|h| !h.process.iter().any(|p| p == "suru")), "got {hits:?}");
+
+        d.add_term("損", Some("損"), Some("そん"), "", Some(3085), 6, 1);
+        d.add_entry(6, 1, &glossary("loss", ""));
+        d.add_term("損する", Some("損する"), Some("そんする"), "vs", Some(12259), 7, 1);
+        d.add_entry(7, 1, &glossary("to lose", "vs"));
+        let hits = engine().run(&d, "損した").unwrap();
+        assert_eq!(hits[0].written.as_deref(), Some("損する"), "got {hits:?}");
     }
 }
