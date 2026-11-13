@@ -454,10 +454,11 @@ Worker: capture -> mask -> OCR -> lookup -> present --result--> Controller
   bare te-form still explains its match.
 - The Card shows the Inflection chain in one dimmed row after the pitch rows and before
   the part-of-speech row. The separator is ` « ` (U+00AB). An empty chain draws no row,
-  so no geometry golden changes.
-- The design rejects an outermost-first display (weikipop's order), a relabel table in
-  code (the labels come from embedded rules compiled from `data/deconjugator.json`),
-  and a setting that hides the row.
+  so no geometry golden changes. `RenderSettings::inflections` (`popup.show_inflections`,
+  default on) hides the row. It affects only the popup. Anki export and search read
+  `Card::inflections` directly.
+- The design rejects an outermost-first display (weikipop's order) and a relabel table in
+  code (the labels come from embedded rules compiled from `data/deconjugator.json`).
 
 ## Verification
 

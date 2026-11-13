@@ -122,6 +122,11 @@ id = "popup-part-of-speech"
 label = "Show word types"
 help = "Shows labels such as noun, verb, and adjective."
 
+[[tabs.sections.entries]]
+id = "popup-inflections"
+label = "Show inflection chain"
+help = "Shows the conjugation steps of the matched word, such as past or te form."
+
 [[tabs]]
 id = "general"
 label = "General"
