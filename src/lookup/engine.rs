@@ -59,7 +59,7 @@ fn dict_pos_for(dec_tag: &str) -> Option<Option<&'static str>> {
         "v1" => Some(Some("v1")),
         "vk" => Some(Some("vk")),
         // These tags have no POS signal.
-        "exp" | "topic-condition" | "uninflectable" => Some(None),
+        "exp" | "topic-condition" | "uninflectable" | "vs-noun" => Some(None),
         // Unrecognized tags use the fail-open path.
         _ => None,
     }
@@ -139,6 +139,12 @@ impl LookupEngine {
             for form in &forms {
                 // A chain that ends on a stem is not a word.
                 if form.tags.last().is_some_and(|tag| tag.starts_with("stem-")) {
+                    continue;
+                }
+                // A suru noun has two or more characters.
+                if form.tags.last().is_some_and(|tag| tag == "vs-noun")
+                    && form.text.chars().count() < 2
+                {
                     continue;
                 }
                 // Get the POS that the chain requires. Mark a form as whole only when it has
@@ -417,5 +423,24 @@ mod tests {
         let hits = engine().run(&d, "あいて").unwrap();
         assert!(hits.iter().any(|h| h.written.as_deref() == Some("開く") && h.match_len == 3));
         assert!(!hits.iter().any(|h| h.written.as_deref() == Some("悪") && h.match_len == 3));
+    }
+
+    #[test]
+    fn suru_verb_matches_its_noun() {
+        let mut d = FakeDictionary::new();
+        d.add_term("勉強", Some("勉強"), Some("べんきょう"), "", None, 1, 1);
+        d.add_entry(1, 1, &glossary("study", ""));
+        d.add_term("を", None, Some("を"), "", None, 2, 1);
+        d.add_entry(2, 1, &glossary("object marker", ""));
+        // One tagged row makes the Dictionary tagged.
+        d.add_term("食べる", Some("食べる"), Some("たべる"), "v1", None, 3, 1);
+        d.add_entry(3, 1, &glossary("to eat", "v1"));
+
+        let hits = engine().run(&d, "勉強している").unwrap();
+        assert_eq!(hits[0].written.as_deref(), Some("勉強"), "got {:?}", hits[0]);
+        assert_eq!(hits[0].match_len, 6);
+        assert_eq!(hits[0].process.last().map(String::as_str), Some("suru"));
+        let hits = engine().run(&d, "をした").unwrap();
+        assert!(!hits.iter().any(|h| h.match_len == 3), "got {hits:?}");
     }
 }
