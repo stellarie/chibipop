@@ -5,7 +5,8 @@
 //!
 //! [`build_elements`] is the only function that reads render settings.
 //! This keeps [`RenderSettings`] as a decision table instead of a cascade.
-//! [`build_elements`] resolves four facts into the two values used by the gloss walk.
+//! [`build_elements`] reads five facts. It resolves four into the two values used by
+//! the gloss walk. It reads `inflections` directly for the chain row.
 //! Code after that point does not read a setting.
 //!
 //! Every element here belongs to the panel, not to a Dictionary.
@@ -553,8 +554,9 @@ pub(super) struct SideEntry {
 ///
 /// **This is the only place that reads the render settings.**
 /// [`RenderSettings`] supplies five facts here.
-/// This function resolves them into two values for the gloss walk:
+/// This function resolves four of them into two values for the gloss walk:
 /// the list layout and a [`Render`] record.
+/// It reads `inflections` directly for the chain row.
 /// Code after this point does not read a setting again.
 /// This design uses a decision table, not a cascade of style rules.
 /// Yomitan drives the same small set of root attributes into fixed CSS rules.

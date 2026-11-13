@@ -910,8 +910,8 @@ outward, so the reader rebuilds the hovered form from left to right.
 A bare te-form such as 風邪をひいて shows `(te form)`. The row hides inner stems such
 as `(unstressed infinitive)`, because they are plumbing between two visible steps.
 The binary embeds the `detail` strings from `data/deconjugator.json` verbatim.
-An unconjugated headword shows no row. The `show_inflections` setting hides the
-row for every Card. See [The render settings](#the-render-settings).
+An unconjugated headword shows no row. Set `popup.show_inflections` to `false`
+to hide the row for every Card. See [The render settings](#the-render-settings).
 
 ### Sticky hover
 
@@ -1008,7 +1008,7 @@ where it put them.
 
 `show_inflections` is **on** by default. It controls the Inflection chain
 row under the reading. Turn it off to draw no row and leave no gap. It
-changes only the popup. Anki export and search keep the chain.
+applies to every popup, the Search definition popup included.
 
 Changing any of these applies on reload — the settings window's Apply — and
 lands on a popup already on screen. No restart.

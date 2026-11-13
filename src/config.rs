@@ -237,10 +237,7 @@ pub struct PopupConfig {
     /// `gloss::RoleFilter::CARD` drops them for the same reason.
     pub show_part_of_speech: bool,
     /// Shows the Inflection chain row on each Card.
-    ///
-    /// The default is on.
     /// Off draws no row and leaves no gap.
-    /// Anki export and search keep the chain.
     pub show_inflections: bool,
     /// Off keeps the popup after a cursor miss.
     /// An outside click then hides it.

@@ -1306,8 +1306,8 @@ fn pitch_elems(s: &PopupScene) -> Vec<&SceneElem> {
     s.elems.iter().filter(|e| e.kind == ElemKind::Pitch).collect()
 }
 
-/// The `inflections` setting decides whether the chain row appears. Off leaves the
-/// same scene as a card with no chain, so no empty line remains.
+/// The setting shows or hides the chain row.
+/// Off equals the scene of a card with no chain.
 #[test]
 fn the_inflection_chain_row_follows_its_setting_and_leaves_no_gap() {
     let mut p = card_with_pitch("ざつだん", vec![]);
