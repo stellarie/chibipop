@@ -110,6 +110,18 @@ fn bare_stem(c: &Candidate) -> bool {
     matches!(c.process.as_slice(), [step] if step == "(infinitive)" || step == "(stem)")
 }
 
+/// Return `true` for a copula, not kana 出す or 出る.
+fn copula_follows(rest: &[char]) -> bool {
+    match rest {
+        ['だ', 'す' | 'さ' | 'せ' | 'そ', ..]
+        | ['だ', 'し', 'た' | 'て' | 'ま', ..]
+        | ['で', 'る' | 'た' | 'て' | 'よ' | 'れ', ..]
+        | ['で', 'ま', ..] => false,
+        ['で' | 'だ' | 'な', ..] | ['じ', 'ゃ', ..] => true,
+        _ => false,
+    }
+}
+
 pub struct LookupEngine {
     deconjugator: Deconjugator,
 }
@@ -187,14 +199,14 @@ impl LookupEngine {
 
         let mut ranked: Vec<Candidate> = best.into_values().collect();
 
-        // A copula after the span lifts a plain row.
+        // A plain row leads a bare stem of its span
+        // before a copula.
         let stem_spans: HashSet<usize> =
             ranked.iter().filter(|c| bare_stem(c)).map(|c| c.match_len).collect();
-        let copula_follows = |len: usize| {
-            matches!(chars[len..], ['で' | 'だ' | 'な', ..] | ['じ', 'ゃ', ..])
-        };
         let leads = |c: &Candidate| {
-            c.steps == 0 && copula_follows(c.match_len) && stem_spans.contains(&c.match_len)
+            c.steps == 0
+                && copula_follows(&chars[c.match_len..])
+                && stem_spans.contains(&c.match_len)
         };
         ranked.sort_by(|a, b| {
             let sa = score(a.match_len, a.row.freq, kana_bonus(a));
@@ -202,7 +214,7 @@ impl LookupEngine {
             b.match_len
                 .cmp(&a.match_len)
                 // For equal spans, a known word class wins.
-                // Rule count does not make a parse worse.
+                // Then a leading plain row ranks first.
                 .then(b.whole.cmp(&a.whole))
                 .then(leads(b).cmp(&leads(a)))
                 .then(sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal))
@@ -404,6 +416,24 @@ mod tests {
         d.add_entry(2, 1, &glossary("skill", ""));
         let hits = engine().run(&d, "上手な").unwrap();
         assert_eq!(hits[0].written.as_deref(), Some("上手"), "got {hits:?}");
+
+        let mut d = FakeDictionary::new();
+        d.add_term("持つ", Some("持つ"), Some("もつ"), "v5", Some(100), 1, 1);
+        d.add_entry(1, 1, &glossary("to hold", "v5"));
+        d.add_term("持ち", Some("持ち"), Some("もち"), "", Some(5000), 2, 1);
+        d.add_entry(2, 1, &glossary("durability", ""));
+        for (text, first) in [
+            ("持ちだす", "持つ"),
+            ("持ちだした", "持つ"),
+            ("持ちでる", "持つ"),
+            ("持ちです", "持ち"),
+            ("持ちだし", "持ち"),
+            ("持ちでない", "持ち"),
+        ] {
+            let hits = engine().run(&d, text).unwrap();
+            let shown: Vec<_> = hits.iter().map(|h| h.written.as_deref()).collect();
+            assert_eq!(shown.first(), Some(&Some(first)), "{text}: got {shown:?}");
+        }
     }
 
     #[test]
