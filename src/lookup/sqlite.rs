@@ -9,7 +9,7 @@ use crate::lookup::model::{Dictionary, Entry, TermRow};
 use crate::present::DictInfo;
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
-use std::cell::{OnceCell, RefCell};
+use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::path::Path;
 use std::rc::Rc;
@@ -28,8 +28,6 @@ pub struct SqliteDictionary {
     /// or setting up the stylesheet fails. It costs one query for the whole process,
     /// not one query per hover.
     sheets: RefCell<HashMap<i64, Option<Rc<Sheet>>>>,
-    /// Dictionaries with a POS tag, read on first use.
-    tagged: OnceCell<Vec<i64>>,
     /// Enabled frequency Dictionaries in highest-priority order. The database
     /// stores the reduction that produced their Frequency ranks
     /// ([`reindex::Reduction`]).
@@ -107,7 +105,6 @@ impl SqliteDictionary {
             conn,
             gloss: RefCell::new(GlossCache::default()),
             sheets: RefCell::new(HashMap::new()),
-            tagged: OnceCell::new(),
             freq_order,
         })
     }
@@ -512,16 +509,6 @@ impl Dictionary for SqliteDictionary {
             Ok(DictInfo { dict_id: r.get(0)?, name: r.get(1)? })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
-    }
-
-    fn tagged_dicts(&self) -> Result<Vec<i64>> {
-        if let Some(ids) = self.tagged.get() {
-            return Ok(ids.clone());
-        }
-        let mut stmt =
-            self.conn.prepare("SELECT DISTINCT dict_id FROM term WHERE pos <> ''")?;
-        let ids = stmt.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<Vec<i64>>>()?;
-        Ok(self.tagged.get_or_init(|| ids).clone())
     }
 
     /// This method is total. A store fault returns no Pitch pattern, not an error

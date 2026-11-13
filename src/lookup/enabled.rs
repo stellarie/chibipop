@@ -28,7 +28,6 @@ impl Dictionary for EnabledDictionary<'_> {
 
     fn entries(&self, ids: &[i64]) -> Result<Vec<Entry>> { self.dictionary.entries(ids) }
     fn dicts(&self) -> Result<Vec<DictInfo>> { self.dictionary.dicts() }
-    fn tagged_dicts(&self) -> Result<Vec<i64>> { self.dictionary.tagged_dicts() }
     fn pitch_for(&self, term: &str, reading: &str) -> Vec<PitchClaim> {
         self.dictionary.pitch_for(term, reading)
     }
