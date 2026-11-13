@@ -69,7 +69,7 @@ struct Candidate {
     match_len: usize,
     steps: usize,
     /// `true` for no tag or a terminal tag.
-    /// `false` for a tag that `dict_pos_for` does not know.
+    /// `false` for a tag `dict_pos_for` lacks.
     whole: bool,
     process: Vec<String>,
 }
@@ -96,10 +96,8 @@ fn kana_bonus(c: &Candidate) -> bool {
 /// can use two surfaces, つま and 妻. Both surfaces still map to one row.
 type GroupKey = (Option<String>, Option<String>, i64);
 
-/// This function defines a deterministic total order. It mirrors the sort order
-/// below through `steps`. The group keeps the representative that the order
-/// ranks first. The order has no `entry_id` term because the key already holds
-/// it. Every candidate in one group shares that value.
+/// Return `true` when `new` ranks above `existing`.
+/// Keys: `match_len`, `whole`, `steps`, `process`.
 fn is_better(new: &Candidate, existing: &Candidate) -> bool {
     fn rank(c: &Candidate) -> (usize, bool, Reverse<usize>, Reverse<&Vec<String>>) {
         (c.match_len, c.whole, Reverse(c.steps), Reverse(&c.process))
@@ -189,10 +187,15 @@ impl LookupEngine {
 
         let mut ranked: Vec<Candidate> = best.into_values().collect();
 
-        // A bare stem yields to a plain row of its span.
-        let plain: HashSet<usize> =
-            ranked.iter().filter(|c| c.steps == 0).map(|c| c.match_len).collect();
-        let yields = |c: &Candidate| bare_stem(c) && plain.contains(&c.match_len);
+        // A copula after the span lifts a plain row.
+        let stem_spans: HashSet<usize> =
+            ranked.iter().filter(|c| bare_stem(c)).map(|c| c.match_len).collect();
+        let copula_follows = |len: usize| {
+            matches!(chars[len..], ['で' | 'だ', ..] | ['じ', 'ゃ', ..])
+        };
+        let leads = |c: &Candidate| {
+            c.steps == 0 && copula_follows(c.match_len) && stem_spans.contains(&c.match_len)
+        };
         ranked.sort_by(|a, b| {
             let sa = score(a.match_len, a.row.freq, kana_bonus(a));
             let sb = score(b.match_len, b.row.freq, kana_bonus(b));
@@ -201,7 +204,7 @@ impl LookupEngine {
                 // For equal spans, a known word class wins.
                 // Rule count does not make a parse worse.
                 .then(b.whole.cmp(&a.whole))
-                .then(yields(a).cmp(&yields(b)))
+                .then(leads(b).cmp(&leads(a)))
                 .then(sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal))
                 // After all higher keys tie, use `steps` as a nudge, not as the main
                 // factor in the decision.
@@ -283,6 +286,8 @@ mod tests {
             hits[0].process,
             ["past", "(unstressed infinitive)", "passive/potential", "causative"]
         );
+        let hits = engine().run(&taberu_dict(), "食べないで").unwrap();
+        assert_eq!((hits[0].written.as_deref(), hits[0].match_len), (Some("食べる"), 5));
     }
 
     #[test]
@@ -364,16 +369,21 @@ mod tests {
     }
 
     #[test]
-    fn bare_stem_yields_to_plain_row() {
+    fn plain_row_leads_a_bare_stem_before_a_copula() {
         let mut d = FakeDictionary::new();
         d.add_term("好く", Some("好く"), Some("すく"), "v5", Some(100), 1, 1);
         d.add_entry(1, 1, &glossary("to like", "v5"));
         d.add_term("好き", Some("好き"), Some("すき"), "", Some(5000), 2, 1);
         d.add_entry(2, 1, &glossary("liking", ""));
-        let hits = engine().run(&d, "好きです").unwrap();
+        for text in ["好きです", "好きだ"] {
+            let hits = engine().run(&d, text).unwrap();
+            let shown: Vec<_> = hits.iter().map(|h| h.written.as_deref()).collect();
+            assert_eq!(shown.first(), Some(&Some("好き")), "{text}: got {shown:?}");
+            assert!(shown.contains(&Some("好く")), "{text}: got {shown:?}");
+        }
+        let hits = engine().run(&d, "好き").unwrap();
         let shown: Vec<_> = hits.iter().map(|h| h.written.as_deref()).collect();
-        assert_eq!(shown.first(), Some(&Some("好き")), "got {shown:?}");
-        assert!(shown.contains(&Some("好く")), "got {shown:?}");
+        assert_eq!(shown.first(), Some(&Some("好く")), "got {shown:?}");
 
         let hits = engine().run(&taberu_dict(), "食べ").unwrap();
         assert_eq!(hits[0].written.as_deref(), Some("食べる"), "got {hits:?}");
@@ -403,11 +413,6 @@ mod tests {
         assert!(hits[0].process.is_empty(), "got {:?}", hits[0].process);
         let hits = engine().run(&d, "ぺんです").unwrap();
         assert_eq!(hits[0].reading.as_deref(), Some("ぺん"));
-
-        d.add_term("食べる", Some("食べる"), Some("たべる"), "v1", Some(500), 4, 1);
-        d.add_entry(4, 1, &glossary("to eat", "v1"));
-        let hits = engine().run(&d, "食べないで").unwrap();
-        assert_eq!((hits[0].written.as_deref(), hits[0].match_len), (Some("食べる"), 5));
     }
 
     #[test]
@@ -456,6 +461,8 @@ mod tests {
         let hits = engine().run(&d, "勉強せず").unwrap();
         assert_eq!((hits[0].written.as_deref(), hits[0].match_len), (Some("勉強"), 4));
         assert!(hits[0].process.iter().any(|s| s == "suru negative"), "got {hits:?}");
+        let hits = engine().run(&d, "勉強せずに").unwrap();
+        assert_eq!((hits[0].written.as_deref(), hits[0].match_len), (Some("勉強"), 5));
 
         let mut e = FakeDictionary::new();
         e.add_term("勉強", Some("勉強"), Some("べんきょう"), "", Some(100), 1, 1);

@@ -695,6 +695,14 @@
   "con_tag": "uninflectable",
   "detail": "suru negative"
  },
+ {
+  "type": "stdrule",
+  "dec_end": "",
+  "con_end": "せずに",
+  "dec_tag": "vs-noun",
+  "con_tag": "uninflectable",
+  "detail": "suru negative"
+ },
  "special negative inflections where the intermediate stage (e.g. 赤くある) is not a valid synthetic phrase like the end result (e.g. 赤くありません) is",
  {
   "type": "stdrule",
