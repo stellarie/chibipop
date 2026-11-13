@@ -4,7 +4,7 @@ use crate::lookup::deconj::{Deconjugator, Form};
 use crate::lookup::model::{Dictionary, Entry, Hit, TermRow};
 use anyhow::Result;
 use std::cmp::Reverse;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 pub const MAX_LOOKUP_CHARS: usize = 25;
 pub const MAX_RESULTS: usize = 10;
@@ -35,8 +35,8 @@ fn is_kana(c: char) -> bool {
     matches!(c, '\u{3040}'..='\u{309F}' | '\u{30A0}'..='\u{30FF}')
 }
 
-/// This score ports weikipop's priority formula. It omits `steps` by design.
-/// See `Candidate::whole`.
+/// This score ports weikipop's priority formula.
+/// It omits `steps`. `run` ranks `steps` after it.
 fn score(match_len: usize, freq: Option<i64>, kana_bonus: bool) -> f64 {
     let f = freq.map(|v| v as f64).unwrap_or(DEFAULT_FREQ).max(1.0);
     let mut s = match_len as f64;
@@ -47,9 +47,8 @@ fn score(match_len: usize, freq: Option<i64>, kana_bonus: bool) -> f64 {
     s
 }
 
-/// Map a fine `dec_tag` to a coarse POS. A mapped tag is *terminal*.
-/// `run` skips `stem-` tags before this call.
-/// An unknown tag uses the fail-open arm.
+/// Map a `dec_tag` to a POS. Mapped means terminal.
+/// An unknown tag returns `None` (fail-open).
 fn dict_pos_for(dec_tag: &str) -> Option<Option<&'static str>> {
     match dec_tag {
         "v5aru" | "v5b" | "v5g" | "v5k" | "v5k-s" | "v5m" | "v5n" | "v5r"
@@ -106,6 +105,11 @@ fn is_better(new: &Candidate, existing: &Candidate) -> bool {
         (c.match_len, c.whole, Reverse(c.steps), Reverse(&c.process))
     }
     rank(new) > rank(existing)
+}
+
+/// Return `true` for a bare verb or adjective stem.
+fn bare_stem(c: &Candidate) -> bool {
+    matches!(c.process.as_slice(), [step] if step == "(infinitive)" || step == "(stem)")
 }
 
 pub struct LookupEngine {
@@ -185,6 +189,10 @@ impl LookupEngine {
 
         let mut ranked: Vec<Candidate> = best.into_values().collect();
 
+        // A bare stem yields to a plain row of its span.
+        let plain: HashSet<usize> =
+            ranked.iter().filter(|c| c.steps == 0).map(|c| c.match_len).collect();
+        let yields = |c: &Candidate| bare_stem(c) && plain.contains(&c.match_len);
         ranked.sort_by(|a, b| {
             let sa = score(a.match_len, a.row.freq, kana_bonus(a));
             let sb = score(b.match_len, b.row.freq, kana_bonus(b));
@@ -193,6 +201,7 @@ impl LookupEngine {
                 // For equal spans, a known word class wins.
                 // Rule count does not make a parse worse.
                 .then(b.whole.cmp(&a.whole))
+                .then(yields(a).cmp(&yields(b)))
                 .then(sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal))
                 // After all higher keys tie, use `steps` as a nudge, not as the main
                 // factor in the decision.
@@ -290,37 +299,26 @@ mod tests {
         );
     }
 
-    /// The previous test cannot expose a defect in rank order. With one term,
-    /// する wins by default. This test adds many candidates like a real
-    /// frequency-less library for してしまった.
-    ///
-    /// No row has a frequency. The nouns match the prefixes し and して.
-    /// The verb match uses the full input and the most rules.
+    /// A crowd of fail-open forms fills the window.
+    /// The whole verb of the same span still leads.
     #[test]
-    fn whole_parse_survives_a_crowd_of_stem_homographs() {
-        const SHI: &[&str] = &[
-            "梓", "仕", "刺", "市", "死", "誌", "巳", "四", "肆", "士", "子",
-            "師", "詩", "私",
-        ];
+    fn whole_parse_survives_a_crowd_of_fail_open_forms() {
         let mut d = FakeDictionary::new();
-        for (i, written) in SHI.iter().enumerate() {
-            let id = i as i64 + 1;
-            d.add_term("し", Some(written), Some("し"), "", None, id, 1);
-            d.add_entry(id, 1, &glossary("a noun read し", ""));
+        for id in 1..=14 {
+            let written = format!("勉強{id}");
+            d.add_term("勉強", Some(&written), Some("べんきょう"), "", Some(100), id, 1);
+            d.add_entry(id, 1, &glossary("a noun read べんきょう", ""));
         }
-        d.add_term("して", Some("仕手"), Some("して"), "", None, 90, 1);
-        d.add_entry(90, 1, &glossary("speculator", ""));
-        d.add_term("する", Some("為る"), Some("する"), "vs", None, 91, 1);
-        d.add_entry(91, 1, &glossary("to do", "vs"));
+        d.add_term("勉強する", Some("勉強する"), Some("べんきょうする"), "vs", None, 90, 1);
+        d.add_entry(90, 1, &glossary("to study", "vs"));
 
-        let hits = engine().run(&d, "してしまった").unwrap();
+        let hits = engine().run(&d, "勉強する").unwrap();
         let shown: Vec<Option<String>> = hits.iter().map(|h| h.written.clone()).collect();
-        // The extra candidates fill `MAX_RESULTS` and expose the rank order.
         assert_eq!(MAX_RESULTS, hits.len(), "expected a full window, got {shown:?}");
         assert_eq!(
-            Some(&Some("為る".to_string())),
+            Some(&Some("勉強する".to_string())),
             shown.first(),
-            "the verb してしまった is a form of must lead its own homographs, got {shown:?}"
+            "the whole verb must lead its fail-open noun forms, got {shown:?}"
         );
     }
 
@@ -366,6 +364,31 @@ mod tests {
     }
 
     #[test]
+    fn bare_stem_yields_to_plain_row() {
+        let mut d = FakeDictionary::new();
+        d.add_term("好く", Some("好く"), Some("すく"), "v5", Some(100), 1, 1);
+        d.add_entry(1, 1, &glossary("to like", "v5"));
+        d.add_term("好き", Some("好き"), Some("すき"), "", Some(5000), 2, 1);
+        d.add_entry(2, 1, &glossary("liking", ""));
+        let hits = engine().run(&d, "好きです").unwrap();
+        let shown: Vec<_> = hits.iter().map(|h| h.written.as_deref()).collect();
+        assert_eq!(shown.first(), Some(&Some("好き")), "got {shown:?}");
+        assert!(shown.contains(&Some("好く")), "got {shown:?}");
+
+        let hits = engine().run(&taberu_dict(), "食べ").unwrap();
+        assert_eq!(hits[0].written.as_deref(), Some("食べる"), "got {hits:?}");
+
+        let mut d = FakeDictionary::new();
+        d.add_term("休む", Some("休む"), Some("やすむ"), "v5", Some(100), 1, 1);
+        d.add_entry(1, 1, &glossary("to rest", "v5"));
+        d.add_term("休み", Some("休み"), Some("やすみ"), "", Some(5000), 2, 1);
+        d.add_entry(2, 1, &glossary("rest", ""));
+        let hits = engine().run(&d, "休みます").unwrap();
+        assert_eq!(hits[0].written.as_deref(), Some("休む"), "got {hits:?}");
+        assert_eq!(hits[0].match_len, 4);
+    }
+
+    #[test]
     fn stem_only_chain_makes_no_hit() {
         let mut d = FakeDictionary::new();
         d.add_term("日本人", Some("日本人"), Some("にほんじん"), "", Some(3965), 1, 1);
@@ -380,6 +403,11 @@ mod tests {
         assert!(hits[0].process.is_empty(), "got {:?}", hits[0].process);
         let hits = engine().run(&d, "ぺんです").unwrap();
         assert_eq!(hits[0].reading.as_deref(), Some("ぺん"));
+
+        d.add_term("食べる", Some("食べる"), Some("たべる"), "v1", Some(500), 4, 1);
+        d.add_entry(4, 1, &glossary("to eat", "v1"));
+        let hits = engine().run(&d, "食べないで").unwrap();
+        assert_eq!((hits[0].written.as_deref(), hits[0].match_len), (Some("食べる"), 5));
     }
 
     #[test]
@@ -419,5 +447,22 @@ mod tests {
         d.add_entry(9, 1, &glossary("surprise", ""));
         let hits = engine().run(&d, "びっくりして").unwrap();
         assert_eq!((hits[0].reading.as_deref(), hits[0].match_len), (Some("びっくり"), 6));
+
+        d.add_term("準備", Some("準備"), Some("じゅんび"), "", None, 10, 1);
+        d.add_entry(10, 1, &glossary("preparation", ""));
+        let hits = engine().run(&d, "準備させて").unwrap();
+        assert_eq!((hits[0].written.as_deref(), hits[0].match_len), (Some("準備"), 5));
+        assert!(hits[0].process.iter().any(|s| s == "suru causative"), "got {hits:?}");
+        let hits = engine().run(&d, "勉強せず").unwrap();
+        assert_eq!((hits[0].written.as_deref(), hits[0].match_len), (Some("勉強"), 4));
+        assert!(hits[0].process.iter().any(|s| s == "suru negative"), "got {hits:?}");
+
+        let mut e = FakeDictionary::new();
+        e.add_term("勉強", Some("勉強"), Some("べんきょう"), "", Some(100), 1, 1);
+        e.add_entry(1, 1, &glossary("study", ""));
+        e.add_term("勉強する", Some("勉強する"), Some("べんきょうする"), "vs", Some(9000), 2, 1);
+        e.add_entry(2, 1, &glossary("to study", "vs"));
+        let hits = engine().run(&e, "勉強する").unwrap();
+        assert_eq!(hits[0].written.as_deref(), Some("勉強する"), "got {hits:?}");
     }
 }
