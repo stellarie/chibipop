@@ -692,6 +692,7 @@ enum Message {
     ShowAttributions(bool),
     ShowImages(bool),
     ShowPartOfSpeech(bool),
+    ShowInflections(bool),
     /// A row press in one of the three lists. The role identifies the list that
     /// received it. A mixed archive can appear in two lists, so the name alone
     /// cannot identify the list.
@@ -852,6 +853,7 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
         Message::ShowAttributions(on) => app.form.cfg.popup.show_attributions = on,
         Message::ShowImages(on) => app.form.cfg.popup.show_images = on,
         Message::ShowPartOfSpeech(on) => app.form.cfg.popup.show_part_of_speech = on,
+        Message::ShowInflections(on) => app.form.cfg.popup.show_inflections = on,
         Message::DictSelected(role, name) => press_row(app, role, name),
         Message::DictHover(role, at, point) => {
             app.hover = Some(Hover { role, y: list_y(at, point.y) });
@@ -1813,6 +1815,9 @@ fn popup_page(app: &App) -> Element<'_, Message> {
             checkbox(app.form.cfg.popup.show_part_of_speech)
                 .label("Show word types")
                 .on_toggle(Message::ShowPartOfSpeech),
+            checkbox(app.form.cfg.popup.show_inflections)
+                .label("Show inflection chain")
+                .on_toggle(Message::ShowInflections),
         ].spacing(10)),
         card("Screen capture", capture),
     ]

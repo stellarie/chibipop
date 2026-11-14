@@ -236,6 +236,9 @@ pub struct PopupConfig {
     /// Inline labels repeat them.
     /// `gloss::RoleFilter::CARD` drops them for the same reason.
     pub show_part_of_speech: bool,
+    /// Shows the Inflection chain row on each Card.
+    /// Off draws no row and leaves no gap.
+    pub show_inflections: bool,
     /// Off keeps the popup after a cursor miss.
     /// An outside click then hides it.
     pub hide_on_cursor_exit: bool,
@@ -262,6 +265,7 @@ impl Default for PopupConfig {
             show_attributions: true,
             show_images: true,
             show_part_of_speech: false,
+            show_inflections: true,
             hide_on_cursor_exit: true,
         }
     }
@@ -365,7 +369,7 @@ impl PopupConfig {
     ///
     /// The method has the same shape as [`Config::present_config`] for the same reason.
     /// One resolved record gives each bin one complete state.
-    /// The method gives `ui::layout::build_elements` one place to read the six settings.
+    /// The method gives `ui::layout::build_elements` one place to read the seven settings.
     ///
     /// This filter differs from the Anki card filter.
     /// The card renderer uses `RoleFilter::CARD`, and no setting reaches it.
@@ -376,6 +380,7 @@ impl PopupConfig {
             stack_items: self.layout_mode == LayoutMode::Roomy,
             styling: self.dictionary_styling,
             images: self.show_images,
+            inflections: self.show_inflections,
             roles: crate::dict::gloss::RoleFilter {
                 examples: self.show_examples,
                 attributions: self.show_attributions,

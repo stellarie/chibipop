@@ -75,7 +75,13 @@ const SWEEP_ROLES: RoleFilter =
 /// `stack_items`, `styling`, and `images` stay enabled so the renderer handles the
 /// dictionary markup. A setting that omits markup could hide a defect.
 fn sweep_settings() -> RenderSettings {
-    RenderSettings { stack_items: true, styling: true, images: true, roles: SWEEP_ROLES }
+    RenderSettings {
+        stack_items: true,
+        styling: true,
+        images: true,
+        inflections: true,
+        roles: SWEEP_ROLES,
+    }
 }
 
 /// Which render invariant a violation broke.

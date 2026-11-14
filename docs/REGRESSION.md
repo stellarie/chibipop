@@ -38,8 +38,8 @@ Raise a ceiling only in a reviewed pull request.
 
 ## Recent feature case index
 
-Cases 1.31-1.43 cover Search, hover, clipboard, furigana, sentence-field,
-audit-isolation, cache invalidation, and profile catalog behavior.
+Cases 1.31-1.44 cover Search, hover, clipboard, furigana, sentence-field,
+audit-isolation, cache invalidation, profile catalog, and Inflection chain setting behavior.
 Cases 1.30.11-1.30.16 and 1.30.18 cover screenshot modes, saved targets, and picture format.
 Existing settings, plugin, and live-log cases retain their identifiers.
 Record the exact feature-bearing revision.
@@ -847,7 +847,7 @@ including thin glyphs. A highlight that merely looks plausible is the failure th
 Hovering 風邪 must box **all six** characters of 風邪をひいて for the entry 風邪をひく — the
 highlight follows the *match*, not the headword.
 
-The Card shows `(te form)` under 風邪をひく.
+With **Show inflection chain** on, the Card shows `(te form)` under 風邪をひく.
 
 ### 1.4 Draw it and look
 
@@ -2285,6 +2285,19 @@ Use configured hotkeys or `chibipop ctl` on Linux.
 
 **Evidence and cleanup.** Record the profile IDs, Bind IDs, config path,
 screenshots, logs, and tested revision. Restore only disposable changes.
+
+---
+
+<a id="case-1-44"></a>
+### 1.44 Inflection chain setting
+
+Run these cases on each platform.
+
+| ID | Case | Steps and expected result |
+|---|---|---|
+| 1.44 | Hide the Inflection chain row | Open **Settings > Popup > Result content**. Clear **Show inflection chain** and click Apply. Hover 風邪をひいて. The Card must show no `(te form)` row and no empty line under the reading. |
+| 1.44.1 | Show the row again | Select **Show inflection chain** and click Apply. Hover 風邪をひいて. The Card must show `(te form)` under 風邪をひく. No restart is necessary. |
+| 1.44.2 | Search definition popup | Clear the checkbox, click Apply, and open a conjugated word in a Search definition popup. The popup must show no Inflection chain row. |
 
 ---
 

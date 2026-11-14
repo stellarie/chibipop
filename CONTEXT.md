@@ -229,7 +229,7 @@ _Avoid_: accent (overloaded), pitch accent data, downstep (that's one field of i
 The conjugation and auxiliary steps between a headword and the hovered text, in build
 order from the headword outward. The Card shows the chain in one dimmed row under the
 reading and above the part-of-speech row. The labels are the `detail` strings of
-`data/deconjugator.json`, verbatim.
+`data/deconjugator.json`, verbatim. The setting `popup.show_inflections` hides the row.
 _Avoid_: process (code only), deconjugation steps, reasons
 
 ### Actions

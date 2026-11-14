@@ -454,10 +454,11 @@ Worker: capture -> mask -> OCR -> lookup -> present --result--> Controller
   bare te-form still explains its match.
 - The Card shows the Inflection chain in one dimmed row after the pitch rows and before
   the part-of-speech row. The separator is ` « ` (U+00AB). An empty chain draws no row,
-  so no geometry golden changes.
-- The design rejects an outermost-first display (weikipop's order), a relabel table in
-  code (the labels come from embedded rules compiled from `data/deconjugator.json`),
-  and a setting that hides the row.
+  so no geometry golden changes. `RenderSettings::inflections` carries
+  `popup.show_inflections` (default on). When it is off, no popup draws the row. The
+  Search definition popup uses the same setting.
+- The design rejects an outermost-first display (weikipop's order) and a relabel table in
+  code (the labels come from embedded rules compiled from `data/deconjugator.json`).
 
 ## Verification
 

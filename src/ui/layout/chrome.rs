@@ -5,7 +5,8 @@
 //!
 //! [`build_elements`] is the only function that reads render settings.
 //! This keeps [`RenderSettings`] as a decision table instead of a cascade.
-//! [`build_elements`] resolves four facts into the two values used by the gloss walk.
+//! [`build_elements`] reads five facts. It resolves four into the two values used by
+//! the gloss walk. It reads `inflections` directly for the chain row.
 //! Code after that point does not read a setting.
 //!
 //! Every element here belongs to the panel, not to a Dictionary.
@@ -78,7 +79,7 @@ pub(super) const SIDE_GAP: f32 = 12.0;
 /// Yomitan lets a user set a fixed group of root attributes.
 /// Those attributes drive fixed CSS rules.
 /// This struct mirrors that design.
-/// `PopupConfig::render_settings` resolves six `popup` settings into four facts.
+/// `PopupConfig::render_settings` resolves seven `popup` settings into five facts.
 /// The gloss walk uses those facts.
 /// The enum-to-flag table stays in that function.
 /// The gloss walk does not see a `PopupConfig` value.
@@ -115,6 +116,10 @@ pub struct RenderSettings {
     /// An image node usually represents a character, not an illustration.
     /// Removing the whole node would leave a hole in a word.
     pub images: bool,
+    /// Does each Card draw its Inflection chain row?
+    ///
+    /// Off draws no row, so no gap remains.
+    pub inflections: bool,
     /// Which editorial roles reach the panel?
     ///
     /// This field reuses the card renderer's `RoleFilter` type.
@@ -131,6 +136,7 @@ impl Default for RenderSettings {
     /// - A stacked list.
     /// - The Dictionary's style.
     /// - The Dictionary's images.
+    /// - The Inflection chain row.
     /// - The Dictionary's editorial matter except part-of-speech labels.
     ///   The card already prints those labels above the glosses.
     ///
@@ -142,6 +148,7 @@ impl Default for RenderSettings {
             stack_items: true,
             styling: true,
             images: true,
+            inflections: true,
             roles: RoleFilter::CARD,
         }
     }
@@ -546,9 +553,10 @@ pub(super) struct SideEntry {
 /// Content of `p` in draw order.
 ///
 /// **This is the only place that reads the render settings.**
-/// [`RenderSettings`] supplies four facts here.
-/// This function resolves them into two values for the gloss walk:
+/// [`RenderSettings`] supplies five facts here.
+/// This function resolves four of them into two values for the gloss walk:
 /// the list layout and a [`Render`] record.
+/// It reads `inflections` directly for the chain row.
 /// Code after this point does not read a setting again.
 /// This design uses a decision table, not a cascade of style rules.
 /// Yomitan drives the same small set of root attributes into fixed CSS rules.
@@ -639,7 +647,7 @@ pub(super) fn build_elements(
         // It explains the match before the reader sees the entry.
         // An empty chain draws no row because an unconjugated headword has nothing
         // to explain. Every geometry golden carries no chain, so this row moves none.
-        if !card.inflections.is_empty() {
+        if render.inflections && !card.inflections.is_empty() {
             out.push(Elem::Text(Line {
                 text: card.inflections.join(INFLECTION_SEPARATOR),
                 color: theme.dimmed_text,

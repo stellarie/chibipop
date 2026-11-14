@@ -1306,6 +1306,25 @@ fn pitch_elems(s: &PopupScene) -> Vec<&SceneElem> {
     s.elems.iter().filter(|e| e.kind == ElemKind::Pitch).collect()
 }
 
+/// The setting shows or hides the chain row.
+/// Off equals the scene of a card with no chain.
+#[test]
+fn the_inflection_chain_row_follows_its_setting_and_leaves_no_gap() {
+    let mut p = card_with_pitch("ざつだん", vec![]);
+    let plain = shown(&p, RenderSettings::default());
+    for card in p.top.iter_mut().chain(p.all_cards.iter_mut()) {
+        card.inflections = vec!["past".to_string(), "te form".to_string()];
+    }
+    let row = format!("past{INFLECTION_SEPARATOR}te form");
+
+    let on = shown(&p, RenderSettings::default());
+    assert!(texts(&on).contains(&row.as_str()), "{:?}", texts(&on));
+
+    let off = shown(&p, without(|r| r.inflections = false));
+    assert!(!texts(&off).contains(&row.as_str()), "{:?}", texts(&off));
+    assert_eq!(plain, off);
+}
+
 /// Return the advance that `FakeMeasure` gives one reading kana.
 const READING_UNIT: f32 = 15.0 * ADVANCE;
 

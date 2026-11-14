@@ -138,6 +138,12 @@ label = "Show word types"
 help = "Shows labels such as noun, verb, and adjective."
 advanced = true
 
+[[tabs.sections.entries]]
+id = "popup-inflections"
+label = "Show inflection chain"
+help = "Shows the conjugation steps of the matched word, such as past or te form."
+advanced = true
+
 [[tabs]]
 id = "general"
 label = "General"

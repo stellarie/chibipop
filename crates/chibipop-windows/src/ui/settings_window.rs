@@ -216,6 +216,8 @@ const ID_SHOW_ATTRIBUTIONS: i32 = 166;
 const ID_SHOW_IMAGES: i32 = 167;
 /// The Show part of speech checkbox.
 const ID_SHOW_POS: i32 = 168;
+/// The Show inflection chain checkbox.
+const ID_SHOW_INFLECTIONS: i32 = 190;
 /// The Move up button for the Frequency list.
 const ID_FREQ_UP: i32 = 169;
 /// The Move down button for the Frequency list.
@@ -3334,6 +3336,7 @@ fn profile_override_paths(id: SettingId) -> &'static [&'static str] {
         SettingId::PopupAttributions => &["popup.show_attributions"],
         SettingId::PopupImages => &["popup.show_images"],
         SettingId::PopupPartOfSpeech => &["popup.show_part_of_speech"],
+        SettingId::PopupInflections => &["popup.show_inflections"],
         SettingId::OcrPasses => &["ocr.max_ocr_passes"],
         SettingId::OcrPreferVertical => &["ocr.prefer_vertical"],
         SettingId::OcrCaptureSize => &["ocr.capture_width", "ocr.capture_height"],
@@ -6545,6 +6548,9 @@ impl SettingsWindow {
             SettingId::PopupPartOfSpeech => {
                 checkbox!(ID_SHOW_POS, form.cfg.popup.show_part_of_speech);
             }
+            SettingId::PopupInflections => {
+                checkbox!(ID_SHOW_INFLECTIONS, form.cfg.popup.show_inflections);
+            }
             SettingId::DictionaryTerms
             | SettingId::DictionaryFrequency
             | SettingId::DictionaryPitch => {
@@ -7540,6 +7546,7 @@ impl SettingsWindow {
             form.cfg.popup.show_attributions = checked(ID_SHOW_ATTRIBUTIONS);
             form.cfg.popup.show_images = checked(ID_SHOW_IMAGES);
             form.cfg.popup.show_part_of_speech = checked(ID_SHOW_POS);
+            form.cfg.popup.show_inflections = checked(ID_SHOW_INFLECTIONS);
             form.cfg.popup.exclude_from_capture = checked(ID_EXCLUDE);
             form.terms = terms;
             form.frequency = frequency;
@@ -7974,6 +7981,7 @@ mod tests {
         form.cfg.popup.show_attributions = false;
         form.cfg.popup.show_images = false;
         form.cfg.popup.show_part_of_speech = true;
+        form.cfg.popup.show_inflections = false;
         form.cfg.dictionaries.ranking_strategy = RankingStrategy::Median;
         form.cfg.ocr.max_ocr_passes = 2;
         form.cfg.ocr.prefer_vertical = true;
