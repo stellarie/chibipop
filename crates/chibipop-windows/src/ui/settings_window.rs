@@ -127,6 +127,8 @@ impl ApplyState {
 
 const ID_APPLY: i32 = 100;
 const ID_MODE_LIVE: i32 = 102;
+/// The Lookup key button.
+const ID_LOOKUP_KEY: i32 = 195;
 const ID_THEME: i32 = 104;
 const ID_FONT: i32 = 105;
 const ID_MAX_HEIGHT: i32 = 106;
@@ -605,6 +607,9 @@ const WHILE_BUSY: [i32; 27] = [
     ID_SHOW_ADVANCED,
 ];
 
+/// The Lookup mode items. Index 0 is live lookup.
+const LOOKUP_MODES: [&str; 3] = ["Follow pointer", "While held", "Turn on / off"];
+
 fn anki_setting_is_dependent(id: SettingId) -> bool {
     matches!(
         id,
@@ -795,7 +800,7 @@ enum Action {
     Add,
     /// The handler removes the item from all lists, regardless of its section.
     Remove(Role),
-    AddBind,
+    AddBind(TriggerMode),
     RemoveBind(usize),
     ConfigureEngine,
     ResetScreenshotTargets,
@@ -1222,7 +1227,7 @@ fn user_edit_command(id: i32, notify: u16) -> bool {
         ID_APPLY | ID_QUIT | ID_CHECK_UPDATE | ID_ANKI_TEST | ID_CSS_EDITOR
             | ID_SHOW_ADVANCED | ID_ENGINE_CONFIGURE | ID_FIELD_MAP_TOGGLE | ID_SHOW_LIVE_LOGS
             | ID_CLEAR_LOOKUP_CACHE | ID_STATUS | ID_APPLY_STATE | ID_RUNTIME_STATUS
-            | ID_OPEN_DICTIONARY_SEARCH | ID_OPEN_SENTENCE_SEARCH
+            | ID_OPEN_DICTIONARY_SEARCH | ID_OPEN_SENTENCE_SEARCH | ID_LOOKUP_KEY
     ) && matches!(
         notify as u32,
         BN_CLICKED | CBN_SELCHANGE | CBN_EDITCHANGE | EN_CHANGE
@@ -1457,6 +1462,7 @@ unsafe fn begin_capture(hwnd: HWND, id: i32) {
             w!("Press a key\u{2026}")
         };
         let _ = SetWindowTextW(button, prompt);
+        sync_lookup_summary(hwnd);
     }
 }
 
@@ -1480,6 +1486,7 @@ unsafe fn cancel_capture(hwnd: HWND) {
         if let Ok(btn) = dlg_item(hwnd, id) {
             let _ = SetWindowTextW(btn, PCWSTR(wide(&text).as_ptr()));
         }
+        sync_lookup_summary(hwnd);
     }
 }
 
@@ -1533,13 +1540,23 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             }
             if let Some((row, offset)) = bind_row_control(id) {
                 if offset == ID_BIND_ACTION_OFFSET && notify == CBN_SELCHANGE as u16 {
-                    unsafe { update_bind_row_controls(hwnd, row) };
+                    unsafe {
+                        update_bind_row_controls(hwnd, row);
+                        sync_lookup_summary(hwnd);
+                    }
                     record_user_edit(hwnd);
                     return LRESULT(0);
                 }
                 if offset == ID_BIND_ENABLED_OFFSET && notify == BN_CLICKED as u16 {
-                    unsafe { update_bind_row_controls(hwnd, row) };
+                    unsafe {
+                        update_bind_row_controls(hwnd, row);
+                        sync_lookup_summary(hwnd);
+                    }
                     record_user_edit(hwnd);
+                    return LRESULT(0);
+                }
+                if offset == ID_BIND_MODE_OFFSET && notify == CBN_SELCHANGE as u16 {
+                    unsafe { sync_lookup_summary(hwnd) };
                     return LRESULT(0);
                 }
                 if offset == ID_BIND_CHORD_OFFSET && notify == BN_CLICKED as u16 {
@@ -1552,7 +1569,13 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 }
             }
             if id == ID_BIND_ADD && notify == BN_CLICKED as u16 {
-                record_action(hwnd, Action::AddBind);
+                record_action(hwnd, Action::AddBind(TriggerMode::HoldKey));
+                return LRESULT(0);
+            }
+            if id == ID_LOOKUP_KEY && notify == BN_CLICKED as u16 {
+                if let Some(row) = unsafe { first_lookup_row(hwnd) } {
+                    unsafe { begin_capture(hwnd, bind_control_id(row, ID_BIND_CHORD_OFFSET)) };
+                }
                 return LRESULT(0);
             }
             if id == ID_OCR_LANG && notify == CBN_SELCHANGE as u16 {
@@ -1594,11 +1617,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 ID_CLEAR_LOOKUP_CACHE => record_click(hwnd, SettingsClick::ClearLookupCache),
                 ID_SCREENSHOT_RESET => record_action(hwnd, Action::ResetScreenshotTargets),
                 ID_FIELD_MAP_TOGGLE => record_field_map_toggle(hwnd),
-                ID_MODE_LIVE if notify == BN_CLICKED as u16 => unsafe {
-                    if let Ok(control) = dlg_item(hwnd, ID_PER_CHAR) {
-                        let live = checkbox_is_checked(hwnd, ID_MODE_LIVE);
-                        let _ = EnableWindow(control, live);
-                    }
+                ID_MODE_LIVE if notify == CBN_SELCHANGE as u16 => unsafe {
+                    lookup_mode_changed(hwnd);
                 },
                 ID_OPEN_DICTIONARY_SEARCH | ID_OPEN_SENTENCE_SEARCH => {
                     let mode = if id == ID_OPEN_DICTIONARY_SEARCH {
@@ -3307,6 +3327,90 @@ unsafe fn update_bind_row_controls(hwnd: HWND, row: usize) {
     }
 }
 
+/// Row of the first lookup bind, if any.
+unsafe fn first_lookup_row(hwnd: HWND) -> Option<usize> {
+    // SAFETY: Each lookup is checked, and rows are contiguous.
+    unsafe {
+        (0..MAX_BIND_ROWS)
+            .map_while(|row| {
+                dlg_item(hwnd, bind_control_id(row, ID_BIND_ACTION_OFFSET))
+                    .ok()
+                    .map(|combo| (row, combo))
+            })
+            .find(|&(_, combo)| {
+                bind_action_at(SendMessageW(combo, CB_GETCURSEL, None, None).0)
+                    == BindAction::Lookup
+            })
+            .map(|(row, _)| row)
+    }
+}
+
+/// Mirrors the first lookup row.
+unsafe fn sync_lookup_summary(hwnd: HWND) {
+    // SAFETY: Each control belongs to `hwnd` and is checked.
+    unsafe {
+        let (Ok(selector), Ok(key)) =
+            (dlg_item(hwnd, ID_MODE_LIVE), dlg_item(hwnd, ID_LOOKUP_KEY))
+        else {
+            return;
+        };
+        let row = first_lookup_row(hwnd);
+        let live = SendMessageW(selector, CB_GETCURSEL, None, None).0 == 0;
+        let on = row.is_some_and(|row| {
+            checkbox_is_checked(hwnd, bind_control_id(row, ID_BIND_ENABLED_OFFSET))
+        });
+        let toggle = row.is_some_and(|row| {
+            dlg_item(hwnd, bind_control_id(row, ID_BIND_MODE_OFFSET)).is_ok_and(|combo| {
+                bind_mode_at(SendMessageW(combo, CB_GETCURSEL, None, None).0)
+                    == TriggerMode::Toggle
+            })
+        });
+        let index: isize = match (live, on, toggle) {
+            (true, _, _) => 0,
+            (false, false, _) => -1,
+            (false, true, false) => 1,
+            (false, true, true) => 2,
+        };
+        SendMessageW(selector, CB_SETCURSEL, Some(WPARAM(index as usize)), None);
+        let label = row
+            .and_then(|row| dlg_item(hwnd, bind_control_id(row, ID_BIND_CHORD_OFFSET)).ok())
+            .map_or_else(|| bind_chord_label(""), |chord| window_text(chord));
+        if window_text(key) != label {
+            let _ = SetWindowTextW(key, PCWSTR(wide(&label).as_ptr()));
+        }
+        let _ = EnableWindow(key, index > 0);
+    }
+}
+
+/// Applies the selected lookup mode.
+unsafe fn lookup_mode_changed(hwnd: HWND) {
+    // SAFETY: Each control belongs to `hwnd` and is checked.
+    unsafe {
+        let Ok(selector) = dlg_item(hwnd, ID_MODE_LIVE) else { return };
+        let index = SendMessageW(selector, CB_GETCURSEL, None, None).0;
+        if let Ok(per_char) = dlg_item(hwnd, ID_PER_CHAR) {
+            let _ = EnableWindow(per_char, index == 0);
+        }
+        let Some(row) = first_lookup_row(hwnd) else {
+            if index > 0 {
+                let mode = if index == 2 { TriggerMode::Toggle } else { TriggerMode::HoldKey };
+                record_action(hwnd, Action::AddBind(mode));
+            }
+            return;
+        };
+        if let Ok(check) = dlg_item(hwnd, bind_control_id(row, ID_BIND_ENABLED_OFFSET)) {
+            SendMessageW(check, BM_SETCHECK, Some(WPARAM(usize::from(index > 0))), None);
+        }
+        if index > 0 {
+            if let Ok(mode) = dlg_item(hwnd, bind_control_id(row, ID_BIND_MODE_OFFSET)) {
+                SendMessageW(mode, CB_SETCURSEL, Some(WPARAM(usize::from(index == 2))), None);
+            }
+        }
+        update_bind_row_controls(hwnd, row);
+        sync_lookup_summary(hwnd);
+    }
+}
+
 /// Index 0 is "No profile". Profile `n` sits at index `n + 1`.
 fn bind_profile_at(index: isize, profiles: &[String]) -> Option<String> {
     let index = usize::try_from(index).ok()?;
@@ -4749,9 +4853,11 @@ impl SettingsWindow {
         let snapshot = self.form_snapshot.borrow().clone();
         let mut form = self.read(&snapshot);
         match action {
-            Action::AddBind => {
+            Action::AddBind(mode) => {
                 let id = form.catalog.next_bind_id();
-                form.catalog.binds.push(Bind::new(id, BindAction::Lookup));
+                let mut bind = Bind::new(id, BindAction::Lookup);
+                bind.mode = mode;
+                form.catalog.binds.push(bind);
             }
             Action::RemoveBind(row) => {
                 if row >= form.catalog.binds.len() {
@@ -4844,7 +4950,7 @@ impl SettingsWindow {
                     self.configure_engine();
                 }
                 Action::ResetScreenshotTargets => self.reset_screenshot_targets(),
-                Action::AddBind | Action::RemoveBind(_) => {
+                Action::AddBind(_) | Action::RemoveBind(_) => {
                     self.handle_bind_catalog_action(action)
                 }
             }
@@ -5829,6 +5935,7 @@ impl SettingsWindow {
                 let label = bind_chord_label(&key);
                 let _ = SetWindowTextW(button, PCWSTR(wide(&label).as_ptr()));
             }
+            sync_lookup_summary(self.hwnd);
         }
         record_user_edit(self.hwnd);
     }
@@ -6393,7 +6500,25 @@ impl SettingsWindow {
 
         match spec.id {
             SettingId::LookupMode => {
-                checkbox!(ID_MODE_LIVE, form.catalog.live_lookup);
+                let combo = labelled_row!(w!("COMBOBOX"), "",
+                    WINDOW_STYLE(CBS_DROPDOWNLIST as u32) | WS_TABSTOP | WS_VSCROLL,
+                    ID_MODE_LIVE, 220);
+                for name in LOOKUP_MODES {
+                    SendMessageW(combo, CB_ADDSTRING, None,
+                        Some(LPARAM(wide(name).as_ptr() as isize)));
+                }
+                if form.catalog.live_lookup {
+                    SendMessageW(combo, CB_SETCURSEL, Some(WPARAM(0)), None);
+                }
+                help!();
+            }
+            SettingId::LookupKey => {
+                let chord = form.catalog.binds.iter()
+                    .find(|bind| bind.action == BindAction::Lookup)
+                    .map_or("", |bind| bind.windows.as_str());
+                labelled_row!(w!("BUTTON"), &bind_chord_label(chord), WS_TABSTOP,
+                    ID_LOOKUP_KEY, ROW_H);
+                help!();
             }
             SettingId::ConfiguredBinds => {
                 (self.bind_count, bind_tips) = build_configured_binds(
@@ -7236,6 +7361,8 @@ impl SettingsWindow {
             self.place_viewport();
             update_list_buttons(h);
         }
+        // SAFETY: The mode and bind controls are live children.
+        unsafe { sync_lookup_summary(h) };
         self.switch_tab(0);
         Ok(self.bottom_y0 + BOTTOM_H)
     }
@@ -7482,7 +7609,7 @@ impl SettingsWindow {
             };
 
             let bind_sources = std::mem::take(&mut form.catalog.binds);
-            let live_lookup = checked(ID_MODE_LIVE);
+            let live_lookup = combo_index(ID_MODE_LIVE) == 0;
             form.catalog.live_lookup = live_lookup;
             form.cfg.trigger.mode = if live_lookup {
                 TriggerMode::Live
@@ -8119,23 +8246,107 @@ mod tests {
     }
 
     #[test]
-    fn follow_pointer_checkbox_reads_and_writes_catalog_state() {
+    fn lookup_mode_selector_reads_and_writes_catalog_state() {
+        let form = crate::settings::from_config(&crate::config::Config::default(), &[]);
+        let window = SettingsWindow::open(&form, &[], ApplyMode::Standalone).unwrap();
+        let selected = |window: &SettingsWindow| -> isize {
+            // SAFETY: The dialog owns the selector.
+            unsafe {
+                SendMessageW(dlg_item(window.hwnd, ID_MODE_LIVE).unwrap(), CB_GETCURSEL, None, None).0
+            }
+        };
+        let enabled = |window: &SettingsWindow, id: i32| -> bool {
+            // SAFETY: The dialog owns the control.
+            unsafe {
+                windows::Win32::UI::Input::KeyboardAndMouse::IsWindowEnabled(
+                    dlg_item(window.hwnd, id).unwrap(),
+                )
+                .as_bool()
+            }
+        };
+        // SAFETY: The dialog owns the selector.
+        unsafe {
+            let control = dlg_item(window.hwnd, ID_MODE_LIVE).unwrap();
+            assert_eq!(3, SendMessageW(control, CB_GETCOUNT, None, None).0);
+        }
+
+        assert_eq!(0, selected(&window));
+        assert!(!enabled(&window, ID_LOOKUP_KEY));
+        assert!(enabled(&window, ID_PER_CHAR));
+        let read = window.read(&form);
+        assert!(read.catalog.live_lookup);
+        assert_eq!(TriggerMode::Live, read.cfg.trigger.mode);
+
+        select_combo_row(&window, ID_MODE_LIVE, 1);
+        let read = window.read(&form);
+        assert!(!read.catalog.live_lookup);
+        assert_eq!(TriggerMode::Press, read.cfg.trigger.mode);
+        assert!(read.catalog.binds[0].enabled);
+        assert_eq!(TriggerMode::HoldKey, read.catalog.binds[0].mode);
+        assert_eq!(1, selected(&window));
+        assert!(enabled(&window, ID_LOOKUP_KEY));
+        assert!(!enabled(&window, ID_PER_CHAR));
+
+        select_combo_row(&window, ID_MODE_LIVE, 2);
+        let read = window.read(&form);
+        assert!(!read.catalog.live_lookup);
+        assert!(read.catalog.binds[0].enabled);
+        assert_eq!(TriggerMode::Toggle, read.catalog.binds[0].mode);
+
+        select_combo_row(&window, ID_MODE_LIVE, 0);
+        let read = window.read(&form);
+        assert!(read.catalog.live_lookup);
+        assert_eq!(TriggerMode::Live, read.cfg.trigger.mode);
+        assert!(!read.catalog.binds[0].enabled);
+        assert!(!enabled(&window, ID_LOOKUP_KEY));
+        assert!(enabled(&window, ID_PER_CHAR));
+
         let mut config = crate::config::Config::default();
         config.live_lookup = false;
         let form = crate::settings::from_config(&config, &[]);
         let window = SettingsWindow::open(&form, &[], ApplyMode::Standalone).unwrap();
-        // SAFETY: The dialog owns the follow-pointer checkbox.
-        unsafe {
-            let control = dlg_item(window.hwnd, ID_MODE_LIVE).unwrap();
-            let style = GetWindowLongW(control, GWL_STYLE) as u32;
-            assert_ne!(0, style & BS_AUTOCHECKBOX as u32);
-            assert_eq!(0, SendMessageW(control, BM_GETCHECK, None, None).0);
-            SendMessageW(control, BM_SETCHECK, Some(WPARAM(1)), None);
-        }
-        send_button_click(&window, ID_MODE_LIVE);
-        let edited = window.read(&form);
-        assert!(edited.catalog.live_lookup);
-        assert_eq!(TriggerMode::Live, edited.cfg.trigger.mode);
+        assert_eq!(-1, selected(&window));
+        assert!(!enabled(&window, ID_LOOKUP_KEY));
+        let read = window.read(&form);
+        assert!(!read.catalog.live_lookup);
+        assert_eq!(TriggerMode::Press, read.cfg.trigger.mode);
+    }
+
+    #[test]
+    fn sc3_lookup_key_mirrors_the_first_lookup_bind() {
+        let mut config = crate::config::Config::default();
+        config.live_lookup = false;
+        config.binds[0].enabled = true;
+        config.binds[0].windows = "ctrl+f6".into();
+        let form = crate::settings::from_config(&config, &[]);
+        let window = SettingsWindow::open(&form, &[], ApplyMode::Standalone).unwrap();
+        let chord = bind_control_id(0, ID_BIND_CHORD_OFFSET);
+        let mode = bind_control_id(0, ID_BIND_MODE_OFFSET);
+        let text = |id: i32| -> String {
+            // SAFETY: The dialog owns the control.
+            unsafe { window_text(dlg_item(window.hwnd, id).unwrap()) }
+        };
+        let selected = || -> isize {
+            // SAFETY: The dialog owns the selector.
+            unsafe {
+                SendMessageW(dlg_item(window.hwnd, ID_MODE_LIVE).unwrap(), CB_GETCURSEL, None, None).0
+            }
+        };
+        assert_eq!(1, selected());
+        assert_eq!("Ctrl+F6", text(ID_LOOKUP_KEY));
+        assert_eq!(text(chord), text(ID_LOOKUP_KEY));
+
+        send_button_click(&window, ID_LOOKUP_KEY);
+        assert_eq!("Press keys\u{2026}", text(chord));
+        assert_eq!(text(chord), text(ID_LOOKUP_KEY));
+        assert!(window.handle_capture_key(0x76));
+        assert_eq!("F7", text(chord));
+        assert_eq!("F7", text(ID_LOOKUP_KEY));
+        assert_eq!("F7", window.read(&form).catalog.binds[0].windows);
+
+        select_combo_row(&window, mode, 1);
+        assert_eq!(2, selected());
+        assert_eq!(TriggerMode::Toggle, window.read(&form).catalog.binds[0].mode);
     }
 
     fn outer_rect(window: &SettingsWindow) -> RECT {

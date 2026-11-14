@@ -163,8 +163,13 @@ label = "Lookup behavior"
 
 [[tabs.sections.entries]]
 id = "lookup-mode"
-label = "Follow pointer"
-help = "Runs lookups as the pointer moves. Clear this option to use configured lookup binds."
+label = "Lookup mode"
+help = "Follow pointer: the popup follows the pointer, with no key. While held: the popup follows the pointer while the key is down. Turn on / off: one press turns lookups on, and the next press turns them off."
+
+[[tabs.sections.entries]]
+id = "lookup-key"
+label = "Lookup key"
+help = "Used by While held and Turn on / off."
 
 [[tabs.sections]]
 id = "shortcut-actions"

@@ -9,8 +9,9 @@ use std::collections::HashSet;
 const LAYOUT_VERSION: u32 = 1;
 const EMBEDDED_LAYOUT: &str = include_str!("../../assets/settings-layout.toml");
 
-pub(super) const SETTING_INVENTORY: [SettingId; 62] = [
+pub(super) const SETTING_INVENTORY: [SettingId; 63] = [
     SettingId::LookupMode,
+    SettingId::LookupKey,
     SettingId::SelectedTextSentenceSearch,
     SettingId::OpenDictionarySearch,
     SettingId::OpenSentenceSearch,
@@ -159,6 +160,7 @@ pub(super) enum SectionId {
 #[serde(rename_all = "kebab-case")]
 pub(super) enum SettingId {
     LookupMode,
+    LookupKey,
     SelectedTextSentenceSearch,
     OpenDictionarySearch,
     OpenSentenceSearch,
@@ -372,6 +374,8 @@ mod tests {
         assert_eq!(location(&layout, SettingId::ConfiguredBinds).0, 2);
         assert_eq!(location(&layout, SettingId::ProfileCatalog).0, 3);
         assert_eq!(location(&layout, SettingId::NestedProfile).0, 0);
+        let (tab, section, entry) = location(&layout, SettingId::LookupMode);
+        assert_eq!((tab, section, entry + 1), location(&layout, SettingId::LookupKey));
         for option in [
             SettingId::OcrSentenceSearch,
             SettingId::SelectedTextSentenceSearch,
@@ -408,6 +412,7 @@ mod tests {
             SettingId::PopupMaxWidth,
             SettingId::PopupMaxHeight,
             SettingId::LookupMode,
+            SettingId::LookupKey,
             SettingId::ConfiguredBinds,
             SettingId::OpenDictionarySearch,
             SettingId::OpenSentenceSearch,
