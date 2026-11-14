@@ -110,6 +110,8 @@ pub(super) struct EntrySpec {
     /// invisible to a keyboard-only user.
     #[serde(default)]
     pub(super) inline_help: bool,
+    #[serde(default)]
+    pub(super) advanced: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize)]
@@ -387,6 +389,46 @@ mod tests {
 
         let ids: HashSet<_> = SETTING_INVENTORY.into_iter().collect();
         assert_eq!(ids.len(), SETTING_INVENTORY.len());
+    }
+
+    #[test]
+    fn sc1_1_embedded_layout_marks_the_basic_set() {
+        let layout = SettingsLayout::embedded().expect("embedded layout should load");
+        let basic: HashSet<_> = layout
+            .tabs
+            .iter()
+            .flat_map(|tab| &tab.sections)
+            .flat_map(|section| &section.entries)
+            .filter(|entry| !entry.advanced)
+            .map(|entry| entry.id)
+            .collect();
+        let approved = HashSet::from([
+            SettingId::PopupTheme,
+            SettingId::PopupFont,
+            SettingId::PopupMaxWidth,
+            SettingId::PopupMaxHeight,
+            SettingId::LookupMode,
+            SettingId::ConfiguredBinds,
+            SettingId::OpenDictionarySearch,
+            SettingId::OpenSentenceSearch,
+            SettingId::DictionaryTerms,
+            SettingId::DictionaryFrequency,
+            SettingId::DictionaryPitch,
+            SettingId::OcrLanguage,
+            SettingId::OcrCaptureSize,
+            SettingId::OcrPreferVertical,
+            SettingId::OcrScanAlphanumeric,
+            SettingId::OcrPerCharacter,
+            SettingId::AnkiEnabled,
+            SettingId::AnkiDeck,
+            SettingId::AnkiModel,
+            SettingId::AnkiRefresh,
+            SettingId::AnkiIncludeScreenshot,
+            SettingId::AnkiSentenceMode,
+            SettingId::AnkiStaticOverlay,
+            SettingId::AnkiFieldMap,
+        ]);
+        assert_eq!(basic, approved);
     }
 
     #[test]

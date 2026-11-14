@@ -1,4 +1,4 @@
-//! Remembers where the settings window sits.
+//! Remembers the settings window corner and view.
 //! Windows restores no position by itself.
 
 use serde::{Deserialize, Serialize};
@@ -6,13 +6,16 @@ use std::path::{Path, PathBuf};
 
 const STATE_FILE: &str = "chibipop.window.toml";
 
-const STATE_HEADER: &str = "# The position of the settings window. chibipop writes this file.\n";
+const STATE_HEADER: &str =
+    "# The position and the advanced view of the settings window. chibipop writes this file.\n";
 
-/// The top-left corner in screen pixels.
+/// The top-left corner in pixels and the view.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Placement {
     pub x: i32,
     pub y: i32,
+    #[serde(default)]
+    pub show_advanced: bool,
 }
 
 /// The part of a monitor that windows may cover.
@@ -33,18 +36,18 @@ impl Area {
     }
 }
 
-/// Returns the path of the position file.
+/// Returns the path of the state file.
 pub fn state_path() -> PathBuf {
     crate::paths::beside_exe(STATE_FILE)
 }
 
-/// Reads the remembered corner.
+/// Reads the remembered corner and view.
 pub fn load(path: &Path) -> Option<Placement> {
     let text = std::fs::read_to_string(path).ok()?;
     toml::from_str(&text).ok()
 }
 
-/// Writes the remembered corner.
+/// Writes the remembered corner and view.
 pub fn store(path: &Path, placement: Placement) {
     let Ok(body) = toml::to_string(&placement) else { return };
     // Write beside, then rename.
@@ -79,8 +82,10 @@ mod tests {
     fn a_stored_corner_round_trips() {
         let path = state_file("round_trip");
         let _ = std::fs::remove_file(&path);
-        store(&path, Placement { x: -1200, y: 40 });
-        assert_eq!(Some(Placement { x: -1200, y: 40 }), load(&path));
+        store(&path, Placement { x: -1200, y: 40, show_advanced: true });
+        assert_eq!(Some(Placement { x: -1200, y: 40, show_advanced: true }), load(&path));
+        std::fs::write(&path, "x = 7\ny = 9\n").expect("test file should write");
+        assert_eq!(Some(Placement { x: 7, y: 9, show_advanced: false }), load(&path));
         let _ = std::fs::remove_file(&path);
     }
 }

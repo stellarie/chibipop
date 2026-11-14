@@ -4,7 +4,7 @@
 //! Numeric fields use combo boxes instead of spin controls.
 
 use crate::config::{
-    Bind, BindAction, LayoutMode, ProfileData, ScreenshotMode, SelectionButtons,
+    Bind, BindAction, LayoutMode, ProfileData, ResolvedConfig, ScreenshotMode, SelectionButtons,
     SelectionSeparator, SentenceMode, TriggerMode, TripleClick, FIELD_SOURCES, PROFILE_FIELDS,
 };
 use crate::dict::frequency::RankingStrategy;
@@ -246,6 +246,7 @@ const ID_INCLUDE_DICTIONARY_NAME: i32 = 181;
 const ID_DISCARD_FURIGANA: i32 = 186;
 const ID_SHOW_LIVE_LOGS: i32 = 192;
 const ID_CLEAR_LOOKUP_CACHE: i32 = 155;
+const ID_SHOW_ADVANCED: i32 = 189;
 const ID_APPLY_STATE: i32 = 193;
 const ID_RUNTIME_STATUS: i32 = 194;
 const ID_BACKGROUND_ON_CLOSE: i32 = 28000;
@@ -364,6 +365,7 @@ struct EntryRuntime {
     top: Cell<i32>,
     base_height: Cell<i32>,
     initial_height: i32,
+    advanced: bool,
 }
 
 struct SectionRuntime {
@@ -540,10 +542,14 @@ const PLUGIN_ID_SPAN: i32 = 100;
 
 // Win32 messages for the tab control.
 const TCM_FIRST: u32 = 0x1300;
+const TCM_GETITEMCOUNT_MSG: u32 = TCM_FIRST + 4;
+const TCM_DELETEALLITEMS_MSG: u32 = TCM_FIRST + 9;
 const TCM_GETCURSEL_MSG: u32 = TCM_FIRST + 11;
 const TCM_SETCURSEL_MSG: u32 = TCM_FIRST + 12;
+const TCM_GETITEMW_MSG: u32 = TCM_FIRST + 60;
 const TCM_INSERTITEMW_MSG: u32 = TCM_FIRST + 62;
 const TCIF_TEXT_VAL: u32 = 0x0001;
+const TCIF_PARAM_VAL: u32 = 0x0008;
 // TCN_SELCHANGE = -551 as u32.
 const TCN_SELCHANGE_CODE: u32 = (-551i32) as u32;
 const TAB_H: i32 = 28;
@@ -569,7 +575,7 @@ struct TcItemW {
 }
 
 /// The list contains controls that the Apply action disables.
-const WHILE_BUSY: [i32; 26] = [
+const WHILE_BUSY: [i32; 27] = [
     ID_APPLY,
     ID_QUIT,
     ID_OCR_LANG,
@@ -596,6 +602,7 @@ const WHILE_BUSY: [i32; 26] = [
     ID_SCREENSHOT_MODE,
     ID_SCREENSHOT_RESET,
     ID_CLEAR_LOOKUP_CACHE,
+    ID_SHOW_ADVANCED,
 ];
 
 fn anki_setting_is_dependent(id: SettingId) -> bool {
@@ -647,6 +654,7 @@ const LABEL_W: i32 = 178;
 const FIELD_X: i32 = PAD + LABEL_W;
 const FIELD_W: i32 = WIN_W - FIELD_X - PAD - 16;
 const STATUS_H: i32 = 44;
+const ADVANCED_X: i32 = PAD + 116 + 12;
 /// The first vertical coordinate below the tab strip.
 const CONTENT_Y: i32 = PAD + TAB_H + 4;
 /// The vertical offset below the top of the bottom row.
@@ -659,7 +667,7 @@ const BOTTOM_BTN_DY: i32 = BOTTOM_STATUS_DY + STATUS_H + 8;
 const BOTTOM_H: i32 = BOTTOM_BTN_DY + ROW_H + 8;
 /// Each bottom-row item stores a control identifier, a horizontal coordinate,
 /// and a vertical offset.
-const BOTTOM_ROW: [(i32, i32, i32); 7] = [
+const BOTTOM_ROW: [(i32, i32, i32); 8] = [
     (ID_UPDATES, PAD - 6, 0),
     (ID_CHECK_UPDATE, PAD, BOTTOM_UPDATE_DY),
     (ID_APPLY_STATE, PAD, BOTTOM_APPLY_STATE_DY),
@@ -667,6 +675,7 @@ const BOTTOM_ROW: [(i32, i32, i32); 7] = [
     (ID_STATUS, PAD, BOTTOM_STATUS_DY),
     (ID_APPLY, 0, BOTTOM_BTN_DY),
     (ID_QUIT, PAD, BOTTOM_BTN_DY),
+    (ID_SHOW_ADVANCED, ADVANCED_X, BOTTOM_BTN_DY),
 ];
 /// The height of one scroll line at 96 DPI.
 const SCROLL_LINE: i32 = 20;
@@ -972,6 +981,7 @@ fn place_bottom(hwnd: HWND) {
                 ID_CHECK_UPDATE => (136, ROW_H),
                 ID_APPLY => (136, ROW_H + 4),
                 ID_QUIT => (116, ROW_H + 4),
+                ID_SHOW_ADVANCED => ((apply_x - 12 - ADVANCED_X).max(1), ROW_H + 4),
                 _ => continue,
             };
             let _ = SetWindowPos(
@@ -1210,7 +1220,7 @@ fn user_edit_command(id: i32, notify: u16) -> bool {
     !matches!(
         id,
         ID_APPLY | ID_QUIT | ID_CHECK_UPDATE | ID_ANKI_TEST | ID_CSS_EDITOR
-            | ID_ENGINE_CONFIGURE | ID_FIELD_MAP_TOGGLE | ID_SHOW_LIVE_LOGS
+            | ID_SHOW_ADVANCED | ID_ENGINE_CONFIGURE | ID_FIELD_MAP_TOGGLE | ID_SHOW_LIVE_LOGS
             | ID_CLEAR_LOOKUP_CACHE | ID_STATUS | ID_APPLY_STATE | ID_RUNTIME_STATUS
             | ID_OPEN_DICTIONARY_SEARCH | ID_OPEN_SENTENCE_SEARCH
     ) && matches!(
@@ -1608,10 +1618,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             // layout for WM_NOTIFY messages.
             let nmhdr = unsafe { &*(lparam.0 as *const NmhdrRaw) };
             if nmhdr.code == TCN_SELCHANGE_CODE && nmhdr.id_from == ID_TAB as usize {
-                let tab = unsafe {
-                    SendMessageW(nmhdr.hwnd_from, TCM_GETCURSEL_MSG, None, None).0 as u32
-                };
-                TAB.with(|c| c.set(Some((hwnd.0 as isize, tab))));
+                if let Some(tab) = unsafe { selected_tab(hwnd) } {
+                    TAB.with(|c| c.set(Some((hwnd.0 as isize, tab))));
+                }
             }
             // Arrow keys and clicks change row selection. The space bar and
             // checkbox clicks change checkbox state. Both actions trigger
@@ -2645,12 +2654,45 @@ fn first_provider_directories(
 }
 
 
+/// The layout index that a tab item stores.
+unsafe fn tab_param(tab: HWND, item: usize) -> Option<u32> {
+    let mut data = TcItemW {
+        mask: TCIF_PARAM_VAL,
+        dw_state: 0,
+        dw_state_mask: 0,
+        psz_text: std::ptr::null_mut(),
+        cch_text_max: 0,
+        i_image: 0,
+        l_param: 0,
+    };
+    // SAFETY: `data` outlives the call. The mask asks for `l_param` only.
+    let found = unsafe {
+        SendMessageW(
+            tab,
+            TCM_GETITEMW_MSG,
+            Some(WPARAM(item)),
+            Some(LPARAM(&mut data as *mut TcItemW as isize)),
+        )
+    };
+    (found.0 != 0).then(|| u32::try_from(data.l_param).ok()).flatten()
+}
+
+/// The tab item that stores a layout index.
+unsafe fn tab_item_of(tab: HWND, layout_index: u32) -> Option<usize> {
+    // SAFETY: The caller supplies the live tab control.
+    unsafe {
+        let count = usize::try_from(SendMessageW(tab, TCM_GETITEMCOUNT_MSG, None, None).0).ok()?;
+        (0..count).find(|&item| tab_param(tab, item) == Some(layout_index))
+    }
+}
+
+/// The layout index of the selected tab item.
 unsafe fn selected_tab(hwnd: HWND) -> Option<u32> {
     // SAFETY: `ID_TAB` names the live tab control when the window is built.
     unsafe {
-        dlg_item(hwnd, ID_TAB)
-            .ok()
-            .and_then(|tab| u32::try_from(SendMessageW(tab, TCM_GETCURSEL_MSG, None, None).0).ok())
+        let tab = dlg_item(hwnd, ID_TAB).ok()?;
+        let item = usize::try_from(SendMessageW(tab, TCM_GETCURSEL_MSG, None, None).0).ok()?;
+        tab_param(tab, item)
     }
 }
 
@@ -3023,14 +3065,18 @@ fn field_map_toggle_label(label: &str, collapsed: bool) -> String {
     format!("{label} {}", if collapsed { '\u{25B6}' } else { '\u{25BC}' })
 }
 
-/// Escapes ampersands for Windows control label display.
-fn apply_caption(mode: ApplyMode) -> &'static str {
-    if mode == ApplyMode::Live {
-        "Apply"
+const ADVANCED_LABEL: &str = "Show advanced settings";
+
+/// Returns the label for a hidden change count.
+fn advanced_label(hidden: usize) -> String {
+    if hidden == 0 {
+        ADVANCED_LABEL.to_string()
     } else {
-        "Apply && Restart"
+        format!("{ADVANCED_LABEL} ({hidden} changed)")
     }
 }
+
+const APPLY_CAPTION: &str = "Apply";
 
 /// Returns the Apply hint text.
 #[cfg(test)]
@@ -3041,7 +3087,9 @@ fn apply_hint(mode: ApplyMode, staged: bool) -> &'static str {
             "Applying saves your settings and updates your \
              dictionaries in place."
         }
-        (ApplyMode::Standalone, _) => "Applying saves your settings and restarts chibipop.",
+        (ApplyMode::Standalone, _) => {
+            "Applying saves your settings for the next start of chibipop."
+        }
     }
 }
 
@@ -3337,6 +3385,47 @@ fn overridden_profile_paths(form: &SettingsForm, id: SettingId) -> Vec<&'static 
         .copied()
         .filter(|path| overrides.contains_key(*path))
         .collect()
+}
+
+fn shared_paths(id: SettingId) -> &'static [&'static str] {
+    match id {
+        SettingId::BackgroundOnClose => &["application.background-on-close"],
+        SettingId::DebugCaptureOutline => &["debug.show_scan_region"],
+        SettingId::DebugEngine => &["debug.show_engine_log"],
+        SettingId::DebugAdapter => &["debug.show_adapter_log"],
+        SettingId::PluginList => &["plugins.enabled"],
+        _ => &[],
+    }
+}
+
+/// Counts advanced entries off their default.
+fn hidden_changes(layout: &SettingsLayout, cfg: &ResolvedConfig) -> usize {
+    let mut cfg = cfg.clone();
+    if cfg.actions.ocr_clipboard.as_ref().is_some_and(|action| !action.open_sentence_search) {
+        cfg.actions.ocr_clipboard = None;
+    }
+    let (Ok(current), Ok(default)) = (
+        toml::Value::try_from(&cfg),
+        toml::Value::try_from(ResolvedConfig::default()),
+    ) else {
+        return 0;
+    };
+    fn value_at<'a>(root: &'a toml::Value, path: &str) -> Option<&'a toml::Value> {
+        path.split('.').try_fold(root, |value, key| value.get(key))
+    }
+    layout
+        .tabs
+        .iter()
+        .flat_map(|tab| &tab.sections)
+        .flat_map(|section| &section.entries)
+        .filter(|entry| entry.advanced)
+        .filter(|entry| {
+            profile_override_paths(entry.id)
+                .iter()
+                .chain(shared_paths(entry.id))
+                .any(|path| value_at(&current, path) != value_at(&default, path))
+        })
+        .count()
 }
 
 unsafe fn build_configured_binds(
@@ -4244,6 +4333,7 @@ pub struct SettingsWindow {
     bottom_y0: i32,
     /// Index of the active tab.
     current_tab: Cell<u32>,
+    show_advanced: Cell<bool>,
     /// Operation mode for the Apply button.
     apply_mode: ApplyMode,
     /// True while the settings controls are disabled.
@@ -4389,6 +4479,7 @@ impl SettingsWindow {
         place_bottom(self.hwnd);
         self.switch_tab(tab);
         self.reset_scroll();
+        self.update_advanced_label();
         self.wake();
         Ok(())
     }
@@ -4401,14 +4492,29 @@ impl SettingsWindow {
     /// `mode` sets the Apply button label and action.
     pub fn open(form: &SettingsForm, stale: &[String], mode: ApplyMode) -> Result<SettingsWindow> {
         let layout = SettingsLayout::embedded()?;
-        Self::open_with_layout(form, stale, mode, layout)
+        let saved = placement::load(&placement::state_path());
+        let window = Self::open_saved(form, stale, mode, layout, saved)?;
+        window.set_show_advanced(saved.is_some_and(|saved| saved.show_advanced));
+        Ok(window)
     }
 
+    #[cfg(test)]
     pub(super) fn open_with_layout(
         form: &SettingsForm,
         stale: &[String],
         mode: ApplyMode,
         layout: SettingsLayout,
+    ) -> Result<SettingsWindow> {
+        let saved = placement::load(&placement::state_path());
+        Self::open_saved(form, stale, mode, layout, saved)
+    }
+
+    fn open_saved(
+        form: &SettingsForm,
+        stale: &[String],
+        mode: ApplyMode,
+        layout: SettingsLayout,
+        saved: Option<Placement>,
     ) -> Result<SettingsWindow> {
         layout.validate()?;
         // SAFETY: Window creation FFI calls below use handles owned by this
@@ -4475,6 +4581,7 @@ impl SettingsWindow {
                 screenshot_summary_height: Cell::new(0),
                 bottom_y0: 0,
                 current_tab: Cell::new(0),
+                show_advanced: Cell::new(true),
                 apply_mode: mode,
                 busy: Cell::new(false),
                 apply_state: Cell::new(if form.has_staged() {
@@ -4494,8 +4601,7 @@ impl SettingsWindow {
             }
             // Adjusts size, position, and visibility. Refer to `fit_to` for
             // why `ShowWindow` is not used here. The corner of the last run
-            // decides which monitor holds the window, so read it here.
-            let saved = placement::load(&placement::state_path());
+            // decides which monitor holds the window.
             let start = target(hwnd, saved);
             // Open at half the work area, not the full content. The page scrolls.
             let start_h = start.as_ref().map_or(content_h + PAD, |t| {
@@ -4519,7 +4625,7 @@ impl SettingsWindow {
         self.hwnd
     }
 
-    /// Returns the corner where the window sits.
+    /// Returns the corner and the view of the window.
     /// None while minimized or maximized.
     pub fn placement(&self) -> Option<Placement> {
         // SAFETY: `self.hwnd` is live. Both calls only read.
@@ -4529,7 +4635,7 @@ impl SettingsWindow {
             }
         }
         let (x, y) = corner(self.hwnd)?;
-        Some(Placement { x, y })
+        Some(Placement { x, y, show_advanced: self.show_advanced.get() })
     }
 
     /// Activates the Settings window.
@@ -4679,6 +4785,11 @@ impl SettingsWindow {
             self.reflow_all_tabs();
             self.resize_content();
         }
+        // SAFETY: The checkbox remains a live descendant.
+        let wanted = unsafe { checkbox_is_checked(self.hwnd, ID_SHOW_ADVANCED) };
+        if wanted != self.show_advanced.get() {
+            self.set_show_advanced(wanted);
+        }
         let edited = USER_EDIT.with(|slot| slot.get() == Some(self.hwnd.0 as isize));
         if edited && self.apply_state.get() != ApplyState::Applying {
             USER_EDIT.with(|slot| slot.set(None));
@@ -4701,6 +4812,7 @@ impl SettingsWindow {
             self.reflow_all_tabs();
             // SAFETY: Conditional controls remain live descendants.
             unsafe { update_static_controls(self.hwnd) };
+            self.hide_unshown();
             self.ensure_room_for(self.layout_bottom());
         }
         if self.take_language_change() {
@@ -4903,7 +5015,7 @@ impl SettingsWindow {
         // SAFETY: `ID_APPLY` is a live child window.
         unsafe {
             if let Ok(c) = dlg_item(self.hwnd, ID_APPLY) {
-                let caption = wide(apply_caption(self.apply_mode));
+                let caption = wide(APPLY_CAPTION);
                 let _ = SetWindowTextW(c, PCWSTR(caption.as_ptr()));
             }
         }
@@ -4975,6 +5087,7 @@ impl SettingsWindow {
             if !busy {
                 update_list_buttons(self.hwnd);
                 update_engine_controls(self.hwnd);
+                self.hide_unshown();
             }
         }
     }
@@ -5204,7 +5317,24 @@ impl SettingsWindow {
         }
     }
 
+    fn entry_shown(&self, entry: &EntryRuntime) -> bool {
+        self.show_advanced.get() || !entry.advanced
+    }
+
+    fn section_shown(&self, section: &SectionRuntime) -> bool {
+        self.show_advanced.get()
+            || section.entries.iter().any(|entry| self.entry_shown(entry))
+    }
+
+    fn tab_shown(&self, tab: &TabRuntime) -> bool {
+        self.show_advanced.get()
+            || tab.sections.iter().any(|section| self.section_shown(section))
+    }
+
     fn entry_height(&self, entry: &EntryRuntime) -> i32 {
+        if !self.entry_shown(entry) {
+            return 0;
+        }
         match entry.id {
             SettingId::AnkiFieldMap => self.field_map_entry_height(entry.base_height.get()),
             SettingId::AnkiStaticOverlay if !self.sentence_is_static() => 0,
@@ -5272,8 +5402,11 @@ impl SettingsWindow {
         let mut y = 0;
         for section in &tab.sections {
             let section_top = y;
+            let shown = self.section_shown(section);
             section.top.set(section_top);
-            y += 20;
+            if shown {
+                y += 20;
+            }
             for entry in &section.entries {
                 entry.top.set(y);
                 self.reflow_entry(entry, width);
@@ -5281,6 +5414,10 @@ impl SettingsWindow {
                     self.repack_field_map();
                 }
                 y += self.entry_height(entry);
+            }
+            if !shown {
+                section.height.set(0);
+                continue;
             }
             let height = (y - section_top + 8).max(28);
             section.height.set(height);
@@ -5431,11 +5568,21 @@ impl SettingsWindow {
         if tab as usize >= self.tabs.len() {
             return;
         }
+        let tab = if self.tab_shown(&self.tabs[tab as usize]) {
+            tab
+        } else {
+            self.tabs
+                .iter()
+                .position(|runtime| self.tab_shown(runtime))
+                .map_or(tab, |first| first as u32)
+        };
         self.current_tab.set(tab);
         // SAFETY: Runtime handles remain live descendants until `Drop`.
         unsafe {
             if let Ok(control) = dlg_item(self.hwnd, ID_TAB) {
-                SendMessageW(control, TCM_SETCURSEL_MSG, Some(WPARAM(tab as usize)), None);
+                if let Some(item) = tab_item_of(control, tab) {
+                    SendMessageW(control, TCM_SETCURSEL_MSG, Some(WPARAM(item)), None);
+                }
             }
             for (i, runtime) in self.tabs.iter().enumerate() {
                 let cmd = if i as u32 == tab { SW_SHOW } else { SW_HIDE };
@@ -5455,7 +5602,100 @@ impl SettingsWindow {
             update_engine_controls(self.hwnd);
             update_static_controls(self.hwnd);
         }
+        self.hide_unshown();
         self.reset_scroll();
+    }
+
+    /// Hides each control that the view omits.
+    fn hide_unshown(&self) {
+        if self.show_advanced.get() {
+            return;
+        }
+        // SAFETY: Runtime handles remain live descendants until `Drop`.
+        unsafe {
+            for section in self.tabs.iter().flat_map(|tab| &tab.sections) {
+                if !self.section_shown(section) {
+                    let _ = ShowWindow(section.frame, SW_HIDE);
+                }
+                for entry in section.entries.iter().filter(|entry| !self.entry_shown(entry)) {
+                    for control in &entry.controls {
+                        let _ = ShowWindow(control.hwnd, SW_HIDE);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Rebuilds the tab items for the current view.
+    fn sync_tab_items(&self) {
+        // SAFETY: The tab control stays live until `Drop`. Each text
+        // buffer outlives its insert call.
+        unsafe {
+            let Ok(control) = dlg_item(self.hwnd, ID_TAB) else { return };
+            SendMessageW(control, TCM_DELETEALLITEMS_MSG, None, None);
+            let shown = self.tabs.iter().enumerate().filter(|(_, tab)| self.tab_shown(tab));
+            for (item_index, (layout_index, tab)) in shown.enumerate() {
+                let mut text = wide(&tab.label);
+                let item = TcItemW {
+                    mask: TCIF_TEXT_VAL | TCIF_PARAM_VAL,
+                    dw_state: 0,
+                    dw_state_mask: 0,
+                    psz_text: text.as_mut_ptr(),
+                    cch_text_max: 0,
+                    i_image: -1,
+                    l_param: layout_index as isize,
+                };
+                SendMessageW(
+                    control,
+                    TCM_INSERTITEMW_MSG,
+                    Some(WPARAM(item_index)),
+                    Some(LPARAM(&item as *const _ as isize)),
+                );
+            }
+        }
+    }
+
+    /// Returns true in the advanced view.
+    pub fn show_advanced(&self) -> bool {
+        self.show_advanced.get()
+    }
+
+    /// Switches between the basic and advanced view.
+    pub fn set_show_advanced(&self, on: bool) {
+        self.show_advanced.set(on);
+        // SAFETY: The checkbox stays live until `Drop`.
+        unsafe {
+            if let Ok(check) = dlg_item(self.hwnd, ID_SHOW_ADVANCED) {
+                let state = if on { 1 } else { 0 };
+                SendMessageW(check, BM_SETCHECK, Some(WPARAM(state)), None);
+            }
+        }
+        self.sync_tab_items();
+        self.reflow_all_tabs();
+        self.switch_tab(self.current_tab.get());
+        self.resize_content();
+        self.update_advanced_label();
+    }
+
+    /// Shows the count of hidden changes.
+    fn update_advanced_label(&self) {
+        let hidden = if self.show_advanced.get() {
+            0
+        } else {
+            let staged = self.staged.borrow().clone();
+            let form = self.read(&staged);
+            let mut cfg = form.cfg;
+            if let Some(on) = form.background_on_close {
+                cfg.application.background_on_close = on;
+            }
+            hidden_changes(&self.layout, &cfg)
+        };
+        // SAFETY: The checkbox stays live until `Drop`.
+        unsafe {
+            if let Ok(check) = dlg_item(self.hwnd, ID_SHOW_ADVANCED) {
+                let _ = SetWindowTextW(check, PCWSTR(wide(&advanced_label(hidden)).as_ptr()));
+            }
+        }
     }
 
     /// Toggles field-map collapse state and resizes the window.
@@ -6818,7 +7058,7 @@ impl SettingsWindow {
                 );
                 TIP_STATE.with(|state| state.borrow_mut().tip = self.tip);
             }
-            let tab_control = child(
+            child(
                 h,
                 w!("SysTabControl32"),
                 "",
@@ -6830,24 +7070,6 @@ impl SettingsWindow {
                 ID_TAB,
                 f,
             )?;
-            for (index, tab) in layout.tabs.iter().enumerate() {
-                let mut text = wide(&tab.label);
-                let item = TcItemW {
-                    mask: TCIF_TEXT_VAL,
-                    dw_state: 0,
-                    dw_state_mask: 0,
-                    psz_text: text.as_mut_ptr(),
-                    cch_text_max: 0,
-                    i_image: -1,
-                    l_param: 0,
-                };
-                SendMessageW(
-                    tab_control,
-                    TCM_INSERTITEMW_MSG,
-                    Some(WPARAM(index)),
-                    Some(LPARAM(&item as *const _ as isize)),
-                );
-            }
 
             self.viewport = child(
                 h,
@@ -6931,6 +7153,7 @@ impl SettingsWindow {
                         top: Cell::new(built.top),
                         base_height: Cell::new(built.height),
                         initial_height: built.height,
+                        advanced: entry.advanced,
                     });
                 }
                 let section_height = (y - section_top + 8).max(28);
@@ -6962,6 +7185,7 @@ impl SettingsWindow {
             });
         }
         self.tabs = runtime_tabs;
+        self.sync_tab_items();
         debug_assert_eq!(layout.tabs.len(), self.tabs.len());
         for (index, tab) in layout.tabs.iter().enumerate() {
             debug_assert_eq!(Some(tab.id), self.tab_id(index as u32));
@@ -7089,7 +7313,7 @@ impl SettingsWindow {
             child(
                 h,
                 w!("BUTTON"),
-                apply_caption(self.apply_mode),
+                APPLY_CAPTION,
                 WINDOW_STYLE(BS_DEFPUSHBUTTON as u32) | WS_TABSTOP,
                 WIN_W - PAD - 144,
                 self.bottom_y0 + BOTTOM_BTN_DY,
@@ -7110,6 +7334,20 @@ impl SettingsWindow {
                 ID_QUIT,
                 f,
             )?;
+            let advanced = child(
+                h,
+                w!("BUTTON"),
+                ADVANCED_LABEL,
+                WINDOW_STYLE(BS_AUTOCHECKBOX as u32) | WS_TABSTOP,
+                ADVANCED_X,
+                self.bottom_y0 + BOTTOM_BTN_DY,
+                WIN_W - PAD - 144 - 12 - ADVANCED_X,
+                ROW_H + 4,
+                ID_SHOW_ADVANCED,
+                f,
+            )?;
+            let check = if self.show_advanced.get() { 1 } else { 0 };
+            SendMessageW(advanced, BM_SETCHECK, Some(WPARAM(check)), None);
         }
         Ok(())
     }
@@ -7619,6 +7857,19 @@ mod tests {
         }
     }
 
+    #[test]
+    fn sc3_hidden_changes_counts_advanced_entries_off_default() {
+        let layout = SettingsLayout::embedded().unwrap();
+        let mut cfg = ResolvedConfig::default();
+        assert_eq!(0, hidden_changes(&layout, &cfg));
+        cfg.popup.side_panel = true;
+        cfg.debug.show_engine_log = true;
+        cfg.popup.theme = "light".to_string();
+        assert_eq!(2, hidden_changes(&layout, &cfg));
+        cfg.actions.ocr_clipboard = Some(crate::config::OcrClipboardConfig::default());
+        assert_eq!(2, hidden_changes(&layout, &cfg));
+    }
+
     fn remove_layout_entry(layout: &mut SettingsLayout, id: SettingId) -> EntrySpec {
         for tab in &mut layout.tabs {
             for section in &mut tab.sections {
@@ -7945,6 +8196,91 @@ mod tests {
             assert!(!IsWindowVisible(dlg_item(window.hwnd, reset).unwrap()).as_bool());
         }
         assert_eq!(collapsed_top, control_top(&window, ID_THEME));
+    }
+
+    #[test]
+    fn sc4_basic_view_hides_advanced_and_keeps_values() {
+        let layout = SettingsLayout::embedded().unwrap();
+        let form = nondefault_form();
+        let window =
+            SettingsWindow::open_with_layout(&form, &[], ApplyMode::Standalone, layout).unwrap();
+        let items = |window: &SettingsWindow| -> Vec<u32> {
+            // SAFETY: The tab control belongs to the live test window.
+            unsafe {
+                let tab = dlg_item(window.hwnd, ID_TAB).unwrap();
+                let count = SendMessageW(tab, TCM_GETITEMCOUNT_MSG, None, None).0 as usize;
+                (0..count).map(|item| tab_param(tab, item).unwrap()).collect()
+            }
+        };
+        let visible = |window: &SettingsWindow, id: i32| -> bool {
+            // SAFETY: The control belongs to the live test window.
+            unsafe { IsWindowVisible(dlg_item(window.hwnd, id).unwrap()).as_bool() }
+        };
+        let at = |id: TabId| window.tabs.iter().position(|tab| tab.id == id).unwrap() as u32;
+        assert_eq!((0..9).collect::<Vec<u32>>(), items(&window));
+
+        window.set_show_advanced(false);
+        let basic = [
+            TabId::Popup,
+            TabId::Shortcuts,
+            TabId::Dictionaries,
+            TabId::TextRecognition,
+            TabId::Anki,
+        ];
+        assert_eq!(basic.map(at).to_vec(), items(&window));
+        assert!(!items(&window).contains(&at(TabId::Debug)));
+        assert!(visible(&window, ID_THEME));
+        assert!(!visible(&window, ID_SIDE_PANEL));
+        window.switch_tab(at(TabId::Debug));
+        assert_eq!(at(TabId::Popup), window.current_tab.get());
+        assert!(!visible(&window, ID_SHOW_SCAN));
+        window.switch_tab(at(TabId::Anki));
+        assert!(visible(&window, ID_ANKI_DECK));
+        assert!(!visible(&window, ID_ANKI_URL));
+        assert_eq!(form, window.read(&form));
+
+        window.set_show_advanced(true);
+        assert_eq!((0..9).collect::<Vec<u32>>(), items(&window));
+        window.switch_tab(at(TabId::Popup));
+        assert!(visible(&window, ID_SIDE_PANEL));
+        assert_eq!(form, window.read(&form));
+    }
+
+    #[test]
+    fn sc5_toggle_changes_view_and_label_not_apply_state() {
+        let mut form = crate::settings::from_config(&crate::config::Config::default(), &[]);
+        form.cfg.popup.side_panel = true;
+        form.cfg.debug.show_engine_log = true;
+        form.background_on_close = Some(true);
+        let layout = SettingsLayout::embedded().unwrap();
+        let mut window =
+            SettingsWindow::open_with_layout(&form, &[], ApplyMode::Standalone, layout).unwrap();
+        let text = |window: &SettingsWindow, id: i32| -> String {
+            // SAFETY: The control belongs to the live test window.
+            unsafe { window_text(dlg_item(window.hwnd, id).unwrap()) }
+        };
+        let click = |window: &mut SettingsWindow, checked: usize| {
+            // SAFETY: The checkbox belongs to the live test window.
+            unsafe {
+                let check = dlg_item(window.hwnd, ID_SHOW_ADVANCED).unwrap();
+                SendMessageW(check, BM_SETCHECK, Some(WPARAM(checked)), None);
+            }
+            send_button_click(window, ID_SHOW_ADVANCED);
+            window.pump(|| {});
+        };
+        assert!(window.show_advanced());
+        assert_eq!("Apply: Loaded", text(&window, ID_APPLY_STATE));
+        assert_eq!("Show advanced settings", text(&window, ID_SHOW_ADVANCED));
+
+        click(&mut window, 0);
+        assert!(!window.show_advanced());
+        assert_eq!("Show advanced settings (3 changed)", text(&window, ID_SHOW_ADVANCED));
+        assert_eq!("Apply: Loaded", text(&window, ID_APPLY_STATE));
+
+        click(&mut window, 1);
+        assert!(window.show_advanced());
+        assert_eq!("Show advanced settings", text(&window, ID_SHOW_ADVANCED));
+        assert_eq!("Apply: Loaded", text(&window, ID_APPLY_STATE));
     }
 
 
@@ -8413,18 +8749,19 @@ mod tests {
     /// Live mode applies immediately when no changes are staged.
     #[test]
     fn a_live_window_with_nothing_staged_just_applies() {
-        assert_eq!("Apply", apply_caption(ApplyMode::Live));
         assert!(apply_hint(ApplyMode::Live, false).contains("right away"));
     }
 
     /// A staged update needs no rebuild or restart.
     #[test]
     fn a_staged_dictionary_promises_an_in_place_update() {
-        assert_eq!("Apply", apply_caption(ApplyMode::Live));
         let hint = apply_hint(ApplyMode::Live, true);
         assert!(hint.contains("in place"), "{hint}");
         assert!(!hint.contains("rebuild"), "{hint}");
         assert!(!hint.contains("restart"), "{hint}");
+        let standalone = apply_hint(ApplyMode::Standalone, false);
+        assert!(standalone.contains("next start"), "{standalone}");
+        assert!(!standalone.contains("restarts"), "{standalone}");
     }
 
     // ---- ocr language list ----
@@ -8629,7 +8966,11 @@ mod tests {
         let form = nondefault_form();
         let mut window = SettingsWindow::open(&form, &[], ApplyMode::Standalone).unwrap();
         let area = work_area(window.hwnd).unwrap();
-        let gone = Placement { x: area.right + 5000, y: area.bottom + 5000 };
+        let gone = Placement {
+            x: area.right + 5000,
+            y: area.bottom + 5000,
+            show_advanced: false,
+        };
         // Move the window where the stale corner puts it.
         // SAFETY: The test owns this window. The call only moves it.
         unsafe {
@@ -8653,7 +8994,7 @@ mod tests {
         let area = work_area(window.hwnd).unwrap();
         // This corner fits any size, so the trim
         // does not move the window.
-        let wanted = Placement { x: area.left, y: area.top };
+        let wanted = Placement { x: area.left, y: area.top, show_advanced: false };
         window.fit_to(600, 240, target(window.hwnd, Some(wanted)));
         window.pump(|| {});
         let placed = outer_rect(&window);
