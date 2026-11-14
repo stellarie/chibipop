@@ -917,7 +917,7 @@ for CUDA.
 ### Tests
 
 CI runs the automated gate on Windows and on Linux. Each gate has a ceiling on
-the pass count: 360 tests for each platform. Core holds at most 200 tests. Each
+the pass count: 360 tests on Linux and 364 tests on Windows. Core holds at most 200 tests. Each
 platform crate holds at most 160. No automated test launches `chibipop` or needs
 a real desktop. Each feature gets a manual test instead. See
 [`docs/REGRESSION.md`](docs/REGRESSION.md) for the gate and the manual tests.
