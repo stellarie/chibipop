@@ -1536,11 +1536,13 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             if let Some((row, offset)) = bind_row_control(id) {
                 if offset == ID_BIND_ACTION_OFFSET && notify == CBN_SELCHANGE as u16 {
                     unsafe { update_bind_row_controls(hwnd, row) };
+                    unsafe { update_follow_pointer(hwnd) };
                     record_user_edit(hwnd);
                     return LRESULT(0);
                 }
                 if offset == ID_BIND_ENABLED_OFFSET && notify == BN_CLICKED as u16 {
                     unsafe { update_bind_row_controls(hwnd, row) };
+                    unsafe { update_follow_pointer(hwnd) };
                     record_user_edit(hwnd);
                     return LRESULT(0);
                 }
@@ -3305,6 +3307,42 @@ unsafe fn update_bind_row_controls(hwnd: HWND, row: usize) {
                 .is_ok_and(|action| IsWindowVisible(action).as_bool());
             let _ = ShowWindow(profile, if allows_profile && row_visible { SW_SHOW } else { SW_HIDE });
             let _ = EnableWindow(profile, allows_profile && enabled);
+        }
+    }
+}
+
+/// True if an enabled bind row runs Screen lookup.
+unsafe fn follow_pointer_is_blocked(hwnd: HWND) -> bool {
+    // SAFETY: The caller supplies a live settings window.
+    unsafe {
+        for row in 0..MAX_BIND_ROWS {
+            let Ok(combo) = dlg_item(hwnd, bind_control_id(row, ID_BIND_ACTION_OFFSET)) else {
+                return false;
+            };
+            let action = bind_action_at(SendMessageW(combo, CB_GETCURSEL, None, None).0);
+            let enabled = checkbox_is_checked(hwnd, bind_control_id(row, ID_BIND_ENABLED_OFFSET));
+            if action == BindAction::Lookup && enabled {
+                return true;
+            }
+        }
+        false
+    }
+}
+
+/// Locks Follow pointer while a Screen lookup bind is on.
+unsafe fn update_follow_pointer(hwnd: HWND) {
+    // SAFETY: The caller supplies a live settings window.
+    unsafe {
+        let Ok(live) = dlg_item(hwnd, ID_MODE_LIVE) else {
+            return;
+        };
+        let blocked = follow_pointer_is_blocked(hwnd);
+        if blocked {
+            SendMessageW(live, BM_SETCHECK, Some(WPARAM(0)), None);
+        }
+        let _ = EnableWindow(live, !blocked);
+        if let Ok(per_char) = dlg_item(hwnd, ID_PER_CHAR) {
+            let _ = EnableWindow(per_char, checkbox_is_checked(hwnd, ID_MODE_LIVE));
         }
     }
 }
@@ -5086,6 +5124,9 @@ impl SettingsWindow {
                     update_bind_row_controls(self.hwnd, row);
                 }
             }
+            if !busy {
+                update_follow_pointer(self.hwnd);
+            }
             self.update_anki_controls(checkbox_is_checked(self.hwnd, ID_ANKI_ENABLED));
             if !busy {
                 update_list_buttons(self.hwnd);
@@ -5601,6 +5642,7 @@ impl SettingsWindow {
             for row in 0..self.bind_count {
                 update_bind_row_controls(self.hwnd, row);
             }
+            update_follow_pointer(self.hwnd);
             self.apply_field_map_visibility();
             update_engine_controls(self.hwnd);
             update_static_controls(self.hwnd);
@@ -6408,6 +6450,7 @@ impl SettingsWindow {
                     &mut y,
                     &mut controls,
                 )?;
+                update_follow_pointer(h);
             }
             SettingId::ProfileCatalog => {
                 build_profile_catalog_controls(
@@ -6723,7 +6766,7 @@ impl SettingsWindow {
             SettingId::OcrPerCharacter => {
                 let control = checkbox!(ID_PER_CHAR, form.cfg.trigger.per_character_lookup);
                 let is_live = matches!(form.cfg.trigger.mode, crate::config::TriggerMode::Live);
-                let _ = EnableWindow(control, is_live);
+                let _ = EnableWindow(control, is_live && !follow_pointer_is_blocked(h));
                 help!();
             }
             SettingId::BackgroundOnClose => {
@@ -8144,6 +8187,52 @@ mod tests {
         let edited = window.read(&form);
         assert!(edited.catalog.live_lookup);
         assert_eq!(TriggerMode::Live, edited.cfg.trigger.mode);
+    }
+
+    #[test]
+    fn a_screen_lookup_bind_locks_follow_pointer() {
+        let mut config = crate::config::Config::default();
+        config.live_lookup = true;
+        let bind_id = config.next_bind_id();
+        config.binds.push(Bind::new(bind_id.clone(), BindAction::Lookup));
+        let form = crate::settings::from_config(&config, &[]);
+        let row = form.catalog.binds.iter().position(|bind| bind.id == bind_id).unwrap();
+        let window = SettingsWindow::open(&form, &[], ApplyMode::Standalone).unwrap();
+        let bind_enabled = bind_control_id(row, ID_BIND_ENABLED_OFFSET);
+        let bind_action = bind_control_id(row, ID_BIND_ACTION_OFFSET);
+        // (live enabled, live ticked, per-char enabled)
+        let state = || unsafe {
+            use windows::Win32::UI::Input::KeyboardAndMouse::IsWindowEnabled;
+            (
+                IsWindowEnabled(dlg_item(window.hwnd, ID_MODE_LIVE).unwrap()).as_bool(),
+                checkbox_is_checked(window.hwnd, ID_MODE_LIVE),
+                IsWindowEnabled(dlg_item(window.hwnd, ID_PER_CHAR).unwrap()).as_bool(),
+            )
+        };
+        let click = |id: i32, ticked: bool| {
+            // SAFETY: The test window owns the checkbox.
+            unsafe {
+                let control = dlg_item(window.hwnd, id).unwrap();
+                SendMessageW(control, BM_SETCHECK, Some(WPARAM(ticked as usize)), None);
+            }
+            send_button_click(&window, id);
+        };
+
+        assert_eq!((false, false, false), state());
+        let opened = window.read(&form);
+        assert!(!opened.catalog.live_lookup);
+        assert_eq!(TriggerMode::Press, opened.cfg.trigger.mode);
+
+        click(bind_enabled, false);
+        assert_eq!((true, false, false), state());
+
+        click(ID_MODE_LIVE, true);
+        assert_eq!((true, true, true), state());
+        click(bind_enabled, true);
+        assert_eq!((false, false, false), state());
+
+        select_combo_row(&window, bind_action, bind_action_index(BindAction::Search));
+        assert_eq!((true, false, false), state());
     }
 
     fn outer_rect(window: &SettingsWindow) -> RECT {
