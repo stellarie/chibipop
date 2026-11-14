@@ -8233,6 +8233,22 @@ mod tests {
 
         select_combo_row(&window, bind_action, bind_action_index(BindAction::Search));
         assert_eq!((true, false, false), state());
+
+        let entry = window
+            .tabs
+            .iter()
+            .flat_map(|tab| &tab.sections)
+            .flat_map(|section| &section.entries)
+            .find(|entry| entry.id == SettingId::LookupMode)
+            .unwrap();
+        let help: Vec<_> = entry
+            .controls
+            .iter()
+            // SAFETY: The test window owns the controls.
+            .filter(|control| unsafe { window_text(control.hwnd) }.starts_with("Runs lookups"))
+            .collect();
+        assert_eq!(1, help.len());
+        assert!(help[0].y > entry.controls[0].y);
     }
 
     fn outer_rect(window: &SettingsWindow) -> RECT {
