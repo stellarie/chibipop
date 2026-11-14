@@ -2308,7 +2308,7 @@ Run these cases on Windows.
 
 | ID | Case | Steps and expected result |
 |---|---|---|
-| 1.45 | An enabled Screen lookup Bind locks Follow pointer | Open **Settings > Shortcuts**. Clear **On** on every Bind with the action **Screen lookup**. Tick **Follow pointer**. In **Configured binds**, tick **On** on a Bind with the action **Screen lookup**. **Follow pointer** must turn grey and clear. The help text below the checkbox must read "Runs lookups as the pointer moves. Not available while a Screen lookup bind is enabled." Click Apply. The saved configuration must hold `live_lookup = false`. |
+| 1.45 | An enabled Screen lookup Bind locks Follow pointer | Open **Settings > Shortcuts**. Clear **On** on every Bind with the action **Screen lookup**. Tick **Follow pointer**. In **Configured shortcuts**, tick **On** on a Bind with the action **Screen lookup**. **Follow pointer** must turn grey and clear. The help text below the checkbox must read "Runs lookups as the pointer moves. Not available while a Screen lookup bind is enabled." Click Apply. The saved configuration must hold `live_lookup = false`. |
 | 1.45.1 | Clear On | Clear **On** on that Bind. **Follow pointer** must become enabled and stay clear. Tick it. It must stay ticked. |
 | 1.45.2 | Change the action | Tick **On** on a Screen lookup Bind. **Follow pointer** must turn grey and clear. Change the action to Search. **Follow pointer** must become enabled and stay clear. |
 | 1.45.3 | Add bind | Click **+ Add bind**. The new Bind is an enabled Screen lookup Bind. **Follow pointer** must turn grey and clear at once. |

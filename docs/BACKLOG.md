@@ -1710,7 +1710,7 @@ before building anything.
 
 Main reached exactly 360 passing tests on Windows. After that, each pull request that
 added a test for a reproduced bug failed the Tier 0 gate, although every test passed.
-On 2026-11-15 the user removed the Windows ceiling in `ci.yml`. The value was 360. It was
+On 2026-11-15 the user removed the Windows ceiling in `ci.yml`. The value was 360 at first. Then it was
 364 as a temporary value, which admitted the four tests of the Inflection chain toggle and
 the stem and suru lookup fixes. The Linux ceiling stays at 360. The Windows gate prints the
 total and fails on a test failure only.

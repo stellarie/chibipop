@@ -3329,7 +3329,7 @@ unsafe fn follow_pointer_is_blocked(hwnd: HWND) -> bool {
     }
 }
 
-/// Locks Follow pointer while a Screen lookup bind is on.
+/// Locks Follow pointer under a lookup bind.
 unsafe fn update_follow_pointer(hwnd: HWND) {
     // SAFETY: The caller supplies a live settings window.
     unsafe {
@@ -6450,7 +6450,6 @@ impl SettingsWindow {
                     &mut y,
                     &mut controls,
                 )?;
-                update_follow_pointer(h);
             }
             SettingId::ProfileCatalog => {
                 build_profile_catalog_controls(
@@ -6766,7 +6765,7 @@ impl SettingsWindow {
             SettingId::OcrPerCharacter => {
                 let control = checkbox!(ID_PER_CHAR, form.cfg.trigger.per_character_lookup);
                 let is_live = matches!(form.cfg.trigger.mode, crate::config::TriggerMode::Live);
-                let _ = EnableWindow(control, is_live && !follow_pointer_is_blocked(h));
+                let _ = EnableWindow(control, is_live);
                 help!();
             }
             SettingId::BackgroundOnClose => {
@@ -8230,6 +8229,7 @@ mod tests {
         assert_eq!((true, true, true), state());
         click(bind_enabled, true);
         assert_eq!((false, false, false), state());
+        assert!(!window.read(&form).catalog.live_lookup);
 
         select_combo_row(&window, bind_action, bind_action_index(BindAction::Search));
         assert_eq!((true, false, false), state());
