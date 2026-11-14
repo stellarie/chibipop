@@ -7,7 +7,7 @@ use std::cell::Cell;
 use std::path::{Path, PathBuf};
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
-use windows::Win32::Graphics::Gdi::{CreateFontIndirectW, HFONT, LOGFONTW};
+use windows::Win32::Graphics::Gdi::{CreateFontIndirectW, DeleteObject, HFONT, LOGFONTW};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
@@ -42,9 +42,28 @@ struct EditorState {
 /// This type owns the CSS editor window and its state.
 pub struct CssEditor {
     hwnd: HWND,
-    #[allow(dead_code)]
     font: Option<HFONT>,
     state: Box<EditorState>,
+}
+
+impl Drop for CssEditor {
+    fn drop(&mut self) {
+        // SAFETY: `IsWindow` accepts any handle value.
+        // The editor is dropped on its creating thread.
+        // Clearing `USERDATA` first means `wndproc` cannot
+        // read `state` after it is freed.
+        // `DeleteObject` runs once, after the window that
+        // used the font is gone.
+        unsafe {
+            if IsWindow(Some(self.hwnd)).as_bool() {
+                SetWindowLongPtrW(self.hwnd, GWLP_USERDATA, 0);
+                let _ = DestroyWindow(self.hwnd);
+            }
+            if let Some(font) = self.font.take() {
+                let _ = DeleteObject(font.into());
+            }
+        }
+    }
 }
 
 static CLASS_REGISTERED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -149,6 +168,13 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 st.outcome.set(Some(EditorOutcome::Closed));
             }
             LRESULT(0)
+        }
+        WM_NCDESTROY => {
+            // SAFETY: `hwnd` is the window handle from this callback.
+            unsafe {
+                SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+                DefWindowProcW(hwnd, msg, wparam, lparam)
+            }
         }
         _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
     }
@@ -292,6 +318,16 @@ impl CssEditor {
     /// Returns the stored editor outcome and clears it.
     pub fn take_outcome(&self) -> Option<EditorOutcome> {
         self.state.outcome.take()
+    }
+
+    /// Restores the editor window and brings it to the front.
+    pub fn focus(&self) {
+        // SAFETY: `self.hwnd` is a valid editor window handle.
+        // Both calls fail without effect on a dead handle.
+        unsafe {
+            let _ = ShowWindow(self.hwnd, SW_RESTORE);
+            let _ = SetForegroundWindow(self.hwnd);
+        }
     }
 
     /// Reports whether the editor window is visible.

@@ -256,8 +256,7 @@ fn range_rects(
     let first = first.min(last);
     let last = last.max(first);
     let mut out = Vec::with_capacity(last - first + 1);
-    for line_index in first..=last {
-        let line = measured.lines[line_index];
+    for (line_index, &line) in measured.lines.iter().enumerate().take(last + 1).skip(first) {
         let line_start = elem.pen.0
             + (elem.wrap_w - line.w).max(0.0) * elem.align.slack_before();
         let line_end = line_start + line.w;
