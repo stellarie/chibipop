@@ -30,6 +30,7 @@ pub fn run(cfg: &Config, dicts: &[DictInfo]) -> Result<()> {
     let stale = crate::settings::stale_order_entries(cfg, dicts);
     let window = SettingsWindow::open(&form, &stale, ApplyMode::Standalone)
         .context("opening the settings window")?;
+    window.set_show_advanced(true);
     println!("{}", serde_json::to_string_pretty(&collect(&window))?);
     Ok(())
 }
