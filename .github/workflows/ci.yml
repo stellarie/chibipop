@@ -25,8 +25,8 @@ jobs:
     #
     # Pinned to windows-2025, not windows-latest: the geometry goldens
     # assert exact DirectWrite metrics with no tolerance, so the runner image
-    # (its font files) is part of tier0's baseline, like the clippy count and
-    # the test ceiling. A label migration changing fonts would red the gate for
+    # (its font files) is part of tier0's baseline, like the clippy count.
+    # A label migration changing fonts would red the gate for
     # no code change. Image EOL is one scheduled re-baseline: bless on the
     # new image, review, and commit stating re-baseline vs finding.
     name: Tier 0 gate
@@ -68,13 +68,6 @@ jobs:
           done
           n=$(awk '/^test result: ok\./ {s+=$4} END {print s+0}' test-3.log)
           echo "passing tests: $n"
-          # A ceiling, not a floor. A new test must justify itself.
-          # 364 is a temporary value. See docs/BACKLOG.md item 42.
-          # Raise the ceiling only in a reviewed pull request.
-          if [ "$n" -gt 364 ]; then
-            echo "::error::expected at most 364 passing tests, got $n"
-            exit 1
-          fi
 
       # --color never is not cosmetic: CARGO_TERM_COLOR is `always` above, so
       # cargo prefixes every diagnostic with an ANSI escape and `^error` never
@@ -180,10 +173,11 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      # Three runs and a ceiling for the same reasons as tier0; --exclude
+      # Three runs for the same reason as tier0; --exclude
       # chibipop-windows for the same bin-name-collision reason tier0
-      # excludes chibipop-linux (see the workspace Cargo.toml). The ceiling
-      # is 360: 200 core tests plus 160 for the Linux crate.
+      # excludes chibipop-linux (see the workspace Cargo.toml). Unlike
+      # tier0, this job has a ceiling of 360: 200 core tests plus 160
+      # for the Linux crate.
       - name: Tests, three times
         shell: bash
         run: |

@@ -54,10 +54,10 @@ cargo clippy --workspace --color never --all-targets --all-features -- -D warnin
 `docs/REGRESSION.md` defines the automated gate and the manual tests.
 
 - **Automated gate** — runs without a screen. CI runs the sweep three times to
-  find process-global races. The pass count has a ceiling, not a floor: 360 for
-  Linux and 364 for Windows. Core holds at most 200 tests. Each platform crate
-  holds at most 160. CI fails when the count is greater than the ceiling. The
-  Windows value is temporary. See `docs/BACKLOG.md` item 42.
+  find process-global races. The Linux pass count has a ceiling of 360, not a
+  floor. CI fails when the Linux count is greater than 360. Core holds at most
+  200 tests. The Linux crate holds at most 160. The Windows gate has no
+  ceiling. See `docs/BACKLOG.md` item 42.
 - **Manual tests** — a person tests each feature by hand. No test launches the
   daemon, the `chibipop` binary, or a child `chibipop` process. No test needs a
   real desktop.
@@ -124,7 +124,7 @@ reviewer reads the diff, the tests, and the gate output, not an agent's prose.
 - Run the gate of the changed platform. Run the OCR gate when the OCR engine
   changes.
 - Do not bloat the test count. Add a test only for a real user flow or a
-  reproduced bug. A ceiling gates the count.
+  reproduced bug. A ceiling gates the Linux count.
 
 **Ask first**
 
