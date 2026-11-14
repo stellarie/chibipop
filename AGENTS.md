@@ -55,8 +55,9 @@ cargo clippy --workspace --color never --all-targets --all-features -- -D warnin
 
 - **Automated gate** — runs without a screen. CI runs the sweep three times to
   find process-global races. The pass count has a ceiling, not a floor: 360 for
-  each platform. Core holds at most 200 tests. Each platform crate holds at
-  most 160. CI fails when the count is greater than the ceiling.
+  Linux and 364 for Windows. Core holds at most 200 tests. Each platform crate
+  holds at most 160. CI fails when the count is greater than the ceiling. The
+  Windows value is temporary. See `docs/BACKLOG.md` item 42.
 - **Manual tests** — a person tests each feature by hand. No test launches the
   daemon, the `chibipop` binary, or a child `chibipop` process. No test needs a
   real desktop.
