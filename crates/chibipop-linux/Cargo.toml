@@ -52,16 +52,14 @@ name = "ocr_gate"
 path = "tests/ocr_gate.rs"
 test = false
 
-[dependencies]
-chibipop = { path = "../.." }
-anyhow.workspace = true
-clap.workspace = true
-
 # Wayland/calloop only when actually compiling for Linux, mirroring the
 # Windows crate's cfg-stub arrangement: on a foreign target this bin is a
 # two-line refusal (src/main.rs) and pulls none of the platform stack, so
 # `cargo test --workspace` stays one command on both CI runners.
 [target.'cfg(target_os = "linux")'.dependencies]
+chibipop = { path = "../.." }
+anyhow.workspace = true
+clap.workspace = true
 calloop = { workspace = true, features = ["signals"] }
 calloop-wayland-source.workspace = true
 wayland-client.workspace = true

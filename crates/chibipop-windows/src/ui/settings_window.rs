@@ -6969,9 +6969,9 @@ impl SettingsWindow {
         }
         self.tabs = runtime_tabs;
         debug_assert_eq!(layout.tabs.len(), self.tabs.len());
-        for index in 0..layout.tabs.len() {
-            debug_assert_eq!(Some(layout.tabs[index].id), self.tab_id(index as u32));
-            debug_assert_eq!(Some(layout.tabs[index].label.as_str()), self.tab_label(index as u32));
+        for (index, tab) in layout.tabs.iter().enumerate() {
+            debug_assert_eq!(Some(tab.id), self.tab_id(index as u32));
+            debug_assert_eq!(Some(tab.label.as_str()), self.tab_label(index as u32));
         }
         self.plugin_names = plugin_names;
         remember_plugin_dirs(h, plugin_dirs);
