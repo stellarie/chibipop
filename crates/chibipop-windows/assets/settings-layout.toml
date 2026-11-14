@@ -142,6 +142,7 @@ advanced = true
 id = "popup-inflections"
 label = "Show inflection chain"
 help = "Shows the conjugation steps of the matched word, such as past or te form."
+advanced = true
 
 [[tabs]]
 id = "general"

@@ -217,7 +217,7 @@ const ID_SHOW_IMAGES: i32 = 167;
 /// The Show part of speech checkbox.
 const ID_SHOW_POS: i32 = 168;
 /// The Show inflection chain checkbox.
-const ID_SHOW_INFLECTIONS: i32 = 189;
+const ID_SHOW_INFLECTIONS: i32 = 190;
 /// The Move up button for the Frequency list.
 const ID_FREQ_UP: i32 = 169;
 /// The Move down button for the Frequency list.
