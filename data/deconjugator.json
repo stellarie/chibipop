@@ -549,8 +549,8 @@
  "adjectives have two te forms, one of which is not used synthetically",
  {
   "type": "stdrule",
-  "dec_end": "",
-  "con_end": "で",
+  "dec_end": "ない",
+  "con_end": "ないで",
   "dec_tag": "adj-i",
   "con_tag": "stem-te",
   "detail": "(te form)"
@@ -661,6 +661,47 @@
   "dec_tag": "vs-i",
   "con_tag": "uninflectable",
   "detail": "archaic negative"
+ },
+ "noun and suru",
+ {
+  "type": "stdrule",
+  "dec_end": "",
+  "con_end": "する",
+  "dec_tag": "vs-noun",
+  "con_tag": "vs-i",
+  "detail": "suru"
+ },
+ {
+  "type": "stdrule",
+  "dec_end": "",
+  "con_end": "される",
+  "dec_tag": "vs-noun",
+  "con_tag": "v1",
+  "detail": "suru passive"
+ },
+ {
+  "type": "stdrule",
+  "dec_end": "",
+  "con_end": "させる",
+  "dec_tag": "vs-noun",
+  "con_tag": "v1",
+  "detail": "suru causative"
+ },
+ {
+  "type": "stdrule",
+  "dec_end": "",
+  "con_end": "せず",
+  "dec_tag": "vs-noun",
+  "con_tag": "uninflectable",
+  "detail": "suru negative"
+ },
+ {
+  "type": "stdrule",
+  "dec_end": "",
+  "con_end": "せずに",
+  "dec_tag": "vs-noun",
+  "con_tag": "uninflectable",
+  "detail": "suru negative"
  },
  "special negative inflections where the intermediate stage (e.g. 赤くある) is not a valid synthetic phrase like the end result (e.g. 赤くありません) is",
  {

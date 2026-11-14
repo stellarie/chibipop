@@ -68,11 +68,11 @@ jobs:
           done
           n=$(awk '/^test result: ok\./ {s+=$4} END {print s+0}' test-3.log)
           echo "passing tests: $n"
-          # A ceiling, not a floor: 360 is 200 core tests plus 160 for
-          # this platform crate. A new test must justify itself.
+          # A ceiling, not a floor. A new test must justify itself.
+          # 364 is a temporary value. See docs/BACKLOG.md item 42.
           # Raise the ceiling only in a reviewed pull request.
-          if [ "$n" -gt 360 ]; then
-            echo "::error::expected at most 360 passing tests, got $n"
+          if [ "$n" -gt 364 ]; then
+            echo "::error::expected at most 364 passing tests, got $n"
             exit 1
           fi
 

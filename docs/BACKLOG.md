@@ -1701,3 +1701,23 @@ cheaply, memoisation stops producing them twice - and neither subsumes the other
 Not investigated: whether the same prefix set is re-deconjugated across consecutive
 hovers on the same OCR line, which is the case a cache would collapse. Measure that
 before building anything.
+
+---
+
+## 42. Reevaluate the automated test strategy and the count ceiling
+
+**Deferred 2026-11-15 by the user's decision.** A later release does this work.
+
+Main reached exactly 360 passing tests on Windows. After that, each pull request that
+added a test for a reproduced bug failed the Tier 0 gate, although every test passed.
+The Windows ceiling in `ci.yml` is now 364 as a temporary value. That value admits the
+four tests of the Inflection chain toggle and the stem and suru lookup fixes.
+
+Questions for the later release:
+
+- Does a count ceiling stop test bloat, or does it only block bug-fix tests?
+- Do the limits of 200 core tests and 160 tests for each platform crate still apply?
+  CI checks only the total.
+- Which tests can be merged or removed, so that the Windows ceiling returns to 360?
+
+Until then, do not raise the ceiling again without a decision from the user.
