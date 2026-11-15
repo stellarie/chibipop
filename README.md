@@ -24,30 +24,30 @@ point at a word to become dekiru
 **now that you have read all of the above, proceed**
 ---
 
-> Unofficial. This project has no tie to Yomitan, Anki, or meikiocr. This README describes v0.9.14.
+> Unofficial. chibipop is not affiliated with Yomitan, Anki, or meikiocr. This README describes v0.9.14.
 
-## What is this?
+## What is this? ♡
 
-chibipop is a popup dictionary for Japanese. Point at a Japanese word on your screen, and a small window shows what it means. It works on games, videos, and images too, where you cannot select text.
+chibipop is a popup dictionary for Japanese. Point at a Japanese word on your screen, and a small window shows its meaning. It works on games, videos, and images, where you cannot select text.
 
 It has two parts:
 
-- **The lookup program.** It reads the text near your pointer and finds the word in your dictionaries.
+- **The lookup program.** It reads the text near your pointer with optical character recognition (OCR) and finds the word in your dictionaries.
 - **The settings window.** You add dictionaries, choose keys, and connect Anki here.
 
 The popup shows how to read the word, what it means, its pitch accent, and how common it is ♡
 
-<p align="center"><img src="docs/architecture.png" alt="How chibipop works: it looks at the screen around your pointer and reads the text. It finds the word in your dictionary database. Then it shows a popup. The popup can send a card to Anki. chibipop reads its settings file and popup style file." width="860"></p>
+<p align="center"><img src="docs/architecture.png" alt="Diagram: chibipop reads text near your pointer, finds the word in your dictionary, and shows a popup that can send a card to Anki." width="860"></p>
 
 ## What you need
 
-- Windows 10 or 11, or Linux with a Wayland desktop: Hyprland, Sway, or KDE Plasma.
-- On Windows: Japanese text recognition. Install Japanese in Windows Settings under Time & language. Make sure the OCR feature is on.
-- On Linux: a Japanese font such as Noto Sans CJK, and a recent system (glibc 2.39 or newer).
-- A dictionary file. chibipop has no dictionary built in. [Jitendex](https://jitendex.org/pages/downloads.html) is a good start. Download **Jitendex for Yomitan**. Keep it as a `.zip` file. Do not unzip it.
+- Windows 10 or 11, or Linux with a Wayland desktop (Hyprland, Sway, or KDE Plasma).
+- Windows: Japanese text recognition. Install Japanese, with its OCR feature, in Windows Settings under Time & language.
+- Linux: a Japanese font such as Noto Sans CJK, the GNU C Library (glibc) 2.39 or newer, and a libstdc++ that provides `GLIBCXX_3.4.31`.
+- A dictionary file. chibipop includes no dictionary. [Jitendex](https://jitendex.org/pages/downloads.html) is a free Japanese-to-English dictionary. Download **Jitendex for Yomitan**. Do not unzip the `.zip` file.
 - Optional: Anki with the [AnkiConnect](https://ankiweb.net/shared/info/2055492159) add-on, to make flashcards.
 
-## Install
+## Install ~
 
 ### 1. Download
 
@@ -64,7 +64,7 @@ On Windows, right-click the zip and choose **Extract All**. On Linux, run:
 tar xzf chibipop-vX.Y.Z-linux-x64.tar.gz
 ```
 
-You get a folder with `chibipop` in it (`chibipop.exe` on Windows). On Nix, `nix run github:stellarie/chibipop -- run` does steps 1 and 3 for you.
+The extracted folder holds `chibipop` (`chibipop.exe` on Windows). On Nix, `nix run github:stellarie/chibipop -- run` replaces steps 1 and 3.
 
 ### 2. Add a dictionary
 
@@ -74,7 +74,7 @@ On Windows, double-click `chibipop.exe`. On Linux, run:
 ./chibipop settings
 ```
 
-Open the **Dictionaries** tab. On Windows, click **Add…**, pick your dictionary `.zip` file, and click **Apply**. On Linux, click **Browse…**, pick the file, and click **Rebuild**. The first build can take a few minutes.
+Open the **Dictionaries** tab. On Windows, click **Add…**, pick your dictionary `.zip` file, and click **Apply**. On Linux, click **Browse…**, pick the file, and click **Rebuild**. Wait for the build to finish.
 
 ### 3. Start
 
@@ -84,24 +84,24 @@ On Windows, lookup starts when the build ends. On Linux, run:
 ./chibipop run
 ```
 
-Keep the terminal open. The line `worker: pipeline up` means chibipop is ready.
+Keep the terminal open. The log line `worker: pipeline up` shows that chibipop is ready.
 
 ### 4. Read a word
 
 Put the pointer on Japanese text. In the default mode, **Follow pointer**, the popup follows your pointer.
 
-No popup? Add a dictionary, wait for the build to finish, and check the lookup mode on the **Shortcuts** tab.
+If no popup appears, add a dictionary, wait for the build to finish, and check the lookup mode on the **Shortcuts** tab.
 
-## Lookup modes
+## Lookup modes ~
 
 | Mode | What it does |
 |---|---|
 | **Follow pointer** | The popup follows your pointer. This is the default. |
-| **While held** | Lookup works while you hold a key. |
+| **While held** | Lookup runs while you hold a key. |
 | **Turn on / off** | One key press starts lookup. The next press stops it. |
 | **Once per press** | Each key press looks up one word. |
 
-On Windows, chibipop reads your lookup key by itself. On Linux, your desktop must send the key to chibipop. Set up a Bind in the **Shortcuts** tab. The tab shows the exact lines to paste into your desktop settings. This example is for Hyprland, with a Bind named `my-lookup`:
+On Windows, chibipop reads your lookup key itself. On Linux, your desktop must send the key to chibipop. Set up a Bind (a key linked to an action) on the **Shortcuts** tab. The tab shows the exact lines to paste into your desktop settings. This example is for Hyprland, with a Bind named `my-lookup`:
 
 ```text
 bind = ALT, F, exec, chibipop ctl bind-down my-lookup
@@ -114,47 +114,47 @@ bindr = ALT, F, exec, chibipop ctl bind-up my-lookup
 
 | Feature | What it does |
 |---|---|
-| Anki cards | Adds a card from the popup, with the sentence and a screenshot if you want. |
-| Dictionary search | Type a word to look it up. |
-| Sentence search | Paste a sentence, then click any word in it. |
-| Selected text | Looks up text that you selected, without reading the screen. |
-| Copy screen text | Copies the text in an area you pick to the clipboard. |
-| Profiles | Save different settings for different uses. |
+| Anki cards | Adds a card from the popup, with the sentence and an optional screenshot. |
+| Dictionary search | Looks up a word that you type. |
+| Sentence search | Splits a pasted sentence into words that you can click. |
+| Selected text | Looks up the text that you selected, without reading the screen. |
+| Copy screen text | Copies the text in an area that you pick to the clipboard. |
+| Profiles | Store separate popup, text reader, dictionary, and Anki settings for each use. |
 | Themes | Change how the popup looks. Four themes are in [`themes/`](themes/). |
-| OCR plugins | Windows only. A plugin swaps in another text reader. |
+| OCR plugins | Windows only. A plugin replaces the text reader. |
 
 The [guide](docs/GUIDE.md) explains each feature step by step.
 
 ## Privacy and safety (｀ω´)ゞ
 
-chibipop reads the text around your pointer.
+chibipop reads the screen around your pointer. A plugin also runs a program with your full user rights.
 
-- **Treat saved screenshots as private.** An Anki card can include a screenshot. chibipop keeps a copy in the `screenshots` folder. Anki keeps another copy.
-- A plugin is a separate program with your full user rights. Add only plugins that you trust.
-- chibipop uses the internet in one case: when you click **Check for updates**. On Windows, it can then replace `chibipop.exe` with the new version.
-- Anki cards go to AnkiConnect on your own computer, at `http://localhost:8765` unless you change it.
+- **Treat saved screenshots as private.** An Anki card can include a screenshot. chibipop keeps a copy in the `screenshots` folder, and Anki keeps another copy.
+- Add only plugins that you trust. A plugin is a separate program.
+- chibipop uses the internet only when you click **Check for updates**. On Windows, it can then replace `chibipop.exe` with the new version.
+- chibipop sends Anki cards to AnkiConnect on your own computer, at `http://localhost:8765` unless you change the address.
 - chibipop never downloads a model on the first run.
 
-> GNOME cannot show the popup yet. The older X11 system is not supported.
+> GNOME cannot show the popup yet. chibipop does not support X11.
 
 > Vertical text is in beta. It can miss the first character.
 
-## Settings
+## Configuration
 
-| Setting | Where to change it | Default |
+| Setting | Where | Default |
 |---|---|---|
 | Lookup mode | **Shortcuts** tab | **Follow pointer** |
 | Screen area size | **Text recognition** tab | 500 × 100 pixels |
 | Anki address | **Anki** tab | `http://localhost:8765` |
 | Screenshot folder | **Anki** tab on Linux. `save_dir` in `chibipop.toml` on Windows. | `screenshots` |
 | Popup style | A `popup.css` file next to the settings file | built-in style |
-| Settings file | `chibipop.toml` next to the program on Windows. `~/.config/chibipop/` on Linux. | made on the first run |
+| Settings file | `chibipop.toml` next to the program on Windows. `~/.config/chibipop/` on Linux. | created on the first run |
 
 The [guide](docs/GUIDE.md) covers every setting.
 
 ## Build it yourself
 
-Install [Rust](https://rustup.rs) stable. Both builds make a file named `chibipop`, so a command must skip the other build.
+Install [Rust](https://rustup.rs) stable. Both platform crates build a binary named `chibipop`. Run the commands for your platform:
 
 ```bash
 cargo build --release -p chibipop-windows   # Windows
@@ -167,4 +167,4 @@ cargo test --workspace --exclude chibipop-windows   # Linux
 
 GPL-3.0-or-later © stellarie. Made with ♡ (≧∀≦)
 
-The Linux build includes the [meikiocr](https://github.com/rtr46/meikiocr) models, which are LGPL-3.0. See [`LICENSE.md`](crates/chibipop-linux/models/meiki/LICENSE.md). Both builds include the IPADIC model. See [`COPYING`](data/ipadic/COPYING) and [`NOTICE`](data/ipadic/NOTICE). Dictionaries are not included. Each has its own license.
+The Linux build includes the [meikiocr](https://github.com/rtr46/meikiocr) models under LGPL-3.0. See [`LICENSE.md`](crates/chibipop-linux/models/meiki/LICENSE.md). Both builds include the IPADIC model for Japanese analysis. See [`COPYING`](data/ipadic/COPYING) and [`NOTICE`](data/ipadic/NOTICE). chibipop includes no dictionaries. Each dictionary has its own license.

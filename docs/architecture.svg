@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1040 440" width="1040" height="440" font-family="'Segoe UI','Noto Sans',sans-serif">
-<title>Architecture: chibipop captures a screen region at the pointer and runs OCR. It looks the word up in a SQLite database that it builds from Yomitan archives. Then it paints a popup. The popup talks to Anki through AnkiConnect. chibipop reads chibipop.toml and popup.css as files.</title>
+<title>Diagram: chibipop reads text near your pointer, finds the word in your dictionary, and shows a popup that can send a card to Anki.</title>
 <defs><marker id="a" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#3d2f4a"/></marker></defs>
 <rect width="1040" height="440" rx="24" fill="#fffafc"/>
 <rect x="25" y="130" width="170" height="90" rx="16" fill="#8b6fd6" fill-opacity="0.16" stroke="#8b6fd6" stroke-width="2.5"/>

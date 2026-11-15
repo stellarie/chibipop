@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1040 440" width="1040" height="440" font-family="'Microsoft YaHei','Noto Sans CJK SC',sans-serif">
-<title>架构：chibipop 截取指针处的屏幕区域，用 OCR 识别文字，在由 Yomitan 压缩包构建的 SQLite 数据库中查词，然后绘制弹窗。弹窗通过 AnkiConnect 与 Anki 通信。chibipop.toml 和 popup.css 作为文件读取。</title>
+<title>示意图：chibipop 读取指针附近的文字，在你的词典中查词，并显示可向 Anki 发送卡片的弹窗。</title>
 <defs><marker id="a" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#3d2f4a"/></marker></defs>
 <rect width="1040" height="440" rx="24" fill="#fffafc"/>
 <rect x="25" y="130" width="170" height="90" rx="16" fill="#8b6fd6" fill-opacity="0.16" stroke="#8b6fd6" stroke-width="2.5"/>
