@@ -24,7 +24,72 @@ Only plugins with the role `text-provider` do work today. The manifest also acce
 
 If the plugin cannot start, chibipop uses Windows OCR and writes the reason to its log. **Show live logs** on the **Debug** tab opens the log.
 
-The bundled [`plugins/meikiocr/`](../plugins/meikiocr/) plugin needs Python and extra setup. The [guide](GUIDE.md#9-changing-the-ocr-engine) explains it.
+The bundled [`plugins/meikiocr/`](../plugins/meikiocr/) plugin needs Python and extra setup. [Add meikiocr](#add-meikiocr) explains it.
+
+## Add meikiocr
+
+[meikiocr](https://github.com/rtr46/meikiocr) is an OCR engine for Japanese game text. The Windows download already holds its plugin in `plugins/meikiocr/`. The download does not include Python, the meikiocr package, or the models.
+
+You need Python 3 on your `PATH`, because the plugin starts with the command `python`. You need an internet connection for the setup only.
+
+### 1. Install the package
+
+Open PowerShell in the chibipop folder. Run:
+
+```powershell
+python -m pip install meikiocr
+```
+
+### 2. Download the models
+
+In the same PowerShell window, run:
+
+```powershell
+$env:HF_HOME = Join-Path $PWD "plugins\meikiocr\hf-cache"
+python -c "from meikiocr import MeikiOCR; MeikiOCR()"
+```
+
+The first line sends the download to the plugin's own cache folder. The second line downloads the models.
+
+The plugin runs offline. Therefore, the models must be in the cache before you enable the plugin. By default, the plugin reads `plugins/meikiocr/hf-cache/`. An `HF_HOME` variable in your system settings takes priority over that default.
+
+### 3. Turn it on
+
+1. On the **Extensions** tab, tick **Enable** beside **meikiocr**.
+2. On the **Text recognition** tab, choose **meikiocr** under **Text reader**.
+3. Click **Apply**.
+
+### 4. Check that it works
+
+Run the test command with a picture that contains Japanese text:
+
+```powershell
+.\chibipop.exe plugin test meikiocr --image sample.png
+```
+
+The command prints each line that meikiocr read. You can also tick **Show the active text reader** on the **Debug** tab, click **Apply**, and look up a word. The status area then names the engine.
+
+### Settings
+
+The file `plugins/meikiocr/config.toml` holds the settings for your computer. Edit this file. Do not edit `adapter.py` or `plugin.toml`. Use single quotes around a Windows path.
+
+| Key | Meaning | Default |
+|---|---|---|
+| `meikiocr_path` | The folder that holds the meikiocr package, such as `Lib\site-packages` of a virtual environment. Leave it empty when your Python already has the package. | empty |
+| `hf_home` | The folder that holds the downloaded models. | `hf-cache` beside `config.toml` |
+| `threads` | The number of ONNX Runtime threads. The allowed range is 1 to 4. | `4` |
+| `opencv_threads` | The number of OpenCV threads. The allowed range is 1 to 4. | `1` |
+| `debug` | Set `debug = 1` to log box detection. The log is large. Use it for one scan only. | off |
+
+`meikiocr_path` does not select a different Python. The plugin always runs the `python` that chibipop finds on `PATH`. To use a virtual environment, start chibipop from that environment.
+
+### If it does not work
+
+When the plugin cannot start, chibipop uses Windows OCR and writes `OCR plugin "meikiocr" failed, falling back to builtin` and the reason to its log.
+
+- **`LocalEntryNotFoundError` in the reason.** The model cache is empty, or it is in another folder. Do step 2 again, or set `hf_home`.
+- **The reason says that the module is missing.** The `python` on your `PATH` does not have meikiocr. Install the package with that same Python, or set `meikiocr_path`.
+- **No reason in the log.** Run `plugin test` in PowerShell. The command prints the error that the plugin sent.
 
 ## Make a plugin
 
