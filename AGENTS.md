@@ -75,7 +75,7 @@ src/analysis/            Japanese analysis service and model checks
 src/select/              Card selection and gesture state
 crates/chibipop-linux/   Wayland bin, tray, OCR engine under src/ocr/
 crates/chibipop-windows/ Win32 bin, DirectWrite measurement, geometry goldens
-docs/                    GUIDE, REFERENCE, LINUX, REGRESSION, RELEASING, BACKLOG
+docs/                    GUIDE, PLUGINS, REFERENCE, LINUX, REGRESSION, RELEASING, BACKLOG
 ```
 
 `ARCHITECTURE.md` contains the control flow and the rules. `CONTEXT.md`

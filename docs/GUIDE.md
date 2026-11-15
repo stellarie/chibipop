@@ -677,6 +677,8 @@ messages when you click **Apply**. Use the live log window for later messages.
 
 ### Write your own plugin
 
+[Plugins](PLUGINS.md) has the full guide. This section is a short summary.
+
 A plugin is a folder inside `plugins/` that holds:
 
 - `plugin.toml` — the name, version, protocol, command, and roles of the
@@ -922,6 +924,7 @@ a real desktop. Each feature gets a manual test instead. See
 | [`docs/REFERENCE.md`](REFERENCE.md) | every setting, the diagnostics, the tests, and the measured limits |
 | [`docs/LINUX.md`](LINUX.md) | the Linux build, in full |
 | [`docs/CSS-THEMING.md`](CSS-THEMING.md) | every selector that you can style |
+| [`docs/PLUGINS.md`](PLUGINS.md) | how to add and write a plugin |
 | [`docs/REGRESSION.md`](REGRESSION.md) | the automated gate and the manual tests that prove a build works |
 | [`docs/RELEASING.md`](RELEASING.md) | how a release is made |
 | [`docs/BACKLOG.md`](BACKLOG.md) | known problems and deferred work, with the evidence |
