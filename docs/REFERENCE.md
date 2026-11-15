@@ -518,6 +518,26 @@ Same-headword suppression includes Profile ID.
 Live lookup pauses while a configured lookup Bind owns a popup chain.
 A new lookup Bind replaces the chain root.
 The daemon ignores a release from a displaced Bind.
+
+A Hold bind shows the popup only while its key is down. Pointer moves while the
+key is down start new lookups. The key release hides the popup at once, also with
+the pointer on the popup, and drops a pending lookup.
+
+All Toggle binds share one on/off switch. The switch is off at start and is not
+saved. A press of a Toggle bind while the switch is off turns it on. While the
+switch is on, the pointer behaves as in **Follow pointer**: hover follows, the
+dwell re-check runs, per-character lookup follows its option, and an outside
+click hides the popup as in that mode. A press of any Toggle bind while the switch
+is on turns it off and hides the popup. On Windows, this also holds with the
+pointer on popup text. A selected-text lookup does not turn the switch off.
+Two events turn it off: a press of a Hold bind and a config reload.
+
+Two enabled binds with overlapping keys are a bind conflict. On Windows, Settings
+shows `Warning: bind "a" and bind "b" use the same keys. Each bind runs.` in the
+status line after a bind edit and when the window opens. Apply continues, and each
+bind runs. A bind on Escape or an invalid chord still stops Apply with
+"Not applied: ...". The Linux settings app refuses a conflict on Apply.
+
 Search identity is Search mode plus Profile ID.
 Linux has no Search profile picker.
 
