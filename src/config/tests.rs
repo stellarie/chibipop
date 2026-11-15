@@ -164,6 +164,10 @@ include_on_add = true
     assert_eq!(None, clash.hotkey_warning(Platform::Windows).unwrap());
     assert_eq!(Some(warning.to_string()), clash.hotkey_warning(Platform::Linux).unwrap());
     assert!(clash.validate_hotkeys(Platform::Linux).is_err());
+    let mut named = config.clone();
+    named.binds[0].id = "Escape".to_string();
+    named.binds[1].windows = "F2".to_string();
+    assert!(named.hotkey_warning(Platform::Windows).unwrap().is_some());
 }
 
 #[test]

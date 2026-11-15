@@ -4912,7 +4912,7 @@ impl SettingsWindow {
         }
     }
 
-    /// Shows a bind conflict warning, or clears a shown one.
+    /// Shows or clears the bind conflict warning.
     fn show_bind_warning(&self) {
         let snapshot = self.form_snapshot.borrow().clone();
         let form = self.read(&snapshot);

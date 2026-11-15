@@ -525,9 +525,9 @@ impl Config {
             for bind in self.binds.iter().filter(|bind| bind.enabled && !bind.windows.trim().is_empty()) {
                 let key = bind.windows_key()
                     .with_context(|| format!("Shortcut for bind {:?} is invalid.", bind.id))?;
-                for (id, previous) in &accepted {
+                for (index, (id, previous)) in accepted.iter().enumerate() {
                     if !configured_windows_overlap(*previous, key) { continue; }
-                    anyhow::ensure!(!stop_at_first && *id != "Escape",
+                    anyhow::ensure!(!stop_at_first && index != 0,
                         "Bind {:?} conflicts with {id:?}. Choose different keys.", bind.id);
                     overlap.get_or_insert((bind.id.as_str(), *id));
                 }

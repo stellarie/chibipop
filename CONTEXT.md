@@ -305,8 +305,10 @@ Toggle bind while the switch is off turns it on. While the switch is on, lookups
 pointer: hover follows the cursor, the Dwell re-check runs, per-character lookup follows its option,
 and the outside-press rule is the same. Each lookup reads a live grab with the popup masked, so
 lookups see screen changes. A press of any Toggle bind while the switch is on turns it off and hides
-the popup. On Windows, this also holds with the pointer on popup text. A Hold bind press or a config
-reload turns the switch off. A selected-text lookup does not.
+the popup. On Windows, this also holds with the pointer on popup text. A press of a Screen lookup bind
+that is not a Toggle bind turns the switch off. On Windows, a press with the pointer on popup text
+looks up that text instead, and the switch stays on. A change to the dictionary or plugin settings
+also turns the switch off. A plain config reload and a selected-text lookup do not.
 _Avoid_: latch mode, sticky mode
 
 **Hold mode**:

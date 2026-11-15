@@ -5645,7 +5645,7 @@ mod tests {
     }
 
     #[test]
-    fn selection_release_reconciles_only_the_active_hold_before_popup_restore() {
+    fn selection_release_reconciles_only_the_active_hold_and_hides_its_popup() {
         use crate::input::hooks::BindEvent;
         use crate::config::{BindAction, TriggerMode};
 

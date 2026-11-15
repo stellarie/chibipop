@@ -365,7 +365,8 @@ impl ControllerConfig {
     }
 }
 
-/// This freeze applies only when the pointer is followed.
+/// Freezes per-character lookup only when
+/// the pointer is followed.
 pub fn per_char_freeze(on: bool, follows_pointer: bool) -> bool {
     on && follows_pointer
 }

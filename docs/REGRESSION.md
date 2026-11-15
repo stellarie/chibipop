@@ -2332,7 +2332,7 @@ Use a window that shows fixture text in at least two places.
 | 1.46.2 | Toggle off hides the popup | With the switch on and a popup shown, press the same Toggle key. The popup must hide. Move the pointer over text. No lookup must start. |
 | 1.46.3 | Toggle off with the pointer on popup text | Turn the switch on and show a popup. Put the pointer on text inside the popup. Press the Toggle key. The popup must hide. The press must not open a child popup. |
 | 1.46.4 | A second Toggle bind switches off | Turn the switch on with the first Toggle Bind. Press the key of the third Bind. The popup must hide. Move the pointer over text. No lookup must start. |
-| 1.46.5 | Hold press ends the switch | Turn the switch on. Press and release the key of the Hold Bind. After the release, move the pointer over text. No lookup must start. |
+| 1.46.5 | Hold press ends the switch | Turn the switch on. Move the pointer away from the popup. Press and release the key of the Hold Bind. After the release, move the pointer over text. No lookup must start. |
 
 **Evidence and cleanup.** Record the Bind IDs, screenshots, logs, and tested revision.
 Restore the configuration.
