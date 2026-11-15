@@ -169,6 +169,8 @@ While the switch is on, hover follows the pointer as in Follow pointer mode.
 It reads live grabs with the popup masked.
 A press of any Toggle Bind while the switch is on turns it off and hides the popup.
 A press of a Screen lookup Bind that is not a Toggle Bind also turns the switch off.
+With the pointer on popup text, a press of any Screen lookup Bind, a Toggle Bind included, looks up that text instead.
+The switch stays on.
 A change to the dictionary or plugin settings also turns the switch off.
 A plain config reload and a selected-text lookup do not.
 A Hold press while a popup is up reads a live grab with the popup masked, not a frozen one.

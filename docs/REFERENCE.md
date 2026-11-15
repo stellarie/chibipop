@@ -528,12 +528,13 @@ saved. A press of a Toggle bind while the switch is off turns it on. While the
 switch is on, the pointer behaves as in **Follow pointer**: hover follows, the
 dwell re-check runs, per-character lookup follows its option, and an outside
 click hides the popup as in that mode. A press of any Toggle bind while the switch
-is on turns it off and hides the popup. On Windows, this also holds with the
-pointer on popup text. A selected-text lookup does not turn the switch off.
-Two events turn it off. The first is a press of a Screen lookup bind that is not
-a Toggle bind. On Windows, a press with the pointer on popup text looks up that
-text instead, and the switch stays on. The second is a change to the dictionary
-or plugin settings. A plain config reload keeps the switch on.
+is on turns it off and hides the popup. A selected-text lookup does not turn the
+switch off. Two events turn it off. The first is a press of a Screen lookup bind
+that is not a Toggle bind. The second is a change to the dictionary or plugin
+settings. A plain config reload keeps the switch on. With the pointer on popup
+text, a press of any Screen lookup bind, a Toggle bind included, looks up that
+text instead, and the switch stays on. On Windows, a Toggle bind press while the
+switch is on is the exception: it turns the switch off.
 
 Two enabled binds with overlapping keys are a bind conflict. On Windows, Settings
 shows `Warning: bind "a" and bind "b" use the same keys. Each bind runs.` in the

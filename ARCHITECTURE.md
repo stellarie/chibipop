@@ -246,10 +246,12 @@ Worker: capture -> mask -> OCR -> lookup -> present --result--> Controller
   option, and the outside-click rule is the same. A press of any Toggle Bind
   while the switch is on turns it off and hides the popup. The switch is off at
   start and is not saved. A press of a Screen lookup Bind that is not a Toggle
-  Bind turns it off, except on Windows with the pointer on popup text: that press
-  looks up the text and the switch stays on. A change to the dictionary or
-  plugin settings also turns it off. A plain config reload and a selected-text
-  lookup do not.
+  Bind also turns it off. With the pointer on popup text, a press of any Screen
+  lookup Bind, a Toggle Bind included, looks up that text instead, and the
+  switch stays on. On Windows, a Toggle Bind press while the switch is on is the
+  exception: it turns the switch off. A change to the dictionary or plugin
+  settings also turns it off. A plain config reload and a selected-text lookup
+  do not.
 - Hold mode shows the popup only while the key is down. Pointer moves during the
   hold start new lookups. The key release hides the popup at once, also with the
   pointer on the popup, and drops a pending lookup. A press while a popup is
@@ -257,8 +259,9 @@ Worker: capture -> mask -> OCR -> lookup -> present --result--> Controller
 - Press mode (the fixed `lookup` verb) runs one lookup per press and ignores the
   release. The popup stays until an outside click (consumed by the click catcher
   or hook) or a later press that finds no text.
-- A Hold activation, or a Toggle activation while the switch is off, over
-  painted popup text performs one dictionary lookup without capture or OCR.
+- A Hold activation, or a Toggle activation, over painted popup text performs
+  one dictionary lookup without capture or OCR. On Windows, a Toggle activation
+  while the switch is on turns the switch off instead.
   Blank popup space or a popup lookup miss does not dismiss the chain.
 - Hovering text inside an existing popup can still open a child popup.
 - A wrap probe follows pass 1 when the lookup would run past the line end and the box did
