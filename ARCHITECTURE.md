@@ -30,7 +30,7 @@ crates/chibipop-windows/src/  Windows bin: a GetMessageW loop.
   input/ action/ plugin/  Hooks, the actions they drive, the plugin host.
   ui/render/            Direct2D paint, DirectWrite TextMeasure adapter.
 tests/                  Core integration tests, fixtures, render sweep.
-docs/                   REFERENCE, REGRESSION, RELEASING, LINUX, research.
+docs/                   GUIDE, REFERENCE, REGRESSION, RELEASING, LINUX, research.
 themes/ plugins/ data/  CSS themes; bundled meikiocr; deconjugator.json.
   data/ipadic/          Committed IPADIC model, digest pins, and license files.
 packaging/aur/ extras/  PKGBUILDs; desktop file, systemd unit, snippet.
