@@ -2335,9 +2335,16 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: Option<&Path>, config_
                         };
                         match catalog.for_bind(&bind.id) {
                             Ok(session) => {
-                                let event = match popup_query_at(
-                                    &controller, &popup, &mut renderer, &parent_popups, cursor_pos,
-                                ) {
+                                let switch_off = bind.mode == crate::config::TriggerMode::Toggle
+                                    && controller.latched();
+                                let hit = if switch_off {
+                                    None
+                                } else {
+                                    popup_query_at(
+                                        &controller, &popup, &mut renderer, &parent_popups, cursor_pos,
+                                    )
+                                };
+                                let event = match hit {
                                     Some((depth, local, query)) => {
                                         Event::PopupLookupRequested { depth, local, query, session }
                                     }
@@ -5662,9 +5669,9 @@ mod tests {
         for event in selection_release_events(vec![release]) {
             commands.extend(controller.handle(event));
         }
-        assert!(!commands.contains(&Command::HidePopup));
+        assert!(commands.contains(&Command::HidePopup));
         assert_eq!(None, controller.active_bind_id());
-        assert!(screenshot_restore_view(&controller).is_some());
+        assert!(screenshot_restore_view(&controller).is_none());
     }
 
     #[test]
