@@ -148,6 +148,8 @@ const ID_FREQS: i32 = 119;
 const ID_FREQ_ADD: i32 = 120;
 const ID_FREQ_REMOVE: i32 = 121;
 const ID_STATUS: i32 = 122;
+const STATUS_READY: &str = "Ready.";
+const BIND_WARNING_PREFIX: &str = "Warning: bind ";
 const ID_MAX_WIDTH: i32 = 123;
 const ID_CHECK_UPDATE: i32 = 124;
 const ID_ANKI_ENABLED: i32 = 125;
@@ -1177,6 +1179,7 @@ thread_local! {
     static WINDOW_DPI: Cell<Option<(isize, u32)>> = const { Cell::new(None) };
     static SHOW_LOGS: Cell<Option<isize>> = const { Cell::new(None) };
     static USER_EDIT: Cell<Option<isize>> = const { Cell::new(None) };
+    static BIND_EDIT: Cell<Option<isize>> = const { Cell::new(None) };
     static EDIT_TRACKING: Cell<Option<isize>> = const { Cell::new(None) };
 }
 
@@ -1186,6 +1189,11 @@ fn record_user_edit(hwnd: HWND) {
     if active {
         USER_EDIT.with(|slot| slot.set(Some(owner)));
     }
+}
+
+fn record_bind_edit(hwnd: HWND) {
+    BIND_EDIT.with(|slot| slot.set(Some(hwnd.0 as isize)));
+    record_user_edit(hwnd);
 }
 
 fn without_edit_tracking<T>(hwnd: HWND, action: impl FnOnce() -> T) -> T {
@@ -1537,13 +1545,13 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 if offset == ID_BIND_ACTION_OFFSET && notify == CBN_SELCHANGE as u16 {
                     unsafe { update_bind_row_controls(hwnd, row) };
                     unsafe { update_follow_pointer(hwnd) };
-                    record_user_edit(hwnd);
+                    record_bind_edit(hwnd);
                     return LRESULT(0);
                 }
                 if offset == ID_BIND_ENABLED_OFFSET && notify == BN_CLICKED as u16 {
                     unsafe { update_bind_row_controls(hwnd, row) };
                     unsafe { update_follow_pointer(hwnd) };
-                    record_user_edit(hwnd);
+                    record_bind_edit(hwnd);
                     return LRESULT(0);
                 }
                 if offset == ID_BIND_CHORD_OFFSET && notify == BN_CLICKED as u16 {
@@ -4657,6 +4665,7 @@ impl SettingsWindow {
             EDIT_TRACKING.with(|slot| slot.set(Some(hwnd.0 as isize)));
             TAB.with(|cell| cell.set(Some((hwnd.0 as isize, 0))));
             win.wake();
+            win.show_bind_warning();
             let _ = SetForegroundWindow(hwnd);
             Ok(win)
         }
@@ -4807,6 +4816,7 @@ impl SettingsWindow {
             return;
         }
         self.set_apply_state(ApplyState::Pending);
+        self.show_bind_warning();
     }
 
     /// Processes a queued button action.
@@ -4835,6 +4845,16 @@ impl SettingsWindow {
         if edited && self.apply_state.get() != ApplyState::Applying {
             USER_EDIT.with(|slot| slot.set(None));
             self.set_apply_state(ApplyState::Pending);
+        }
+        let bind_edited = BIND_EDIT.with(|slot| match slot.get() {
+            Some(owner) if owner == self.hwnd.0 as isize => {
+                slot.set(None);
+                true
+            }
+            _ => false,
+        });
+        if bind_edited {
+            self.show_bind_warning();
         }
         self.pump_field_map();
         let anki_changed = ANKI_ENABLED_CHANGED.with(|slot| match slot.get() {
@@ -4889,6 +4909,24 @@ impl SettingsWindow {
                     self.handle_bind_catalog_action(action)
                 }
             }
+        }
+    }
+
+    /// Shows a bind conflict warning, or clears a shown one.
+    fn show_bind_warning(&self) {
+        let snapshot = self.form_snapshot.borrow().clone();
+        let form = self.read(&snapshot);
+        let warning = form.catalog.hotkey_warning(crate::config::Platform::Windows)
+            .ok()
+            .flatten();
+        // SAFETY: The status line remains live until `Drop`.
+        let shown = unsafe { dlg_item(self.hwnd, ID_STATUS).map(|c| window_text(c)) };
+        match warning {
+            Some(text) => self.set_status(&text),
+            None if shown.is_ok_and(|text| text.starts_with(BIND_WARNING_PREFIX)) => {
+                self.set_status(STATUS_READY);
+            }
+            None => {}
         }
     }
 
@@ -5343,10 +5381,6 @@ impl SettingsWindow {
     fn sentence_is_static(&self) -> bool {
         // SAFETY: The sentence combo remains live until `Drop`.
         unsafe { static_sentence_selected(self.hwnd) }
-    }
-
-    pub fn validate_hotkeys(&self, pending: &crate::config::Config) -> Result<()> {
-        pending.validate_hotkeys(crate::config::Platform::Windows)
     }
 
     fn field_map_entry_height(&self, base_height: i32) -> i32 {
@@ -5875,7 +5909,7 @@ impl SettingsWindow {
                 let _ = SetWindowTextW(button, PCWSTR(wide(&label).as_ptr()));
             }
         }
-        record_user_edit(self.hwnd);
+        record_bind_edit(self.hwnd);
     }
 
     /// Populates Anki deck and model combos and field-map rows.
@@ -7349,7 +7383,7 @@ impl SettingsWindow {
             child(
                 h,
                 w!("EDIT"),
-                "Ready.",
+                STATUS_READY,
                 WINDOW_STYLE((ES_MULTILINE | ES_READONLY) as u32) | WS_BORDER | WS_VSCROLL,
                 PAD,
                 self.bottom_y0 + BOTTOM_STATUS_DY,
@@ -7778,7 +7812,7 @@ impl Drop for SettingsWindow {
                 *slot = None;
             }
         });
-        for slot in [&RESIZED, &SHOW_LOGS, &USER_EDIT, &EDIT_TRACKING] {
+        for slot in [&RESIZED, &SHOW_LOGS, &USER_EDIT, &BIND_EDIT, &EDIT_TRACKING] {
             slot.with(|cell| {
                 if cell.get() == Some(self.hwnd.0 as isize) {
                     cell.set(None);
@@ -8249,6 +8283,58 @@ mod tests {
             .collect();
         assert_eq!(1, help.len());
         assert!(help[0].y > entry.controls[0].y);
+    }
+
+    #[test]
+    fn a_bind_conflict_shows_a_status_warning_until_the_conflict_ends() {
+        let warning =
+            r#"Warning: bind "anki-add" and bind "lookup" use the same keys. Each bind runs."#;
+        let mut config = crate::config::Config::default();
+        config.live_lookup = false;
+        config.binds[0].enabled = true;
+        config.binds[0].windows = "F2".into();
+        config.binds[1].windows = "F2".into();
+        let form = crate::settings::from_config(&config, &[]);
+        let mut window = SettingsWindow::open(&form, &[], ApplyMode::Standalone).unwrap();
+        let status = |window: &SettingsWindow| {
+            // SAFETY: The status line remains live in the test window.
+            unsafe { window_text(dlg_item(window.hwnd, ID_STATUS).unwrap()) }
+        };
+        let enabled = bind_control_id(1, ID_BIND_ENABLED_OFFSET);
+        let chord = bind_control_id(1, ID_BIND_CHORD_OFFSET);
+        let tick = |window: &SettingsWindow, ticked: bool| {
+            // SAFETY: The test window owns the checkbox.
+            unsafe {
+                let control = dlg_item(window.hwnd, enabled).unwrap();
+                SendMessageW(control, BM_SETCHECK, Some(WPARAM(ticked as usize)), None);
+            }
+            send_button_click(window, enabled);
+        };
+        assert_eq!(STATUS_READY, status(&window));
+
+        tick(&window, true);
+        window.pump(|| {});
+        assert_eq!(warning, status(&window));
+        window.commit_bind_capture(chord, "F3".into());
+        window.pump(|| {});
+        assert_eq!(STATUS_READY, status(&window));
+        window.commit_bind_capture(chord, "F2".into());
+        window.pump(|| {});
+        assert_eq!(warning, status(&window));
+        tick(&window, false);
+        window.pump(|| {});
+        assert_eq!(STATUS_READY, status(&window));
+
+        window.set_status("Saved configuration.");
+        window.commit_bind_capture(chord, "F5".into());
+        window.pump(|| {});
+        assert_eq!("Saved configuration.", status(&window));
+
+        config.binds[1].enabled = true;
+        drop(window);
+        let form = crate::settings::from_config(&config, &[]);
+        let window = SettingsWindow::open(&form, &[], ApplyMode::Standalone).unwrap();
+        assert_eq!(warning, status(&window));
     }
 
     fn outer_rect(window: &SettingsWindow) -> RECT {

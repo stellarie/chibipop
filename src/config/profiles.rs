@@ -508,16 +508,28 @@ impl Config {
         }
     }
 
+    pub fn hotkey_warning(&self, platform: Platform) -> Result<Option<String>> {
+        Ok(self.hotkey_overlap(platform, false)?.map(|(bind, other)| format!(
+            "Warning: bind {bind:?} and bind {other:?} use the same keys. Each bind runs.")))
+    }
+
     pub fn validate_hotkeys(&self, platform: Platform) -> Result<()> {
+        self.hotkey_overlap(platform, true).map(|_| ())
+    }
+
+    fn hotkey_overlap(&self, platform: Platform, stop_at_first: bool) -> Result<Option<(&str, &str)>> {
         self.validate()?;
+        let mut overlap = None;
         if platform == Platform::Windows {
             let mut accepted = vec![("Escape", (0x1B, None))];
             for bind in self.binds.iter().filter(|bind| bind.enabled && !bind.windows.trim().is_empty()) {
                 let key = bind.windows_key()
                     .with_context(|| format!("Shortcut for bind {:?} is invalid.", bind.id))?;
                 for (id, previous) in &accepted {
-                    anyhow::ensure!(!configured_windows_overlap(*previous, key),
+                    if !configured_windows_overlap(*previous, key) { continue; }
+                    anyhow::ensure!(!stop_at_first && *id != "Escape",
                         "Bind {:?} conflicts with {id:?}. Choose different keys.", bind.id);
+                    overlap.get_or_insert((bind.id.as_str(), *id));
                 }
                 accepted.push((&bind.id, key));
             }
@@ -526,13 +538,15 @@ impl Config {
             for bind in self.binds.iter().filter(|bind| bind.enabled && !bind.linux.trim().is_empty()) {
                 let key = linux_hotkey(&bind.linux);
                 for (id, previous) in &accepted {
-                    anyhow::ensure!(previous != &key,
+                    if previous != &key { continue; }
+                    anyhow::ensure!(!stop_at_first,
                         "Bind {:?} conflicts with {id:?}. Choose different keys.", bind.id);
+                    overlap.get_or_insert((bind.id.as_str(), *id));
                 }
                 accepted.push((&bind.id, key));
             }
         }
-        Ok(())
+        Ok(overlap)
     }
 
     pub fn from_toml(text: &str) -> Result<Self> {

@@ -539,7 +539,7 @@ pub fn settings_only(
                     let applied = settings::apply_to(&form, &latest);
                     let updated = &applied.config;
                     if let Err(error) = updated.resolve(&applied.profile_id)
-                        .and_then(|_| updated.validate_hotkeys(crate::config::Platform::Windows))
+                        .and_then(|_| updated.hotkey_warning(crate::config::Platform::Windows))
                     {
                         refuse_apply(&window, &error);
                         continue;
@@ -604,7 +604,7 @@ pub fn settings_only(
                 let applied = settings::apply_to(&edited, &latest);
                 let updated = &applied.config;
                 if let Err(error) = updated.resolve(&applied.profile_id)
-                    .and_then(|_| updated.validate_hotkeys(crate::config::Platform::Windows))
+                    .and_then(|_| updated.hotkey_warning(crate::config::Platform::Windows))
                 {
                     refuse_apply(&window, &error);
                     continue;
@@ -2786,7 +2786,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: Option<&Path>, config_
                                     let latest = crate::config::load_or_create(config_path)?;
                                     let applied = settings::apply_to(&edited, &latest);
                                     applied.config.resolve(&applied.profile_id)?;
-                                    applied.config.validate_hotkeys(crate::config::Platform::Windows)?;
+                                    applied.config.hotkey_warning(crate::config::Platform::Windows)?;
                                     Ok::<_, anyhow::Error>(applied)
                                 })();
                                 let applied = match prepared {
@@ -2868,7 +2868,10 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: Option<&Path>, config_
                                     continue;
                                 }
                             };
-                            if w.validate_hotkeys(&applied.config).is_err() {
+                            if let Err(error) = applied.config
+                                .hotkey_warning(crate::config::Platform::Windows)
+                            {
+                                refuse_apply(w, &error);
                                 continue;
                             }
                             apply_generation = apply_generation.wrapping_add(1);
@@ -4623,7 +4626,7 @@ fn persist_default_profile(config_path: &Path, id: &str) -> Result<Option<Config
     }
     latest.default_profile = id.to_string();
     latest.validate()?;
-    latest.validate_hotkeys(crate::config::Platform::Windows)?;
+    latest.hotkey_warning(crate::config::Platform::Windows)?;
     latest.save(config_path)?;
     Ok(Some(latest))
 }
