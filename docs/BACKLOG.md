@@ -1735,3 +1735,21 @@ On Windows, an enabled Screen lookup bind disables and clears the Follow pointer
 checkbox. The Linux settings app has the same control: the checkbox "Enable live lookup
 at the pointer" in `crates/chibipop-linux/src/settings/app.rs` (`shortcuts_page`,
 `Message::LiveLookup`). It does not apply the rule yet.
+
+---
+
+## 44. The Linux settings app has no bind conflict warning
+
+**Deferred 2026-11-16.** The lookup bind modes change covers core and Windows only. The
+Linux crate does not build on the Windows workstation.
+
+On Windows, two enabled binds with overlapping keys give a status-line warning, and Apply
+continues. The Linux settings app still refuses a conflict on Apply, through
+`Config::validate_hotkeys` in `crates/chibipop-linux/src/settings/apply.rs`. It has no
+warning and no continue path.
+
+The Toggle switch (one on/off Follow pointer switch for all Toggle binds) and the Hold
+release rule live in core `Controller`, so they reach the Linux daemon. Nobody checked the
+Linux bin for parity with the Follow pointer lock work, for example the outside-click
+catcher while the switch is on, or a Toggle press over popup text. This machine cannot run
+the Linux tests.

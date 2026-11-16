@@ -539,7 +539,7 @@ pub fn settings_only(
                     let applied = settings::apply_to(&form, &latest);
                     let updated = &applied.config;
                     if let Err(error) = updated.resolve(&applied.profile_id)
-                        .and_then(|_| updated.validate_hotkeys(crate::config::Platform::Windows))
+                        .and_then(|_| updated.hotkey_warning(crate::config::Platform::Windows))
                     {
                         refuse_apply(&window, &error);
                         continue;
@@ -604,7 +604,7 @@ pub fn settings_only(
                 let applied = settings::apply_to(&edited, &latest);
                 let updated = &applied.config;
                 if let Err(error) = updated.resolve(&applied.profile_id)
-                    .and_then(|_| updated.validate_hotkeys(crate::config::Platform::Windows))
+                    .and_then(|_| updated.hotkey_warning(crate::config::Platform::Windows))
                 {
                     refuse_apply(&window, &error);
                     continue;
@@ -2335,9 +2335,16 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: Option<&Path>, config_
                         };
                         match catalog.for_bind(&bind.id) {
                             Ok(session) => {
-                                let event = match popup_query_at(
-                                    &controller, &popup, &mut renderer, &parent_popups, cursor_pos,
-                                ) {
+                                let switch_off = bind.mode == crate::config::TriggerMode::Toggle
+                                    && controller.latched();
+                                let hit = if switch_off {
+                                    None
+                                } else {
+                                    popup_query_at(
+                                        &controller, &popup, &mut renderer, &parent_popups, cursor_pos,
+                                    )
+                                };
+                                let event = match hit {
                                     Some((depth, local, query)) => {
                                         Event::PopupLookupRequested { depth, local, query, session }
                                     }
@@ -2779,7 +2786,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: Option<&Path>, config_
                                     let latest = crate::config::load_or_create(config_path)?;
                                     let applied = settings::apply_to(&edited, &latest);
                                     applied.config.resolve(&applied.profile_id)?;
-                                    applied.config.validate_hotkeys(crate::config::Platform::Windows)?;
+                                    applied.config.hotkey_warning(crate::config::Platform::Windows)?;
                                     Ok::<_, anyhow::Error>(applied)
                                 })();
                                 let applied = match prepared {
@@ -2861,7 +2868,10 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: Option<&Path>, config_
                                     continue;
                                 }
                             };
-                            if w.validate_hotkeys(&applied.config).is_err() {
+                            if let Err(error) = applied.config
+                                .hotkey_warning(crate::config::Platform::Windows)
+                            {
+                                refuse_apply(w, &error);
                                 continue;
                             }
                             apply_generation = apply_generation.wrapping_add(1);
@@ -4616,7 +4626,7 @@ fn persist_default_profile(config_path: &Path, id: &str) -> Result<Option<Config
     }
     latest.default_profile = id.to_string();
     latest.validate()?;
-    latest.validate_hotkeys(crate::config::Platform::Windows)?;
+    latest.hotkey_warning(crate::config::Platform::Windows)?;
     latest.save(config_path)?;
     Ok(Some(latest))
 }
@@ -5635,7 +5645,7 @@ mod tests {
     }
 
     #[test]
-    fn selection_release_reconciles_only_the_active_hold_before_popup_restore() {
+    fn selection_release_reconciles_only_the_active_hold_and_hides_its_popup() {
         use crate::input::hooks::BindEvent;
         use crate::config::{BindAction, TriggerMode};
 
@@ -5662,9 +5672,9 @@ mod tests {
         for event in selection_release_events(vec![release]) {
             commands.extend(controller.handle(event));
         }
-        assert!(!commands.contains(&Command::HidePopup));
+        assert!(commands.contains(&Command::HidePopup));
         assert_eq!(None, controller.active_bind_id());
-        assert!(screenshot_restore_view(&controller).is_some());
+        assert!(screenshot_restore_view(&controller).is_none());
     }
 
     #[test]

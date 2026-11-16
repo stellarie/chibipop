@@ -159,12 +159,21 @@ These verbs keep their legacy routing and do not replace configured Binds.
 Hold mode freezes one full grab before the popup appears.
 Each screen lookup during the hold reads that frozen screen.
 Moving to another monitor starts a grab for that monitor.
-Release drops the frame. The popup stays until an outside click, which is consumed, or until a later press finds no text.
+Release drops the frame and hides the popup at once, also with the pointer on the popup.
+Pointer moves while the key is down start new lookups.
+A release also drops a pending lookup.
 
-Toggle mode latches the trigger.
-It reads live grabs with the popup masked until toggle-off.
+Toggle mode is one switch for all Toggle Binds.
+The switch is off at start and is not saved.
+While the switch is on, hover follows the pointer as in Follow pointer mode.
+It reads live grabs with the popup masked.
+A press of any Toggle Bind while the switch is on turns it off and hides the popup.
+A press of a Screen lookup Bind that is not a Toggle Bind also turns the switch off.
+With the pointer on popup text, a press of any Screen lookup Bind, a Toggle Bind included, looks up that text instead.
+The switch stays on.
+A change to the dictionary or plugin settings also turns the switch off.
+A plain config reload and a selected-text lookup do not.
 A Hold press while a popup is up reads a live grab with the popup masked, not a frozen one.
-Per-character lookup is inert in Toggle mode.
 
 Over painted popup text, a Hold or Toggle activation performs one dictionary lookup.
 It reads the painted text directly and does not capture or OCR.

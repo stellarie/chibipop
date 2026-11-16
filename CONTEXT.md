@@ -70,13 +70,13 @@ _Avoid_: capture lock
 
 **Dwell re-check**:
 The damage-gated watch kept while the cursor rests on a shown popup. The popup refreshes
-when the screen changes beneath it. The watch runs in live mode and in a latched Toggle mode.
+when the screen changes beneath it. The watch runs in live mode and while the Toggle switch is on.
 _Avoid_: polling loop, refresh timer
 
 **Frozen grab**:
 The press-time full-output capture for hold-key mode. While hold-key mode holds the grab, every
 lookup reads this capture. The capture happens before the popup exists, so it needs no mask and
-reads through the popup. Toggle mode reads live grabs with the popup masked while latched. Press
+reads through the popup. Toggle mode reads live grabs with the popup masked while the switch is on. Press
 mode reads one live masked grab for each press.
 _Avoid_: snapshot, screenshot buffer
 
@@ -300,19 +300,34 @@ The source of trigger-key press and trigger-key release events on Linux.
 _Avoid_: keyboard hook, hotkey listener
 
 **Toggle mode**:
-One trigger-key press shows the popup and latches the trigger. While the latch is on, each lookup
-reads a live grab with the popup masked, so lookups see screen changes. The next press hides the
-popup and turns off the latch. Per-character lookup is inert in this mode, as in hold-key mode.
+One switch serves all Toggle binds. It is off at start, and the daemon never saves it. A press of a
+Toggle bind while the switch is off turns it on. While the switch is on, lookups act as in Follow
+pointer: hover follows the cursor, the Dwell re-check runs, per-character lookup follows its option,
+and the outside-press rule is the same. Each lookup reads a live grab with the popup masked, so
+lookups see screen changes. A press of any Toggle bind while the switch is on turns it off and hides
+the popup. A press of a Screen lookup bind that is not a Toggle bind also turns the switch off. With
+the pointer on popup text, a press of any Screen lookup bind, a Toggle bind included, looks up that
+text instead, and the switch stays on. On Windows, a Toggle bind press while the switch is on is the
+exception: it turns the switch off. A change to the dictionary or plugin settings also turns the
+switch off. A plain config reload and a selected-text lookup do not.
 _Avoid_: latch mode, sticky mode
 
 **Hold mode**:
-One trigger-key press runs one lookup at the cursor. The key release does nothing. If a lookup finds
-text, the popup shows and stays until an outside button press, which is swallowed, or a later press
-that finds no text. Hover never follows the cursor and no Dwell re-check runs. A press while a popup
-is up reads a live grab with the popup masked. Per-character lookup is inert in this mode.
-Desktops that cannot send a key release (KDE and GNOME without a portal binding, Niri) can still
-use it through the `chibipop ctl lookup` verb or Toggle mode.
-_Avoid_: press mode, one-shot mode, sticky popup
+A Hold bind press runs one lookup at the cursor. The popup shows only while the key is down.
+Pointer moves while the key is down start new lookups. The key release hides the popup at once, also
+with the pointer on the popup, and drops a pending lookup. A press while a popup is up reads a live
+grab with the popup masked. Per-character lookup is inert in this mode. Desktops that cannot send a
+key release (KDE and GNOME without a portal binding, Niri) can use Toggle mode or the
+`chibipop ctl lookup` verb (Press mode).
+_Avoid_: one-shot mode, sticky popup
+
+**Press mode**:
+The neutral one-shot mode of non-lookup binds and the `chibipop ctl lookup` verb. One press runs one
+lookup at the cursor. The key release does nothing. If a lookup finds text, the popup shows and stays
+until an outside button press, which is swallowed, or a later press that finds no text. Hover never
+follows the cursor and no Dwell re-check runs. A press while a popup is up reads a live grab with the
+popup masked.
+_Avoid_: hold mode
 
 **Click catcher**:
 The transparent full-output layer surface that the daemon gives every output while a Hold-mode popup,
@@ -435,6 +450,10 @@ AnkiAdd and StaticRegion use the displayed profile.
 A new lookup bind replaces the root of the active chain.
 Live lookup pauses until that chain ends.
 The daemon ignores a release from a displaced bind.
+
+Two enabled binds with overlapping keys are a bind conflict. On Windows, the settings window shows a
+warning in the status line, and Apply continues. Each bind runs. A bind on Escape or an invalid chord
+stops Apply. The Linux settings app refuses a conflict on Apply.
 
 The catalog is immutable for each Profile session.
 Existing popups and Search windows keep their catalog and settings.

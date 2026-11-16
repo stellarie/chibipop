@@ -237,17 +237,32 @@ Worker: capture -> mask -> OCR -> lookup -> present --result--> Controller
 - At Hold Bind activation, the system freezes one full grab under the cursor
   before any popup exists. No capture or mask runs during the hold.
 - Release drops the Frozen grab, and each Hold Bind activation captures again.
-  Toggle mode latches the trigger and reads live grabs with the popup masked
-  until toggle-off. Configured Linux Toggle Binds use `bind-down ID`.
-  The fixed `chibipop ctl toggle` verb remains supported. Windows flips the
-  hook latch for both configured and fixed Toggle actions.
-- Hold mode runs one lookup per key-down and ignores the key release. The popup stays
-  until an outside click (consumed by the click catcher or hook) or a later press that
-  finds no text. A press while a popup is shown performs a live masked grab, not a
-  Frozen one.
-- A Hold or Toggle activation over painted popup text performs one dictionary
-  lookup without capture or OCR. Blank popup space or a popup lookup miss does not
-  dismiss the chain.
+  Toggle mode is one switch for all Toggle Binds. It reads live grabs with the
+  popup masked until toggle-off. Configured Linux Toggle Binds use `bind-down ID`.
+  The fixed `chibipop ctl toggle` verb remains supported. On Windows, the
+  Controller owns the switch for both configured and fixed Toggle actions.
+- While the Toggle switch is on, the Controller follows the pointer as in Live
+  mode: hover follows, the dwell re-check runs, per-character lookup follows its
+  option, and the outside-click rule is the same. A press of any Toggle Bind
+  while the switch is on turns it off and hides the popup. The switch is off at
+  start and is not saved. A press of a Screen lookup Bind that is not a Toggle
+  Bind also turns it off. With the pointer on popup text, a press of any Screen
+  lookup Bind, a Toggle Bind included, looks up that text instead, and the
+  switch stays on. On Windows, a Toggle Bind press while the switch is on is the
+  exception: it turns the switch off. A change to the dictionary or plugin
+  settings also turns it off. A plain config reload and a selected-text lookup
+  do not.
+- Hold mode shows the popup only while the key is down. Pointer moves during the
+  hold start new lookups. The key release hides the popup at once, also with the
+  pointer on the popup, and drops a pending lookup. A press while a popup is
+  shown performs a live masked grab, not a Frozen one.
+- Press mode (the fixed `lookup` verb) runs one lookup per press and ignores the
+  release. The popup stays until an outside click (consumed by the click catcher
+  or hook) or a later press that finds no text.
+- A Hold activation, or a Toggle activation, over painted popup text performs
+  one dictionary lookup without capture or OCR. On Windows, a Toggle activation
+  while the switch is on turns the switch off instead.
+  Blank popup space or a popup lookup miss does not dismiss the chain.
 - Hovering text inside an existing popup can still open a child popup.
 - A wrap probe follows pass 1 when the lookup would run past the line end and the box did
   not clip the line. Pass 1 must show no continuation. A continuation near pass 1's lead
@@ -352,10 +367,10 @@ Worker: capture -> mask -> OCR -> lookup -> present --result--> Controller
   It keeps the footer controls and their status.
 - Interactive Windows commands tee output into a bounded live log. Machine-readable commands
   keep their output contract. Restore original streams before spawning a replacement daemon.
-- Settings reject conflicting platform shortcuts before applying or saving changes.
+- Windows settings reject an invalid chord and a Bind on Escape before applying or saving changes.
+  On Windows, two enabled Binds with overlapping keys give a status-line warning,
+  and Apply continues. Each Bind runs. Linux settings refuse that conflict on Apply.
   Users can swap keys in one Apply.
-  Windows suppresses lower-priority legacy conflicts in memory and reports them without rewriting the file.
-  Priority is Back/Escape, lookup, Anki add, static region, then OCR clipboard.
   Linux validates configured chords. Apply requests direct portal bindings where supported.
   Native compositor bindings remain external configuration.
 - Linux settings run as a separate `chibipop settings` process with iced. The daemon
