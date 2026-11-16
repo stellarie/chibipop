@@ -392,7 +392,7 @@ The fixed socket verbs remain supported.
 | `chibipop --config <path> …` | Uses that exact config file, any subcommand. |
 
 There is **no `build-dict` subcommand on Linux**. The frequency-list rebuild
-the Windows README describes runs inside the settings window instead — add
+the Windows guide describes runs inside the settings window instead — add
 your frequency lists there and Apply.
 
 ## Differences from Windows

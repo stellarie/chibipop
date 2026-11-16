@@ -1,6 +1,6 @@
 # chibipop — technical reference
 
-Everything the [README](../README.md) deliberately leaves out: the config
+Everything the [guide](GUIDE.md) deliberately leaves out: the config
 file's own reference, the diagnostic subcommands, how to run the tests, and
 the limits that were measured rather than assumed.
 

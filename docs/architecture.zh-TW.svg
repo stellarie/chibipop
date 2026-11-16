@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1040 440" width="1040" height="440" font-family="'Microsoft JhengHei','Noto Sans CJK TC',sans-serif">
+<title>示意圖：chibipop 讀取指標附近的文字，在你的辭典中查詞，並顯示可向 Anki 傳送卡片的彈出視窗。</title>
+<defs><marker id="a" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#3d2f4a"/></marker></defs>
+<rect width="1040" height="440" rx="24" fill="#fffafc"/>
+<rect x="25" y="130" width="170" height="90" rx="16" fill="#8b6fd6" fill-opacity="0.16" stroke="#8b6fd6" stroke-width="2.5"/>
+<text x="110.0" y="169.0" text-anchor="middle" font-size="20" font-weight="700" fill="#3d2f4a">你的螢幕</text>
+<text x="110.0" y="193.0" text-anchor="middle" font-size="13" fill="#3d2f4a">日文文字</text>
+<rect x="230" y="130" width="170" height="90" rx="16" fill="#e0679a" fill-opacity="0.16" stroke="#e0679a" stroke-width="2.5"/>
+<text x="315.0" y="169.0" text-anchor="middle" font-size="20" font-weight="700" fill="#3d2f4a">擷取</text>
+<text x="315.0" y="193.0" text-anchor="middle" font-size="13" fill="#3d2f4a">指標處的區域</text>
+<rect x="435" y="130" width="170" height="90" rx="16" fill="#e0679a" fill-opacity="0.16" stroke="#e0679a" stroke-width="2.5"/>
+<text x="520.0" y="169.0" text-anchor="middle" font-size="20" font-weight="700" fill="#3d2f4a">OCR 辨識</text>
+<text x="520.0" y="193.0" text-anchor="middle" font-size="13" fill="#3d2f4a">meikiocr · Windows OCR</text>
+<rect x="640" y="130" width="170" height="90" rx="16" fill="#e0679a" fill-opacity="0.16" stroke="#e0679a" stroke-width="2.5"/>
+<text x="725.0" y="169.0" text-anchor="middle" font-size="20" font-weight="700" fill="#3d2f4a">查詞</text>
+<text x="725.0" y="193.0" text-anchor="middle" font-size="13" fill="#3d2f4a">還原詞形 · 排序</text>
+<rect x="845" y="130" width="170" height="90" rx="16" fill="#e0679a" fill-opacity="0.16" stroke="#e0679a" stroke-width="2.5"/>
+<text x="930.0" y="169.0" text-anchor="middle" font-size="20" font-weight="700" fill="#3d2f4a">彈出視窗</text>
+<text x="930.0" y="193.0" text-anchor="middle" font-size="13" fill="#3d2f4a">釋義</text>
+<line x1="199" y1="175.0" x2="226" y2="175.0" stroke="#3d2f4a" stroke-width="2.5" marker-end="url(#a)"/>
+<line x1="404" y1="175.0" x2="431" y2="175.0" stroke="#3d2f4a" stroke-width="2.5" marker-end="url(#a)"/>
+<line x1="609" y1="175.0" x2="636" y2="175.0" stroke="#3d2f4a" stroke-width="2.5" marker-end="url(#a)"/>
+<line x1="814" y1="175.0" x2="841" y2="175.0" stroke="#3d2f4a" stroke-width="2.5" marker-end="url(#a)"/>
+<rect x="230" y="25" width="170" height="56" rx="16" fill="#e8b84a" fill-opacity="0.16" stroke="#e8b84a" stroke-width="2.5"/>
+<text x="315.0" y="59.0" text-anchor="middle" font-size="17" font-weight="600" fill="#3d2f4a">chibipop.toml</text>
+<line x1="315.0" y1="85" x2="315.0" y2="126" stroke="#3d2f4a" stroke-width="2.5" stroke-dasharray="7 6" marker-end="url(#a)"/>
+<text x="325.0" y="112" font-size="13" fill="#3d2f4a">讀取</text>
+<rect x="845" y="25" width="170" height="56" rx="16" fill="#e8b84a" fill-opacity="0.16" stroke="#e8b84a" stroke-width="2.5"/>
+<text x="930.0" y="59.0" text-anchor="middle" font-size="17" font-weight="600" fill="#3d2f4a">popup.css</text>
+<line x1="930.0" y1="85" x2="930.0" y2="126" stroke="#3d2f4a" stroke-width="2.5" stroke-dasharray="7 6" marker-end="url(#a)"/>
+<text x="940.0" y="112" font-size="13" fill="#3d2f4a">讀取</text>
+<rect x="230" y="310" width="170" height="70" rx="16" fill="#e8b84a" fill-opacity="0.16" stroke="#e8b84a" stroke-width="2.5"/>
+<text x="315.0" y="351.0" text-anchor="middle" font-size="17" font-weight="600" fill="#3d2f4a">Yomitan .zip</text>
+<rect x="640" y="310" width="170" height="70" rx="16" fill="#e8b84a" fill-opacity="0.16" stroke="#e8b84a" stroke-width="2.5"/>
+<text x="725.0" y="351.0" text-anchor="middle" font-size="17" font-weight="600" fill="#3d2f4a">chibipop.sqlite</text>
+<line x1="404" y1="345" x2="636" y2="345" stroke="#3d2f4a" stroke-width="2.5" stroke-dasharray="7 6" marker-end="url(#a)"/>
+<text x="520.0" y="334" text-anchor="middle" font-size="13" fill="#3d2f4a">匯入</text>
+<line x1="725.0" y1="306" x2="725.0" y2="224" stroke="#3d2f4a" stroke-width="2.5" stroke-dasharray="7 6" marker-end="url(#a)"/>
+<text x="735.0" y="275" font-size="13" fill="#3d2f4a">讀取</text>
+<rect x="845" y="310" width="170" height="70" rx="16" fill="#8b6fd6" fill-opacity="0.16" stroke="#8b6fd6" stroke-width="2.5"/>
+<text x="930.0" y="339.0" text-anchor="middle" font-size="20" font-weight="700" fill="#3d2f4a">Anki</text>
+<text x="930.0" y="363.0" text-anchor="middle" font-size="13" fill="#3d2f4a">透過 AnkiConnect</text>
+<line x1="930.0" y1="224" x2="930.0" y2="306" stroke="#3d2f4a" stroke-width="2.5" marker-start="url(#a)" marker-end="url(#a)"/>
+<text x="940.0" y="275" font-size="13" fill="#3d2f4a">新增卡片</text>
+</svg>
