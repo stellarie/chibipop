@@ -133,6 +133,11 @@ See [Windows and Linux](#4-windows-and-linux). On Linux, a lookup
 shortcut must be configured differently depending on your desktop
 environment/compositor. [Linux](#10-linux) explains how to configure it.
 
+On Windows, the **Shortcuts** tab greys out and clears **Follow pointer**
+while a Configured Bind has the action **Screen lookup** and is enabled.
+Clear **On** on that Bind, or change its action, to use **Follow
+pointer** again. The checkbox stays clear until you tick it.
+
 If no popup appears, see [Getting help](#11-getting-help).
 
 ---
@@ -916,9 +921,9 @@ for CUDA.
 
 ### Tests
 
-CI runs the automated gate on Windows and on Linux. Each gate has a ceiling on
-the pass count: 360 tests on Linux and 364 tests on Windows. Core holds at most 200 tests. Each
-platform crate holds at most 160. No automated test launches `chibipop` or needs
+CI runs the automated gate on Windows and on Linux. The Linux gate has a ceiling
+on the pass count: 360 tests. The Windows gate has no ceiling. Core holds at most 200 tests. The
+Linux crate holds at most 160. No automated test launches `chibipop` or needs
 a real desktop. Each feature gets a manual test instead. See
 [`docs/REGRESSION.md`](docs/REGRESSION.md) for the gate and the manual tests.
 

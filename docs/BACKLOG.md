@@ -1710,14 +1710,28 @@ before building anything.
 
 Main reached exactly 360 passing tests on Windows. After that, each pull request that
 added a test for a reproduced bug failed the Tier 0 gate, although every test passed.
-The Windows ceiling in `ci.yml` is now 364 as a temporary value. That value admits the
-four tests of the Inflection chain toggle and the stem and suru lookup fixes.
+On 2026-11-15 the user removed the Windows ceiling in `ci.yml`. The value was 360 at first. Then it was
+364 as a temporary value, which admitted the four tests of the Inflection chain toggle and
+the stem and suru lookup fixes. The Linux ceiling stays at 360. The Windows gate prints the
+total and fails on a test failure only.
 
 Questions for the later release:
 
 - Does a count ceiling stop test bloat, or does it only block bug-fix tests?
 - Do the limits of 200 core tests and 160 tests for each platform crate still apply?
-  CI checks only the total.
-- Which tests can be merged or removed, so that the Windows ceiling returns to 360?
+  CI checks only the Linux total.
+- Which tests can be merged or removed?
 
-Until then, do not raise the ceiling again without a decision from the user.
+A later release reevaluates how the project tests.
+
+---
+
+## 43. The Linux settings app does not apply the Follow pointer rule
+
+**Deferred 2026-11-15 by the user's decision.** The Linux crate does not build on the
+Windows workstation, so the change was not made there.
+
+On Windows, an enabled Screen lookup bind disables and clears the Follow pointer
+checkbox. The Linux settings app has the same control: the checkbox "Enable live lookup
+at the pointer" in `crates/chibipop-linux/src/settings/app.rs` (`shortcuts_page`,
+`Message::LiveLookup`). It does not apply the rule yet.

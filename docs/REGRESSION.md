@@ -30,16 +30,16 @@ The automated gate holds only tests of real user flows and reproduced bugs.
 No automated test launches the daemon, the `chibipop` binary, or a child `chibipop`
 process. No automated test needs a real screen or desktop.
 
-The pass count has a ceiling, not a floor. CI fails when the count is greater than 360
-on Linux or 364 on Windows. Core holds at most 200 tests. Each platform crate holds at most 160.
-The Windows value is temporary. See item 42 in `docs/BACKLOG.md`.
+The Linux pass count has a ceiling, not a floor. CI fails when the Linux count is greater than 360.
+The Windows gate has no ceiling. See item 42 in `docs/BACKLOG.md`.
+Core holds at most 200 tests. The Linux crate holds at most 160.
 Do not bloat the test count. Add a test only for a real user flow or a reproduced bug.
-Raise a ceiling only in a reviewed pull request.
+Raise the Linux ceiling only in a reviewed pull request.
 
 ## Recent feature case index
 
-Cases 1.31-1.44 cover Search, hover, clipboard, furigana, sentence-field,
-audit-isolation, cache invalidation, profile catalog, and Inflection chain setting behavior.
+Cases 1.31-1.45 cover Search, hover, clipboard, furigana, sentence-field,
+audit-isolation, cache invalidation, profile catalog, Inflection chain setting, and Follow pointer lock behavior.
 Cases 1.30.11-1.30.16 and 1.30.18 cover screenshot modes, saved targets, and picture format.
 Existing settings, plugin, and live-log cases retain their identifiers.
 Record the exact feature-bearing revision.
@@ -165,7 +165,7 @@ check-shaped clippy spans the whole workspace unexcluded.
 
 | Check | Expected |
 |---|---|
-| Rust tests | Three sweeps stay at or below the platform ceiling in `ci.yml`. Record confirmed local baseline failures separately. Historical totals below are not current targets. |
+| Rust tests | Three sweeps stay at or below the Linux ceiling in `ci.yml`. The Windows gate has no ceiling. Record confirmed local baseline failures separately. Historical totals below are not current targets. |
 | Clippy accepted pass | **Exactly 1** warning, excluding cargo summaries; exit code **0**. |
 | Clippy suppressed pass | **0** error or warning diagnostics; exit code **0**. |
 | Release build | Finished, no errors |
@@ -192,9 +192,9 @@ check-shaped clippy spans the whole workspace unexcluded.
 > CI.** That one failure is expected. A *second* golden failure, or a divergence in any other
 > fixture, is a real finding.
 
-**The test count is a ceiling, not a floor.** A new test must justify itself. CI asserts `≤ 360`
-on Linux and `≤ 364` on Windows, and prints the total. Core holds at most 200 tests and each platform crate at most 160. The totals
-quoted above are history, from before the prune. A *higher* number than the ceiling is the thing to
+**The Linux test count is a ceiling, not a floor.** A new test must justify itself. CI asserts `≤ 360`
+on Linux. The Windows gate has no ceiling. CI prints the total on both. Core holds at most 200 tests and the Linux crate at most 160. The totals
+quoted above are history, from before the prune. A *higher* number than the Linux ceiling is the thing to
 explain. The clippy counts are equalities — that is the difference between the rows and it is
 deliberate.
 
@@ -2298,6 +2298,20 @@ Run these cases on each platform.
 | 1.44 | Hide the Inflection chain row | Open **Settings > Popup > Result content**. Clear **Show inflection chain** and click Apply. Hover 風邪をひいて. The Card must show no `(te form)` row and no empty line under the reading. |
 | 1.44.1 | Show the row again | Select **Show inflection chain** and click Apply. Hover 風邪をひいて. The Card must show `(te form)` under 風邪をひく. No restart is necessary. |
 | 1.44.2 | Search definition popup | Clear the checkbox, click Apply, and open a conjugated word in a Search definition popup. The popup must show no Inflection chain row. |
+
+---
+
+<a id="case-1-45"></a>
+### 1.45 Follow pointer lock
+
+Run these cases on Windows.
+
+| ID | Case | Steps and expected result |
+|---|---|---|
+| 1.45 | An enabled Screen lookup Bind locks Follow pointer | Open **Settings > Shortcuts**. Clear **On** on every Bind with the action **Screen lookup**. Tick **Follow pointer**. In **Configured shortcuts**, tick **On** on a Bind with the action **Screen lookup**. **Follow pointer** must turn grey and clear. The help text below the checkbox must read "Runs lookups as the pointer moves. Not available while a Screen lookup bind is enabled." Click Apply. The saved configuration must hold `live_lookup = false`. |
+| 1.45.1 | Clear On | Clear **On** on that Bind. **Follow pointer** must become enabled and stay clear. Tick it. It must stay ticked. |
+| 1.45.2 | Change the action | Tick **On** on a Screen lookup Bind. **Follow pointer** must turn grey and clear. Change the action to Search. **Follow pointer** must become enabled and stay clear. |
+| 1.45.3 | Add bind | Click **+ Add bind**. The new Bind is an enabled Screen lookup Bind. **Follow pointer** must turn grey and clear at once. |
 
 ---
 

@@ -310,8 +310,8 @@ exclude the foreign bin crate — see the workspace `Cargo.toml`):
 - `cargo test --workspace --exclude chibipop-linux` **three times** — the
   wheel accumulator's process-global
   statics produced an intermittent red once that a single run missed.
-  The pass count must stay at or below the **ceiling** of 360. A ceiling
-  stops test bloat; a floor would reward it.
+  This Windows sweep has no count ceiling. The Linux sweep must stay at or
+  below the **ceiling** of 360. See item 42 in `docs/BACKLOG.md`.
 - Clippy, asserting the accepted-error **count is exactly 1**. The repo
   carries one accepted error on purpose, so `-D warnings` always exits
   non-zero; a second is the regression to catch, and an exit code cannot see

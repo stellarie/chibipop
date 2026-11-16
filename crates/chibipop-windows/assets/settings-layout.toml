@@ -170,7 +170,8 @@ label = "Lookup behavior"
 [[tabs.sections.entries]]
 id = "lookup-mode"
 label = "Follow pointer"
-help = "Runs lookups as the pointer moves. Clear this option to use configured lookup binds."
+help = "Runs lookups as the pointer moves. Not available while a Screen lookup bind is enabled."
+inline_help = true
 
 [[tabs.sections]]
 id = "shortcut-actions"
