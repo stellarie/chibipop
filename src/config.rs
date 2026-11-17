@@ -85,12 +85,11 @@ pub fn default_ocr_language() -> String {
 #[serde(rename_all = "kebab-case")]
 pub enum TriggerMode {
     Live,
-    /// Runs one lookup when the key goes down. The popup stays after the key
-    /// comes up until the user clicks outside it or a later press finds no text.
+    /// Shows the popup while the key is down and
+    /// hides it on release.
     HoldKey,
-    /// Shows the popup after one key press and hides it after the next press.
-    /// The trigger key latches the hold, so the user can move onto the popup
-    /// without a held key. The lookup reads live grabs with the popup masked while latched.
+    /// One switch for all Toggle binds. While on,
+    /// it follows the pointer. A press ends it.
     Toggle,
     /// The neutral one-shot mode for non-lookup binds and the `lookup` verb.
     /// Lookup binds saved with it load as `HoldKey`.

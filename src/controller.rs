@@ -365,9 +365,10 @@ impl ControllerConfig {
     }
 }
 
-/// This freeze applies only in Live mode.
-pub fn per_char_freeze(on: bool, mode: TriggerMode) -> bool {
-    on && matches!(mode, TriggerMode::Live)
+/// Freezes per-character lookup only when
+/// the pointer is followed.
+pub fn per_char_freeze(on: bool, follows_pointer: bool) -> bool {
+    on && follows_pointer
 }
 
 /// The hold for the matched span and the hold for one character.
@@ -767,6 +768,15 @@ impl Controller {
             .map_or(self.cfg.trigger_mode, |bind| bind.mode)
     }
 
+    /// Whether a Toggle bind holds the switch on.
+    pub fn latched(&self) -> bool {
+        self.active_bind.as_ref().is_some_and(|bind| bind.mode == TriggerMode::Toggle)
+    }
+
+    fn follows_pointer(&self) -> bool {
+        self.trigger_mode() == TriggerMode::Live || self.latched()
+    }
+
     pub fn active_bind_id(&self) -> Option<&str> {
         self.active_bind.as_ref().map(|bind| bind.id.as_str())
     }
@@ -803,7 +813,7 @@ impl Controller {
     pub fn watches_outside_clicks(&self) -> bool {
         self.selected_text_active()
             || (self.surface.is_some()
-                && (self.trigger_mode() != TriggerMode::Live || !self.hides_on_cursor_exit()))
+                && (!self.follows_pointer() || !self.hides_on_cursor_exit()))
     }
 
     /// Whether the bin must consume the outside
@@ -1219,14 +1229,14 @@ impl Controller {
         session: ProfileSession,
         pos: PhysPoint,
     ) -> Vec<Command> {
+        if mode == TriggerMode::Toggle && self.latched() {
+            return self.release_active_bind();
+        }
         if let Some(active) = &self.active_bind {
-            if active.id == bind_id && active.mode == mode {
-                if mode == TriggerMode::Toggle {
-                    return self.release_active_bind();
-                }
-                if matches!(mode, TriggerMode::HoldKey | TriggerMode::HoldShift) {
-                    return Vec::new();
-                }
+            if active.id == bind_id && active.mode == mode
+                && matches!(mode, TriggerMode::HoldKey | TriggerMode::HoldShift)
+            {
+                return Vec::new();
             }
         }
         let mut out = Vec::new();
@@ -1783,7 +1793,7 @@ impl Controller {
         if self.selected_text_active() && !was_trigger_held {
             return Vec::new();
         }
-        if self.trigger_mode() != TriggerMode::Toggle {
+        if matches!(self.trigger_mode(), TriggerMode::Live | TriggerMode::Press) {
             return Vec::new();
         }
         self.chain_bind = None;
@@ -1892,6 +1902,7 @@ impl Controller {
         match self.trigger_mode() {
             TriggerMode::Live => true,
             TriggerMode::Press => false,
+            TriggerMode::Toggle => self.latched(),
             _ => self.trigger_held,
         }
     }
@@ -1995,7 +2006,7 @@ impl Controller {
         }
         let live = match self.trigger_mode() {
             TriggerMode::Live => true,
-            TriggerMode::Toggle => self.trigger_held,
+            TriggerMode::Toggle => self.latched(),
             _ => false,
         };
         live && self.parents.is_empty() && self.hover_request.is_none() && self.popup_request.is_none()
@@ -2028,7 +2039,7 @@ impl Controller {
         let Some(s) = self.surface.as_ref() else { return false };
         let Some(placed) = s.placed else { return false };
         let sticky = PhysRect { h: placed.popup.h + self.button_h, ..placed.popup };
-        let freeze = if per_char_freeze(session.config().trigger.per_character_lookup, mode) {
+        let freeze = if per_char_freeze(session.config().trigger.per_character_lookup, self.follows_pointer()) {
             s.hold_char
         } else {
             s.hold
@@ -2482,7 +2493,9 @@ impl Controller {
                 self.surface = None;
                 self.pending_cursor = None;
                 self.pending_scan.clear();
-                self.active_bind = None;
+                if !self.latched() {
+                    self.active_bind = None;
+                }
                 self.chain_bind = None;
                 self.trigger_held = false;
                 self.last_accepted = None;
@@ -3337,23 +3350,63 @@ mod tests {
     }
 
     #[test]
-    fn a_hold_tap_shows_the_popup_and_it_stays_until_an_outside_click() {
+    fn a_hold_release_hides_the_popup() {
         let mut c = test_controller(hold_cfg());
         let pos = PhysPoint { x: 110, y: 110 };
         bind_down(&mut c, "hold", TriggerMode::HoldKey, pos);
         let id = c.latest;
-        assert!(bind_up(&mut c, "hold").is_empty());
         c.handle(ready_id(id, "\u{732B}", ANCHOR));
         c.handle(placed(POPUP, 200, 200));
         assert!(c.is_shown());
-        assert!(c.watches_outside_clicks());
-        assert!(c.swallows_outside_clicks());
-        assert!(c.handle(Event::CursorMoved { pos: PhysPoint { x: 900, y: 900 } }).is_empty());
-        assert!(c.handle(Event::DwellElapsed).is_empty());
-        assert!(c.is_shown());
-        let out = c.handle(Event::PointerDownOutside);
+        let out = bind_up(&mut c, "hold");
         assert!(out.contains(&Command::HidePopup), "{out:?}");
         assert!(!c.is_shown());
+
+        bind_down(&mut c, "hold", TriggerMode::HoldKey, pos);
+        let early = c.latest;
+        bind_up(&mut c, "hold");
+        assert!(c.handle(ready_id(early, "\u{732B}", ANCHOR)).is_empty());
+        assert!(!c.is_shown());
+    }
+
+    #[test]
+    fn a_toggle_bind_is_one_switch_that_follows_the_pointer() {
+        let mut c = test_controller(press_cfg());
+        let pos = PhysPoint { x: 110, y: 110 };
+        let lookups = |out: &[Command]| {
+            out.iter().any(|command| matches!(command, Command::RequestLookup { .. }))
+        };
+        assert!(!c.latched());
+        assert!(!lookups(&c.handle(Event::CursorMoved { pos })));
+
+        bind_down(&mut c, "a", TriggerMode::Toggle, pos);
+        c.handle(ready_id(c.latest, "\u{732B}", ANCHOR));
+        c.handle(placed(POPUP, 200, 200));
+        bind_up(&mut c, "a");
+        assert!(c.latched());
+        assert!(lookups(&c.handle(Event::CursorMoved { pos: PhysPoint { x: 900, y: 900 } })));
+
+        let out = bind_down(&mut c, "b", TriggerMode::Toggle, pos);
+        assert!(out.contains(&Command::HidePopup), "{out:?}");
+        assert!(!c.latched());
+        assert!(!c.is_shown());
+        assert!(!lookups(&c.handle(Event::CursorMoved { pos: PhysPoint { x: 500, y: 500 } })));
+
+        bind_down(&mut c, "a", TriggerMode::Toggle, pos);
+        c.handle(ready_id(c.latest, "\u{732B}", ANCHOR));
+        c.handle(placed(POPUP, 200, 200));
+        let id = selected_text_request(&mut c, pos);
+        c.handle(Event::SelectedTextReady { id, text: Some("\u{65E5}\u{672C}\u{8A9E}".into()), bounds: None });
+        c.handle(Event::LookupResult {
+            id, outcome: LookupOutcome::DrillDown(Box::new(presentation_of("\u{65E5}\u{672C}\u{8A9E}"))),
+        });
+        c.handle(placed(POPUP, 200, 200));
+        assert!(c.selected_text_popup());
+        assert!(c.latched());
+        assert!(!lookups(&c.handle(Event::CursorMoved { pos: PhysPoint { x: 900, y: 900 } })));
+        c.handle(Event::PointerDownOutside);
+        assert!(!c.is_shown());
+        assert!(lookups(&c.handle(Event::CursorMoved { pos: PhysPoint { x: 700, y: 700 } })));
     }
 
     // -- the sticky region --

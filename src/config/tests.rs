@@ -141,6 +141,33 @@ include_on_add = true
     std::fs::remove_file(path).unwrap();
     assert_eq!(config, loaded);
     assert_eq!(profile, loaded.resolved(None).unwrap());
+    for platform in [Platform::Windows, Platform::Linux] {
+        assert_eq!(None, config.hotkey_warning(platform).unwrap());
+    }
+    let mut clash = config.clone();
+    clash.binds[1].windows = "F2".to_string();
+    let warning = r#"Warning: bind "anki-add" and bind "lookup" use the same keys. Each bind runs."#;
+    assert_eq!(Some(warning.to_string()), clash.hotkey_warning(Platform::Windows).unwrap());
+    assert_eq!(r#"Bind "anki-add" conflicts with "lookup". Choose different keys."#,
+        clash.validate_hotkeys(Platform::Windows).unwrap_err().to_string());
+    clash.binds[2].enabled = true;
+    clash.binds[2].windows = "0x1B".to_string();
+    assert!(clash.hotkey_warning(Platform::Windows).is_err());
+    clash.binds[2].windows = "Ctrl+".to_string();
+    assert!(clash.hotkey_warning(Platform::Windows).is_err());
+    clash.binds[2].windows = "F4".to_string();
+    clash.binds[1].enabled = false;
+    assert_eq!(None, clash.hotkey_warning(Platform::Windows).unwrap());
+    clash.binds[1].enabled = true;
+    clash.binds[1].windows = "F3".to_string();
+    clash.binds[1].linux = "SUPER+J".to_string();
+    assert_eq!(None, clash.hotkey_warning(Platform::Windows).unwrap());
+    assert_eq!(Some(warning.to_string()), clash.hotkey_warning(Platform::Linux).unwrap());
+    assert!(clash.validate_hotkeys(Platform::Linux).is_err());
+    let mut named = config.clone();
+    named.binds[0].id = "Escape".to_string();
+    named.binds[1].windows = "F2".to_string();
+    assert!(named.hotkey_warning(Platform::Windows).unwrap().is_some());
 }
 
 #[test]

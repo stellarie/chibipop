@@ -38,8 +38,9 @@ Raise the Linux ceiling only in a reviewed pull request.
 
 ## Recent feature case index
 
-Cases 1.31-1.45 cover Search, hover, clipboard, furigana, sentence-field,
-audit-isolation, cache invalidation, profile catalog, Inflection chain setting, and Follow pointer lock behavior.
+Cases 1.31-1.47 cover Search, hover, clipboard, furigana, sentence-field,
+audit-isolation, cache invalidation, profile catalog, Inflection chain setting, Follow pointer lock behavior,
+Hold and Toggle binds, and the bind conflict warning.
 Cases 1.30.11-1.30.16 and 1.30.18 cover screenshot modes, saved targets, and picture format.
 Existing settings, plugin, and live-log cases retain their identifiers.
 Record the exact feature-bearing revision.
@@ -971,10 +972,11 @@ effect without a restart. The design's audit of "what needs recreating" missed a
 In `chibipop run`, with the PID recorded:
 
 1. Switch **When lookups run** from `Follow pointer` to `While held`, Apply. Hovering alone must now do nothing; holding
-   the trigger key while moving must raise the popup.
+   the trigger key while moving must raise the popup. Releasing the key must hide the popup.
 2. Switch **When lookups run** to `Turn on / off`, Apply.
-3. Press the trigger key once. Release it. The popup must show and stay fixed while you move
-   onto it. Press the trigger key again. The popup must hide.
+3. Press the trigger key once. Release it. The popup must show and follow the pointer as you
+   move over other text. Press the trigger key again. The popup must hide, and moving the pointer
+   must start no lookup.
 4. Switch **When lookups run** to `Once per press`, Apply.
 5. Press the trigger key over fixture text. Release it. The popup must show and stay at its first
    position while you move the cursor. Move the cursor from outside the popup onto a gloss line
@@ -2312,6 +2314,45 @@ Run these cases on Windows.
 | 1.45.1 | Clear On | Clear **On** on that Bind. **Follow pointer** must become enabled and stay clear. Tick it. It must stay ticked. |
 | 1.45.2 | Change the action | Tick **On** on a Screen lookup Bind. **Follow pointer** must turn grey and clear. Change the action to Search. **Follow pointer** must become enabled and stay clear. |
 | 1.45.3 | Add bind | Click **+ Add bind**. The new Bind is an enabled Screen lookup Bind. **Follow pointer** must turn grey and clear at once. |
+
+---
+
+<a id="case-1-46"></a>
+### 1.46 Hold and Toggle binds
+
+Run these cases on Windows.
+Use a disposable configuration with two enabled **Screen lookup** Binds. Set the first to **Hold**
+and the second to **Toggle**. Add a third **Screen lookup** Bind set to **Toggle**.
+Use a window that shows fixture text in at least two places.
+
+| ID | Case | Steps and expected result |
+|---|---|---|
+| 1.46 | Hold release hides the popup | Put the pointer on fixture text. Press and hold the key of the Hold Bind. The popup must show. Move the pointer to other fixture text with the key down. The popup must change to that text. Release the key. The popup must hide at once. Repeat with the pointer on the popup when you release the key. The popup must hide. |
+| 1.46.1 | Toggle on follows the pointer | Press the key of the first Toggle Bind and release it. Move the pointer over several words. The popup must follow the pointer as in **Follow pointer**. |
+| 1.46.2 | Toggle off hides the popup | With the switch on and a popup shown, press the same Toggle key. The popup must hide. Move the pointer over text. No lookup must start. |
+| 1.46.3 | Toggle off with the pointer on popup text | Turn the switch on and show a popup. Put the pointer on text inside the popup. Press the Toggle key. The popup must hide. The press must not open a child popup. |
+| 1.46.4 | A second Toggle bind switches off | Turn the switch on with the first Toggle Bind. Press the key of the third Bind. The popup must hide. Move the pointer over text. No lookup must start. |
+| 1.46.5 | Hold press ends the switch | Turn the switch on. Move the pointer away from the popup. Press and release the key of the Hold Bind. After the release, move the pointer over text. No lookup must start. |
+
+**Evidence and cleanup.** Record the Bind IDs, screenshots, logs, and tested revision.
+Restore the configuration.
+
+---
+
+<a id="case-1-47"></a>
+### 1.47 Bind conflict warning
+
+Run these cases on Windows.
+
+| ID | Case | Steps and expected result |
+|---|---|---|
+| 1.47 | Warning after key capture | Open **Settings > Shortcuts**. Tick **On** on two Binds. Capture the same keys on both. The status line must read `Warning: bind "a" and bind "b" use the same keys. Each bind runs.` with the two Bind IDs. |
+| 1.47.1 | Apply continues | With the warning shown, click Apply. The configuration must save. Press the shared keys. Each Bind must run. |
+| 1.47.2 | Escape is refused | Capture Escape on a Bind. Click Apply. The status line must start with "Not applied". The configuration must stay unchanged. |
+| 1.47.3 | A disabled Bind gives no warning | Clear **On** on one of the two conflicting Binds. The status line must show no warning. Tick **On** again. The warning must return. |
+
+**Evidence and cleanup.** Record the status text, screenshots, saved configuration, and tested revision.
+Restore the configuration.
 
 ---
 
