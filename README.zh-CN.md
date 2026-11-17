@@ -24,7 +24,7 @@
 **上面的都看完了，那就开始吧**
 ---
 
-> 非官方项目。chibipop 与 Yomitan、Anki、meikiocr 没有关联。本 README 描述 v0.9.14。
+> 非官方项目。chibipop 与 Yomitan、Anki、meikiocr 没有关联。本 README 描述 v0.9.15。
 
 ## 这是什么？ ♡
 
