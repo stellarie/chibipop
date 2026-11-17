@@ -24,7 +24,7 @@ point at a word to become dekiru
 **now that you have read all of the above, proceed**
 ---
 
-> Unofficial. chibipop is not affiliated with Yomitan, Anki, or meikiocr. This README describes v0.9.14.
+> Unofficial. chibipop is not affiliated with Yomitan, Anki, or meikiocr. This README describes v0.9.15.
 
 ## What is this? ♡
 
