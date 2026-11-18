@@ -517,6 +517,7 @@ Comments in `crates/chibipop-windows/tests/geometry_goldens.rs` and
 
 - A release ships one tarball, `chibipop-vX.Y.Z-linux-x64.tar.gz`, and two AUR packages.
   `chibipop-bin` repacks the tarball, and `chibipop` builds from the release tag.
+  A Windows-only release ships neither (`docs/RELEASING.md`).
 - The asset naming shape is a permanent contract. Every shipped binary parses asset names
   from `releases/latest`. Therefore, the `chibipop-v` prefix and the `-linux-x64.tar.gz`
   suffix must never change shape.
