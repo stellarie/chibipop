@@ -2,7 +2,8 @@
 
 ## What a release is
 
-Two assets, one per platform.
+Two assets, one per platform. A Windows-only release carries the zip alone.
+See [A Windows-only release](#a-windows-only-release).
 
 ```
 chibipop-vX.Y.Z-windows-x64.zip
@@ -268,11 +269,11 @@ install an icon into that theme's directories, so both depend on it.
    last, from artifacts, so a release never exists with only half its assets.
 6. **Open the draft, unpack both assets somewhere clean, and run them.**
    - Windows: unzip, `chibipop.exe run` starts.
-   - Linux: `tar xzf`, then `./chibipop probe` and `./chibipop run` — the log
-     must say `worker: pipeline up`, which is the OCR engine finding and
+   - Linux (skip for a Windows-only release): `tar xzf`, then
+     `./chibipop probe` and `./chibipop run` — the log must say `worker: pipeline up`, which is the OCR engine finding and
      digesting `models/meiki` beside the binary. Then publish.
 7. **Bump the AUR packages** once the release is published — the source URLs
-   point at it:
+   point at it. Skip this step for a Windows-only release:
    ```bash
    packaging/aur/bump.sh vX.Y.Z
    ```
@@ -299,6 +300,33 @@ Linux half is one command — no workflow needed:
 cargo build --release --workspace --exclude chibipop-windows
 scripts/package-linux.sh v0.8.2        # -> dist/chibipop-v0.8.2-linux-x64.tar.gz
 ```
+
+## A Windows-only release
+
+The Release workflow has no Windows-only switch. It always builds both assets.
+The Linux job must pass, or no draft exists. v0.9.15 was the first
+Windows-only release.
+
+1. Do steps 1 to 4 of "Cutting one". The workflow then makes the draft.
+2. In the draft, delete `chibipop-vX.Y.Z-linux-x64.tar.gz`.
+3. Set the title to `chibipop vX.Y.Z (Windows only)`.
+4. In the notes, state that Linux stays on the earlier version.
+5. Unpack the zip, run it, and publish. Skip the Linux check in step 6.
+6. Skip `packaging/aur/bump.sh`. The `chibipop-bin` source URL names a tarball that does not exist.
+
+**Never suffix the tag.** Use plain `vX.Y.Z`, not `v0.9.15-win`.
+
+- `is_newer` parses three dot-separated numbers. A suffix makes every shipped binary report no update.
+- The workflow forces the tag to equal the `Cargo.toml` version. With a suffix, the new binary cannot parse its own version.
+  It then never sees a later release.
+
+**Never mark the release as a prerelease.** The update check reads `releases/latest`. That endpoint skips a prerelease, so Windows users get no update.
+
+**The effect on Linux.** `releases/latest` is per repository, so the Linux update button reports the new version. It shows this text:
+
+> vX.Y.Z is available, but that release carries no linux-x64 tarball. Update with your package manager, or see github.com/stellarie/chibipop/releases.
+
+`News.asset` is optional, so this is a valid report and not an error. The "package manager" hint is false for this release, because the AUR stays on the earlier version. The release notes must say so.
 
 ## What CI enforces
 
