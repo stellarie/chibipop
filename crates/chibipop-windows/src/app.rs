@@ -224,6 +224,7 @@ struct RuntimeScreenshotResult {
 struct SettingsStatus {
     gen: Option<u64>,
     text: String,
+    restart_required: bool,
 }
 
 /// Sequence guards every snapshot. The generation identifies the Apply it can complete.
@@ -360,13 +361,26 @@ fn remember_settings_position(window: &SettingsWindow) {
 
 impl SettingsStatus {
     fn any(text: String) -> Self {
-        Self { gen: None, text }
+        Self {
+            gen: None,
+            text,
+            restart_required: false,
+        }
+    }
+
+    fn restart(text: String) -> Self {
+        Self {
+            gen: None,
+            text,
+            restart_required: true,
+        }
     }
 
     fn anki(gen: u64, text: String) -> Self {
         Self {
             gen: Some(gen),
             text,
+            restart_required: false,
         }
     }
 
@@ -431,6 +445,9 @@ pub fn settings_only(
             while let Ok(status) = settings_rx.try_recv() {
                 if status.matches(detect_gen) {
                     window.set_status(&status.text);
+                    if status.restart_required {
+                        window.set_restart_required(true);
+                    }
                 }
             }
         }
@@ -620,7 +637,13 @@ pub fn settings_only(
                     window.replace_form(&edited)?;
                     window.set_apply_state(ApplyState::Applied);
                     println!("chibipop: settings saved to {}.", config_path.display());
-                    println!("chibipop: restart chibipop for them to take effect.");
+                    if window.restart_required() {
+                        if let Err(e) = start_run(config_path, dict_path) {
+                            eprintln!("chibipop: could not restart chibipop: {e:#}");
+                        }
+                    } else {
+                        println!("chibipop: restart chibipop for them to take effect.");
+                    }
                     remember_settings_position(&window);
                     return Ok(());
                 }
@@ -1448,15 +1471,21 @@ fn service_settings_click(
             w.set_status("Checking\u{2026}");
             let tx = tx.clone();
             thread::spawn(move || {
-                let msg = match update::check(env!("CARGO_PKG_VERSION")) {
-                    Ok(None) => "You already have the latest version.".into(),
+                let status = match update::check(env!("CARGO_PKG_VERSION")) {
+                    Ok(None) => SettingsStatus::any("You already have the latest version.".into()),
                     Ok(Some(release)) => match update::download_and_replace(&release) {
-                        Ok(()) => format!("Updated to {}. Restart to use it.", release.tag,),
-                        Err(e) => format!("Update to {} failed: {e:#}", release.tag,),
+                        Ok(()) => SettingsStatus::restart(format!(
+                            "Updated to {}. Restart to use it.",
+                            release.tag,
+                        )),
+                        Err(e) => SettingsStatus::any(format!(
+                            "Update to {} failed: {e:#}",
+                            release.tag,
+                        )),
                     },
-                    Err(e) => format!("Update check failed: {e:#}"),
+                    Err(e) => SettingsStatus::any(format!("Update check failed: {e:#}")),
                 };
-                let _ = tx.send(SettingsStatus::any(msg));
+                let _ = tx.send(status);
                 // SAFETY: This call wakes the main loop.
                 unsafe {
                     let _ = PostThreadMessageW(tid, WM_APP_SETTINGS, WPARAM(0), LPARAM(0));
@@ -1868,7 +1897,6 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: Option<&Path>, config_
     let alpha = (theme.opacity * 255.0).round().clamp(0.0, 255.0) as u8;
     popup.set_alpha(alpha);
     // The console starts hidden every run. Only the tray item shows it.
-    let mut lookup_log_shown = false;
 
     let mut hooks = Some(Hooks::install().context("installing the low-level input hooks")?);
     Hooks::set_configured_binds(&catalog.config.binds);
@@ -2952,6 +2980,20 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: Option<&Path>, config_
                                     status_parts.push(adapter_status_line(&ocr_monitor.snapshot()));
                                 }
                                 w.set_status(&status_parts.join("\r\n"));
+                                sync_runtime_status(Some(&*w), &ocr_monitor, live.anki_enabled, &mut shown_runtime);
+                                if w.restart_required() {
+                                    join_save(&mut save_job);
+                                    match start_run(config_path, &db_path) {
+                                        Ok(()) => {
+                                            remember_settings_position(w);
+                                            drive!(Event::Quit);
+                                        }
+                                        Err(e) => {
+                                            w.set_status(&format!("Restart failed: {e:#}"));
+                                            eprintln!("chibipop: restart failed: {e:#}");
+                                        }
+                                    }
+                                }
                                 let ms = t0.elapsed().as_millis();
                                 if ms > APPLY_BUDGET_MS {
                                     eprintln!(
@@ -3041,15 +3083,20 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: Option<&Path>, config_
                 if let Some(w) = &settings {
                     if status.matches(detect_gen) {
                         w.set_status(&status.text);
+                        if status.restart_required {
+                            w.set_restart_required(true);
+                        }
                     }
                 }
             }
+            sync_runtime_status(settings.as_ref(), &ocr_monitor, live.anki_enabled, &mut shown_runtime);
         } else if msg.message == WM_APP_ANKI_DETECT {
             while let Ok(result) = detect_rx.try_recv() {
                 if let Some(w) = &settings {
                     apply_anki_detect(w, detect_gen, result);
                 }
             }
+            sync_runtime_status(settings.as_ref(), &ocr_monitor, live.anki_enabled, &mut shown_runtime);
         } else if msg.message == WM_APP_SAVED {
             while let Ok(result) = save_rx.try_recv() {
                 finish_save(
@@ -3148,13 +3195,27 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: Option<&Path>, config_
                     }
                 }
                 TrayCommand::ToggleLookupLog => {
-                    lookup_log_shown = !lookup_log_shown;
-                    if lookup_log_shown {
-                        crate::ui::console::show();
+                    if let Some(w) = &settings {
+                        w.focus_logs_tab();
                     } else {
-                        crate::ui::console::hide();
+                        let form = form_with_library(&cfg, &dicts, &library);
+                        let stale = settings::stale_order_entries(&cfg, &dicts);
+                        match SettingsWindow::open(&form, &stale, ApplyMode::Live) {
+                            Err(e) => eprintln!("chibipop: opening settings failed: {e:#}"),
+                            Ok(w) => {
+                                notice_drift(&w, &library, &db_path);
+                                w.focus_logs_tab();
+                                settings_form = form;
+                                settings = Some(w);
+                                sync_runtime_status(
+                                    settings.as_ref(),
+                                    &ocr_monitor,
+                                    live.anki_enabled,
+                                    &mut shown_runtime,
+                                );
+                            }
+                        }
                     }
-                    tray.set_lookup_log_shown(lookup_log_shown);
                 }
                 TrayCommand::OpenSettings => drive!(Event::TrayAction(TrayAction::OpenSettings)),
                 TrayCommand::Quit => {
@@ -3176,6 +3237,12 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: Option<&Path>, config_
                             notice_drift(&w, &library, &db_path);
                             settings_form = form;
                             settings = Some(w);
+                            sync_runtime_status(
+                                settings.as_ref(),
+                                &ocr_monitor,
+                                live.anki_enabled,
+                                &mut shown_runtime,
+                            );
                         }
                     }
                 }

@@ -154,9 +154,17 @@ label = "Window behavior"
 
 [[tabs.sections.entries]]
 id = "background-on-close"
-label = "Keep Chibipop running when Settings closes"
-help = "Off by default. Only affects live Settings; a working tray menu reopens or quits."
-advanced = true
+label = "Close button behavior"
+help = "Choose Close on exit to quit Chibipop, or Minimize to tray to keep it running."
+
+[[tabs.sections]]
+id = "about"
+label = "About"
+
+[[tabs.sections.entries]]
+id = "about-info"
+label = "About chibipop"
+help = "Shows the version number and the project repository link."
 
 [[tabs]]
 id = "shortcuts"
@@ -468,13 +476,20 @@ help = "Displays diagnostic messages from the selected text reader."
 advanced = true
 
 [[tabs.sections.entries]]
-id = "show-live-logs"
-label = "Show live logs"
-help = "Shows recent Chibipop diagnostic messages in a separate window."
-advanced = true
-
-[[tabs.sections.entries]]
 id = "clear-lookup-cache"
 label = "Clear lookup cache"
 help = "Clears OCR, dictionary, and decoded media caches without changing files."
 advanced = true
+
+[[tabs]]
+id = "logs"
+label = "Logs"
+
+[[tabs.sections]]
+id = "live-logs"
+label = "Live logs"
+
+[[tabs.sections.entries]]
+id = "live-logs-view"
+label = "Live logs"
+help = "Shows recent Chibipop diagnostic messages."
