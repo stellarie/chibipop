@@ -32,7 +32,7 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::Win32::UI::Controls::{
     InitCommonControlsEx, SetScrollInfo, EM_GETFIRSTVISIBLELINE, EM_LINESCROLL, EM_SCROLLCARET,
-    EM_SETSEL, INITCOMMONCONTROLSEX, LVCOLUMNW, LVINSERTMARK, LVITEMW,
+    EM_SETLIMITTEXT, EM_SETSEL, INITCOMMONCONTROLSEX, LVCOLUMNW, LVINSERTMARK, LVITEMW,
     LIST_VIEW_ITEM_STATE_FLAGS, NMLISTVIEW, ICC_LISTVIEW_CLASSES, ICC_TAB_CLASSES, ICC_BAR_CLASSES,
     LVCF_WIDTH,
     TTS_ALWAYSTIP, TTM_ACTIVATE, TTM_ADDTOOLW, TTM_SETMAXTIPWIDTH, TTM_TRACKACTIVATE,
@@ -1590,6 +1590,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 return LRESULT(0);
             }
             if id == ID_THEME && notify == CBN_SELCHANGE as u16 {
+                CONDITION_CHANGED.with(|c| c.set(Some(hwnd.0 as isize)));
                 unsafe { update_css_editor_control(hwnd) };
                 return LRESULT(0);
             }
@@ -4616,6 +4617,11 @@ impl SettingsWindow {
             }
             destroy_tip(&mut self.tip);
         }
+        LOG_REVISION.with(|slot| {
+            if slot.get().is_some_and(|(owner, _)| owner == self.hwnd.0 as isize) {
+                slot.set(None);
+            }
+        });
         BIND_CAPTURED.with(|state| {
             let mut state = state.borrow_mut();
             if state.as_ref().is_some_and(|(owner, _)| *owner == self.hwnd.0 as isize) {
@@ -5010,7 +5016,11 @@ impl SettingsWindow {
         if self.take_condition_change() {
             self.reflow_all_tabs();
             // SAFETY: Conditional controls remain live descendants.
-            unsafe { update_static_controls(self.hwnd) };
+            unsafe {
+                update_static_controls(self.hwnd);
+                update_css_editor_control(self.hwnd);
+            }
+            self.update_custom_style_visibility();
             self.hide_unshown();
             self.ensure_room_for(self.layout_bottom());
         }
@@ -5550,8 +5560,39 @@ impl SettingsWindow {
         }
     }
 
+    fn theme_is_custom(&self) -> bool {
+        // SAFETY: `ID_THEME` is a live descendant of `self.hwnd`.
+        unsafe {
+            dlg_item(self.hwnd, ID_THEME)
+                .ok()
+                .is_some_and(|c| SendMessageW(c, CB_GETCURSEL, None, None).0 == 2)
+        }
+    }
+
+    fn update_custom_style_visibility(&self) {
+        let Some(runtime) = self.tabs.get(self.current_tab.get() as usize) else {
+            return;
+        };
+        // SAFETY: Runtime handles remain live descendants until `Drop`.
+        unsafe {
+            for section in &runtime.sections {
+                for entry in &section.entries {
+                    if entry.id != SettingId::PopupCustomStyle {
+                        continue;
+                    }
+                    let cmd = if self.entry_shown(entry) { SW_SHOW } else { SW_HIDE };
+                    for control in &entry.controls {
+                        let _ = ShowWindow(control.hwnd, cmd);
+                    }
+                }
+            }
+        }
+    }
+
     fn entry_shown(&self, entry: &EntryRuntime) -> bool {
-        self.show_advanced.get() || !entry.advanced
+        self.show_advanced.get()
+            || !entry.advanced
+            || (entry.id == SettingId::PopupCustomStyle && self.theme_is_custom())
     }
 
     fn section_shown(&self, section: &SectionRuntime) -> bool {
@@ -7009,8 +7050,10 @@ impl SettingsWindow {
                 let style = WINDOW_STYLE(
                     (ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | ES_AUTOHSCROLL) as u32
                 ) | WS_VSCROLL | WS_HSCROLL | WS_BORDER;
-                controls.push(child(page, w!("EDIT"), "", style, PAD, y,
-                    WIN_W - 2 * PAD - 20, LIVE_LOGS_H, ID_LIVE_LOGS, f)?);
+                let edit = child(page, w!("EDIT"), "", style, PAD, y,
+                    WIN_W - 2 * PAD - 20, LIVE_LOGS_H, ID_LIVE_LOGS, f)?;
+                SendMessageW(edit, EM_SETLIMITTEXT, Some(WPARAM(0)), None);
+                controls.push(edit);
                 y += LIVE_LOGS_H + ROW_GAP;
             }
             SettingId::ClearLookupCache => {
@@ -8736,7 +8779,7 @@ mod tests {
 
         let mut form = crate::settings::from_config(&crate::config::Config::default(), &[]);
         form.cfg.popup.theme = "dark".into();
-        let window = SettingsWindow::open(&form, &[], ApplyMode::Standalone).unwrap();
+        let mut window = SettingsWindow::open(&form, &[], ApplyMode::Standalone).unwrap();
         // SAFETY: The test window owns both controls.
         unsafe {
             let combo = dlg_item(window.hwnd, ID_THEME).unwrap();
@@ -8763,6 +8806,25 @@ mod tests {
         // SAFETY: The test window owns `ID_CSS_EDITOR`.
         unsafe {
             let css_btn = dlg_item(custom_win.hwnd, ID_CSS_EDITOR).unwrap();
+            assert!(IsWindowEnabled(css_btn).as_bool());
+        }
+
+        // Toggle theme with advanced settings hidden.
+        window.set_show_advanced(false);
+        // SAFETY: The test window owns `ID_CSS_EDITOR`.
+        unsafe {
+            let css_btn = dlg_item(window.hwnd, ID_CSS_EDITOR).unwrap();
+            assert!(!IsWindowVisible(css_btn).as_bool());
+            select_combo_row(&window, ID_THEME, 2);
+            window.pump(|| {});
+            assert!(IsWindowVisible(css_btn).as_bool());
+            assert!(IsWindowEnabled(css_btn).as_bool());
+            select_combo_row(&window, ID_THEME, 1);
+            window.pump(|| {});
+            assert!(!IsWindowVisible(css_btn).as_bool());
+            select_combo_row(&window, ID_THEME, 2);
+            window.pump(|| {});
+            assert!(IsWindowVisible(css_btn).as_bool());
             assert!(IsWindowEnabled(css_btn).as_bool());
         }
     }
