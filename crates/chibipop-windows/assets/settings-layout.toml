@@ -11,7 +11,7 @@ label = "Appearance"
 [[tabs.sections.entries]]
 id = "popup-theme"
 label = "Color theme"
-help = "Dark and light set the base colors. A custom style can replace them."
+help = "Dark and light use built-in colors. Custom uses popup.css."
 
 [[tabs.sections.entries]]
 id = "popup-font"

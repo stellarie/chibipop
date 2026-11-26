@@ -75,12 +75,29 @@ fn apply_css(mut theme: Theme, css: Option<&str>) -> Theme {
 }
 
 pub(super) fn theme(config: &ResolvedConfig) -> Theme {
-    let css = std::fs::read_to_string(crate::paths::beside_exe("popup.css")).ok();
-    apply_css(base_theme(config), css.as_deref())
+    let css = if config.popup.theme == "custom" {
+        std::fs::read_to_string(crate::paths::beside_exe("popup.css")).ok()
+    } else {
+        None
+    };
+    theme_with_css(config, css.as_deref())
+}
+
+fn theme_with_css(config: &ResolvedConfig, css: Option<&str>) -> Theme {
+    let theme = base_theme(config);
+    if config.popup.theme == "custom" {
+        apply_css(theme, css)
+    } else {
+        theme
+    }
 }
 
 pub(super) fn controls_theme(config: &ResolvedConfig) -> Theme {
-    let css = std::fs::read_to_string(crate::paths::beside_exe("popup.css")).ok();
+    let css = if config.popup.theme == "custom" {
+        std::fs::read_to_string(crate::paths::beside_exe("popup.css")).ok()
+    } else {
+        None
+    };
     controls_theme_with_css(config, css.as_deref())
 }
 
@@ -88,7 +105,11 @@ fn controls_theme_with_css(config: &ResolvedConfig, css: Option<&str>) -> Theme 
     let mut theme = base_theme(config);
     theme.headword_weight = 700;
     theme.collapsed_italic = true;
-    apply_css(theme, css)
+    if config.popup.theme == "custom" {
+        apply_css(theme, css)
+    } else {
+        theme
+    }
 }
 
 impl SearchPopup {
@@ -282,5 +303,34 @@ unsafe extern "system" fn popup_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARA
             _ => {}
         }
         DefSubclassProc(hwnd, msg, wp, lp)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn search_popup_theme_applies_css_only_for_custom_mode() {
+        let css = ".headword { color: #123456; }";
+        let mut config = chibipop::config::Config::default().resolved(None).unwrap();
+
+        config.popup.theme = "dark".into();
+        assert_eq!(theme_with_css(&config, Some(css)).headword_text, Theme::dark().headword_text);
+        assert_eq!(
+            controls_theme_with_css(&config, Some(css)).headword_text,
+            Theme::dark().headword_text
+        );
+
+        config.popup.theme = "light".into();
+        assert_eq!(theme_with_css(&config, Some(css)).headword_text, Theme::light().headword_text);
+        assert_eq!(
+            controls_theme_with_css(&config, Some(css)).headword_text,
+            Theme::light().headword_text
+        );
+
+        config.popup.theme = "custom".into();
+        assert_eq!(theme_with_css(&config, Some(css)).headword_text, (0x12, 0x34, 0x56));
+        assert_eq!(controls_theme_with_css(&config, Some(css)).headword_text, (0x12, 0x34, 0x56));
     }
 }

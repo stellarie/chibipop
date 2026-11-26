@@ -105,7 +105,11 @@ fn theme_with_css(config: &ResolvedConfig, css: Option<&str>, text: &mut TextEng
     theme.font_name.clone_from(&config.popup.font);
     theme.headword_weight = 700;
     theme.collapsed_italic = true;
-    let errors = css.map_or_else(Vec::new, |css| chibipop::ui::css::parse(css, &mut theme));
+    let errors = if config.popup.theme == "custom" {
+        css.map_or_else(Vec::new, |css| chibipop::ui::css::parse(css, &mut theme))
+    } else {
+        Vec::new()
+    };
     theme.font_name = chibipop::config::resolve_font(&theme.font_name,
         chibipop::config::Platform::Linux, |family| text.resolvable(family)).family().to_string();
     text.set_family(&theme.font_name);
@@ -113,7 +117,11 @@ fn theme_with_css(config: &ResolvedConfig, css: Option<&str>, text: &mut TextEng
 }
 
 pub fn theme(config: &ResolvedConfig, css_path: Option<&Path>, text: &mut TextEngine) -> Theme {
-    let css = css_path.and_then(|path| std::fs::read_to_string(path).ok());
+    let css = if config.popup.theme == "custom" {
+        css_path.and_then(|path| std::fs::read_to_string(path).ok())
+    } else {
+        None
+    };
     let (theme, errors) = theme_with_css(config, css.as_deref(), text);
     for error in errors {
         eprintln!("chibipop: popup.css:{}: {}", error.line, error.message);

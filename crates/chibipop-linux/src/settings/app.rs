@@ -1711,7 +1711,7 @@ fn profile_page(app: &App) -> Element<'_, Message> {
 /// Separate appearance, size, behavior, and entry content instead of one long group.
 /// Each portable field remains in the form, so both platforms preserve its value.
 fn popup_page(app: &App) -> Element<'_, Message> {
-    let themes = vec!["dark".to_string(), "light".to_string()];
+    let themes = vec!["dark".to_string(), "light".to_string(), "custom".to_string()];
     let layers = vec!["overlay".to_string(), "top".to_string()];
     let layer_now = match app.form.cfg.popup.layer {
         PopupLayer::Overlay => "overlay".to_string(),

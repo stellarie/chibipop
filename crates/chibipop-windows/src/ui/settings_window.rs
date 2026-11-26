@@ -650,6 +650,18 @@ unsafe fn checkbox_is_checked(hwnd: HWND, id: i32) -> bool {
     }
 }
 
+unsafe fn update_css_editor_control(hwnd: HWND) {
+    // SAFETY: Caller supplies a live settings window.
+    unsafe {
+        let custom = dlg_item(hwnd, ID_THEME)
+            .ok()
+            .is_some_and(|c| SendMessageW(c, CB_GETCURSEL, None, None).0 == 2);
+        if let Ok(btn) = dlg_item(hwnd, ID_CSS_EDITOR) {
+            let _ = EnableWindow(btn, custom);
+        }
+    }
+}
+
 // ---- Layout dimensions in 96-DPI pixels ----
 
 const WIN_W: i32 = 560;
@@ -1575,6 +1587,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             }
             if id == ID_BIND_ADD && notify == BN_CLICKED as u16 {
                 record_action(hwnd, Action::AddBind);
+                return LRESULT(0);
+            }
+            if id == ID_THEME && notify == CBN_SELCHANGE as u16 {
+                unsafe { update_css_editor_control(hwnd) };
                 return LRESULT(0);
             }
             if id == ID_OCR_LANG && notify == CBN_SELCHANGE as u16 {
@@ -4895,10 +4911,10 @@ impl SettingsWindow {
             let idx = dlg_item(self.hwnd, ID_THEME)
                 .map(|c| SendMessageW(c, CB_GETCURSEL, None, None).0)
                 .unwrap_or(0);
-            if idx == 1 {
-                "light".into()
-            } else {
-                "dark".into()
+            match idx {
+                1 => "light".into(),
+                2 => "custom".into(),
+                _ => "dark".into(),
             }
         }
     }
@@ -5307,6 +5323,7 @@ impl SettingsWindow {
             if !busy {
                 update_list_buttons(self.hwnd);
                 update_engine_controls(self.hwnd);
+                update_css_editor_control(self.hwnd);
                 self.hide_unshown();
             }
         }
@@ -6669,7 +6686,14 @@ impl SettingsWindow {
                 let combo = labelled_row!(w!("COMBOBOX"), "",
                     WINDOW_STYLE(CBS_DROPDOWNLIST as u32) | WS_TABSTOP | WS_VSCROLL,
                     ID_THEME, 220);
-                for (index, (value, label)) in [("dark", "Dark"), ("light", "Light")].into_iter().enumerate() {
+                for (index, (value, label)) in [
+                    ("dark", "Dark"),
+                    ("light", "Light"),
+                    ("custom", "Custom"),
+                ]
+                .into_iter()
+                .enumerate()
+                {
                     SendMessageW(combo, CB_ADDSTRING, None,
                         Some(LPARAM(wide(label).as_ptr() as isize)));
                     if form.cfg.popup.theme == value {
@@ -6699,8 +6723,10 @@ impl SettingsWindow {
                 self.fonts = families;
             }
             SettingId::PopupCustomStyle => {
-                controls.push(child(page, w!("BUTTON"), &spec.label, WS_TABSTOP, PAD, y,
-                    WIN_W - 2 * PAD - 20, ROW_H, ID_CSS_EDITOR, f)?);
+                let btn = child(page, w!("BUTTON"), &spec.label, WS_TABSTOP, PAD, y,
+                    WIN_W - 2 * PAD - 20, ROW_H, ID_CSS_EDITOR, f)?;
+                let _ = EnableWindow(btn, form.cfg.popup.theme == "custom");
+                controls.push(btn);
                 y += ROW_H + ROW_GAP;
             }
             SettingId::PopupMaxWidth => {
@@ -7647,10 +7673,10 @@ impl SettingsWindow {
             let screenshot_reset_targets = staged.screenshot_reset_targets;
             let screenshot = staged.cfg.actions.screenshot.clone();
 
-            let theme = if combo_index(ID_THEME) == 1 {
-                "light"
-            } else {
-                "dark"
+            let theme = match combo_index(ID_THEME) {
+                1 => "light",
+                2 => "custom",
+                _ => "dark",
             };
             let sentence_mode = sentence_mode_at(combo_index(ID_SENTENCE_MODE));
             let selection_buttons = selection_buttons_at(combo_index(ID_SELECTION_BUTTONS));
@@ -8702,6 +8728,43 @@ mod tests {
         read.select_profile(&parent, &[]).unwrap();
         read.select_profile(&derived, &[]).unwrap();
         assert_eq!("dark", read.cfg.popup.theme);
+    }
+
+    #[test]
+    fn popup_theme_combo_gates_css_editor_button() {
+        use windows::Win32::UI::Input::KeyboardAndMouse::IsWindowEnabled;
+
+        let mut form = crate::settings::from_config(&crate::config::Config::default(), &[]);
+        form.cfg.popup.theme = "dark".into();
+        let window = SettingsWindow::open(&form, &[], ApplyMode::Standalone).unwrap();
+        // SAFETY: The test window owns both controls.
+        unsafe {
+            let combo = dlg_item(window.hwnd, ID_THEME).unwrap();
+            let css_btn = dlg_item(window.hwnd, ID_CSS_EDITOR).unwrap();
+            assert_eq!(SendMessageW(combo, CB_GETCOUNT, None, None).0, 3);
+            assert!(!IsWindowEnabled(css_btn).as_bool());
+
+            select_combo_row(&window, ID_THEME, 1);
+            assert_eq!(window.read_theme_name(), "light");
+            assert!(!IsWindowEnabled(css_btn).as_bool());
+
+            select_combo_row(&window, ID_THEME, 2);
+            assert_eq!(window.read_theme_name(), "custom");
+            assert_eq!(window.read(&form).cfg.popup.theme, "custom");
+            assert!(IsWindowEnabled(css_btn).as_bool());
+
+            select_combo_row(&window, ID_THEME, 0);
+            assert_eq!(window.read_theme_name(), "dark");
+            assert!(!IsWindowEnabled(css_btn).as_bool());
+        }
+
+        form.cfg.popup.theme = "custom".into();
+        let custom_win = SettingsWindow::open(&form, &[], ApplyMode::Standalone).unwrap();
+        // SAFETY: The test window owns `ID_CSS_EDITOR`.
+        unsafe {
+            let css_btn = dlg_item(custom_win.hwnd, ID_CSS_EDITOR).unwrap();
+            assert!(IsWindowEnabled(css_btn).as_bool());
+        }
     }
 
     #[test]

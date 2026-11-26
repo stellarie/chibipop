@@ -4330,16 +4330,27 @@ fn open_url(url: &str) {
 
 /// Selects the palette by name and then sets the font.
 fn theme_from_config(popup: &crate::config::PopupConfig) -> Theme {
+    let css = if popup.theme == "custom" {
+        let css_path = crate::paths::beside_exe("popup.css");
+        std::fs::read_to_string(&css_path).ok()
+    } else {
+        None
+    };
+    theme_from_config_with_css(popup, css.as_deref())
+}
+
+fn theme_from_config_with_css(popup: &crate::config::PopupConfig, css: Option<&str>) -> Theme {
     let mut theme = match popup.theme.as_str() {
         "light" => Theme::light(),
         _ => Theme::dark(),
     };
     theme.font_name = popup.font.clone();
-    let css_path = crate::paths::beside_exe("popup.css");
-    if let Ok(css) = std::fs::read_to_string(&css_path) {
-        let errors = crate::ui::css::parse(&css, &mut theme);
-        for e in &errors {
-            eprintln!("chibipop: popup.css:{}: {}", e.line, e.message);
+    if popup.theme == "custom" {
+        if let Some(css) = css {
+            let errors = crate::ui::css::parse(css, &mut theme);
+            for e in &errors {
+                eprintln!("chibipop: popup.css:{}: {}", e.line, e.message);
+            }
         }
     }
     theme
@@ -4746,6 +4757,25 @@ mod tests {
         assert!(!second_ran);
         assert_eq!(slot.as_ref().map(|editor| editor.hwnd()), first);
         Ok(())
+    }
+
+    #[test]
+    fn theme_from_config_applies_css_only_for_custom_mode() {
+        let css = ".headword { color: #123456; }";
+        let mut popup = crate::config::PopupConfig {
+            theme: "dark".into(),
+            ..Default::default()
+        };
+        let dark = theme_from_config_with_css(&popup, Some(css));
+        assert_eq!(dark.headword_text, Theme::dark().headword_text);
+
+        popup.theme = "light".into();
+        let light = theme_from_config_with_css(&popup, Some(css));
+        assert_eq!(light.headword_text, Theme::light().headword_text);
+
+        popup.theme = "custom".into();
+        let custom = theme_from_config_with_css(&popup, Some(css));
+        assert_eq!(custom.headword_text, (0x12, 0x34, 0x56));
     }
 
     #[test]
