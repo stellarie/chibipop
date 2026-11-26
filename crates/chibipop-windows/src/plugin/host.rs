@@ -7,6 +7,7 @@ use anyhow::{bail, Context, Result};
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Write};
 use std::os::windows::io::AsRawHandle;
+use std::os::windows::process::CommandExt;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
@@ -19,6 +20,7 @@ use windows::Win32::System::JobObjects::{
     SetInformationJobObject, JOBOBJECT_BASIC_LIMIT_INFORMATION,
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
 };
+use windows::Win32::System::Threading::CREATE_NO_WINDOW;
 
 pub struct Host {
     child: Child,
@@ -174,6 +176,7 @@ pub fn spawn(m: &Manifest, dir: &Path) -> Result<Host> {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        .creation_flags(CREATE_NO_WINDOW.0)
         .spawn()
         .with_context(|| format!("starting plugin \"{}\"", m.name))?;
     if let Err(e) = job.adopt(&child) {
