@@ -474,6 +474,9 @@ Worker: capture -> mask -> OCR -> lookup -> present --result--> Controller
   Search definition popup uses the same setting.
 - The design rejects an outermost-first display (weikipop's order) and a relabel table in
   code (the labels come from embedded rules compiled from `data/deconjugator.json`).
+- `LookupEngine` tries 1 or 2 large-to-small kana substitutions per prefix span (`つやゆよ`
+  and `ツヤユヨ`) as plain candidates.
+- Exact plain matches rank ahead of small-kana fallback matches.
 
 ## Verification
 

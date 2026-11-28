@@ -35,6 +35,55 @@ fn is_kana(c: char) -> bool {
     matches!(c, '\u{3040}'..='\u{309F}' | '\u{30A0}'..='\u{30FF}')
 }
 
+fn small_kana_for(c: char) -> Option<char> {
+    match c {
+        'つ' => Some('っ'),
+        'や' => Some('ゃ'),
+        'ゆ' => Some('ゅ'),
+        'よ' => Some('ょ'),
+        'ツ' => Some('ッ'),
+        'ヤ' => Some('ャ'),
+        'ユ' => Some('ュ'),
+        'ヨ' => Some('ョ'),
+        _ => None,
+    }
+}
+
+/// Build 1- and 2-edit small-kana variants.
+fn small_kana_variants(chars: &[char]) -> Vec<(String, usize)> {
+    let subs: Vec<(usize, char)> = chars
+        .iter()
+        .enumerate()
+        .filter_map(|(i, &c)| small_kana_for(c).map(|s| (i, s)))
+        .collect();
+    if subs.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    let mut buf = chars.to_vec();
+    for &(i, small) in &subs {
+        let orig = buf[i];
+        buf[i] = small;
+        out.push((buf.iter().collect(), 1));
+        buf[i] = orig;
+    }
+    if subs.len() <= 8 {
+        for a in 0..subs.len() {
+            let (ia, sa) = subs[a];
+            let orig_a = buf[ia];
+            buf[ia] = sa;
+            for &(ib, sb) in &subs[a + 1..] {
+                let orig_b = buf[ib];
+                buf[ib] = sb;
+                out.push((buf.iter().collect(), 2));
+                buf[ib] = orig_b;
+            }
+            buf[ia] = orig_a;
+        }
+    }
+    out
+}
+
 /// This score ports weikipop's priority formula.
 /// It omits `steps`. `run` ranks `steps` after it.
 fn score(match_len: usize, freq: Option<i64>, kana_bonus: bool) -> f64 {
@@ -71,6 +120,7 @@ struct Candidate {
     /// `true` for no tag or a terminal tag.
     /// `false` for a tag `dict_pos_for` lacks.
     whole: bool,
+    edits: usize,
     process: Vec<String>,
 }
 
@@ -97,10 +147,12 @@ fn kana_bonus(c: &Candidate) -> bool {
 type GroupKey = (Option<String>, Option<String>, i64);
 
 /// Return `true` when `new` ranks above `existing`.
-/// Keys: `match_len`, `whole`, `steps`, `process`.
+/// Keys: `match_len`, `whole`, `edits`, `steps`.
 fn is_better(new: &Candidate, existing: &Candidate) -> bool {
-    fn rank(c: &Candidate) -> (usize, bool, Reverse<usize>, Reverse<&Vec<String>>) {
-        (c.match_len, c.whole, Reverse(c.steps), Reverse(&c.process))
+    fn rank(
+        c: &Candidate,
+    ) -> (usize, bool, Reverse<usize>, Reverse<usize>, Reverse<&Vec<String>>) {
+        (c.match_len, c.whole, Reverse(c.edits), Reverse(c.steps), Reverse(&c.process))
     }
     rank(new) > rank(existing)
 }
@@ -184,7 +236,30 @@ impl LookupEngine {
                         match_len: prefix_len,
                         steps: form.process.len(),
                         whole,
+                        edits: 0,
                         process: form.process.clone(),
+                    };
+                    let should_replace = match best.get(&key) {
+                        Some(existing) => is_better(&candidate, existing),
+                        None => true,
+                    };
+                    if should_replace {
+                        best.insert(key, candidate);
+                    }
+                }
+            }
+
+            for (variant, edits) in small_kana_variants(&chars[..prefix_len]) {
+                for row in dict.terms_for(&variant)? {
+                    let key: GroupKey =
+                        (row.written.clone(), row.reading.clone(), row.entry_id);
+                    let candidate = Candidate {
+                        row,
+                        match_len: prefix_len,
+                        steps: 0,
+                        whole: true,
+                        edits,
+                        process: Vec::new(),
                     };
                     let should_replace = match best.get(&key) {
                         Some(existing) => is_better(&candidate, existing),
@@ -199,12 +274,21 @@ impl LookupEngine {
 
         let mut ranked: Vec<Candidate> = best.into_values().collect();
 
+        let exact_plain_spans: HashSet<usize> = ranked
+            .iter()
+            .filter(|c| c.steps == 0 && c.edits == 0)
+            .map(|c| c.match_len)
+            .collect();
+        let fuzzy_after_exact = |c: &Candidate| {
+            c.edits > 0 && exact_plain_spans.contains(&c.match_len)
+        };
         // A plain row leads a bare stem of its span
         // before a copula.
         let stem_spans: HashSet<usize> =
             ranked.iter().filter(|c| bare_stem(c)).map(|c| c.match_len).collect();
         let leads = |c: &Candidate| {
             c.steps == 0
+                && c.edits == 0
                 && copula_follows(&chars[c.match_len..])
                 && stem_spans.contains(&c.match_len)
         };
@@ -216,11 +300,13 @@ impl LookupEngine {
                 // For equal spans, a known word class wins.
                 // Then a leading plain row ranks first.
                 .then(b.whole.cmp(&a.whole))
+                .then(fuzzy_after_exact(a).cmp(&fuzzy_after_exact(b)))
                 .then(leads(b).cmp(&leads(a)))
                 .then(sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal))
                 // After all higher keys tie, use `steps` as a nudge, not as the main
                 // factor in the decision.
                 .then(a.steps.cmp(&b.steps))
+                .then(a.edits.cmp(&b.edits))
                 // Use raw `dict_id` only as a deterministic tie-break.
                 .then(a.row.dict_id.cmp(&b.row.dict_id))
                 .then(a.row.entry_id.cmp(&b.row.entry_id))
@@ -509,5 +595,35 @@ mod tests {
         e.add_entry(2, 1, &glossary("to study", "vs"));
         let hits = engine().run(&e, "勉強する").unwrap();
         assert_eq!(hits[0].written.as_deref(), Some("勉強する"), "got {hits:?}");
+    }
+
+    #[test]
+    fn small_kana_ocr_fallback() {
+        let mut d = FakeDictionary::new();
+        d.add_term("てんじょう", Some("天井"), Some("てんじょう"), "", Some(4000), 1, 1);
+        d.add_entry(1, 1, &glossary("ceiling", ""));
+        d.add_term("てんじる", Some("転じる"), Some("てんじる"), "v1", Some(4000), 2, 1);
+        d.add_entry(2, 1, &glossary("to turn", "v1"));
+        let hits = engine().run(&d, "てんじよう").unwrap();
+        assert_eq!(hits[0].written.as_deref(), Some("天井"), "got {hits:?}");
+        assert!(hits[0].process.is_empty());
+
+        let mut k = FakeDictionary::new();
+        k.add_term("きって", Some("切手"), Some("きって"), "", Some(2000), 1, 1);
+        k.add_entry(1, 1, &glossary("stamp", ""));
+        k.add_term("シャット", None, Some("シャット"), "", Some(3000), 2, 1);
+        k.add_entry(2, 1, &glossary("shut", ""));
+        let hits = engine().run(&k, "きつて").unwrap();
+        assert_eq!(hits[0].written.as_deref(), Some("切手"), "got {hits:?}");
+        let hits = engine().run(&k, "シヤツト").unwrap();
+        assert_eq!(hits[0].reading.as_deref(), Some("シャット"), "got {hits:?}");
+
+        let mut e = FakeDictionary::new();
+        e.add_term("きよう", Some("器用"), Some("きよう"), "", Some(5000), 1, 1);
+        e.add_entry(1, 1, &glossary("skillful", ""));
+        e.add_term("きょう", Some("今日"), Some("きょう"), "", Some(10), 2, 1);
+        e.add_entry(2, 1, &glossary("today", ""));
+        let hits = engine().run(&e, "きよう").unwrap();
+        assert_eq!(hits[0].written.as_deref(), Some("器用"), "got {hits:?}");
     }
 }
