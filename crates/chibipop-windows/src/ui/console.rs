@@ -1,7 +1,9 @@
 //! This module shows the live Lookup log in the Windows console.
 
 use windows::Win32::Foundation::HWND;
-use windows::Win32::System::Console::{GetConsoleProcessList, GetConsoleWindow};
+use windows::Win32::System::Console::{
+    AttachConsole, GetConsoleProcessList, GetConsoleWindow, ATTACH_PARENT_PROCESS,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
     DeleteMenu, GetSystemMenu, ShowWindow, MF_BYCOMMAND, SC_CLOSE, SW_HIDE, SW_SHOW,
 };
@@ -26,6 +28,18 @@ fn own_console() -> Option<HWND> {
             None
         } else {
             Some(hwnd)
+        }
+    }
+}
+
+/// Attaches to the parent console if absent.
+pub fn attach_parent() {
+    // SAFETY: GetConsoleWindow returns null when no console exists.
+    // AttachConsole attaches to the parent process console if one exists
+    // and returns an error otherwise, which this code ignores.
+    unsafe {
+        if GetConsoleWindow().is_invalid() {
+            let _ = AttachConsole(ATTACH_PARENT_PROCESS);
         }
     }
 }

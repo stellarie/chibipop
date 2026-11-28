@@ -41,7 +41,7 @@ pub enum TrayCommand {
     OpenSettings,
     OpenSearch,
     SetDefaultProfile(String),
-    /// Shows or hides the Lookup log console for this run only.
+    /// Opens the in-app Logs tab.
     ToggleLookupLog,
     Quit,
 }
@@ -126,7 +126,7 @@ pub struct Tray {
     hicon_owned: bool,
     profiles: Vec<TrayProfile>,
     default_profile: String,
-    /// Drives the check mark of the Lookup log item. It starts off every run.
+    /// Marks the Logs menu item as checked.
     lookup_log_shown: bool,
 }
 
@@ -223,7 +223,7 @@ impl Tray {
         self.default_profile.clone_from(&config.default_profile);
     }
 
-    /// Records whether the Lookup log console is on screen.
+    /// Records whether the Logs tab is open.
     pub fn set_lookup_log_shown(&mut self, shown: bool) {
         self.lookup_log_shown = shown;
     }
@@ -450,8 +450,8 @@ unsafe fn populate_menu(
         } else {
             MF_STRING
         };
-        AppendMenuW(hmenu, lookup_log_flags, ID_LOOKUP_LOG as usize, w!("Lookup log"))
-            .context("AppendMenuW Lookup log")?;
+        AppendMenuW(hmenu, lookup_log_flags, ID_LOOKUP_LOG as usize, w!("Logs…"))
+            .context("AppendMenuW Logs")?;
         AppendMenuW(hmenu, MF_SEPARATOR, 0, PCWSTR::null())
             .context("AppendMenuW separator")?;
         AppendMenuW(hmenu, MF_STRING, ID_QUIT as usize, w!("Quit"))
@@ -464,7 +464,8 @@ unsafe fn populate_menu(
 ///
 /// A `true` flag means this process owns the handle and must destroy it.
 unsafe fn load_tray_icon() -> Result<(HICON, bool)> {
-    if let Some(hicon) = unsafe { load_embedded_icon() } {
+    let desired = unsafe { GetSystemMetrics(SM_CXSMICON) } as u32;
+    if let Some(hicon) = load_app_icon(desired) {
         return Ok((hicon, true));
     }
     eprintln!("chibipop: could not load the tray's own icon, using the default");
@@ -473,11 +474,9 @@ unsafe fn load_tray_icon() -> Result<(HICON, bool)> {
     Ok((hicon, false))
 }
 
-/// Loads the `.ico` frame that is closest to the small icon size.
-///
-/// Returns `None` after any failure.
-unsafe fn load_embedded_icon() -> Option<HICON> {
-    let desired = unsafe { GetSystemMetrics(SM_CXSMICON) } as u32;
+/// Loads the embedded icon nearest `desired`.
+/// Returns `None` on failure.
+pub(crate) fn load_app_icon(desired: u32) -> Option<HICON> {
     let bytes = ico_frame_bytes(ICON_BYTES, desired)?;
     // SAFETY: `bytes` is a sub-slice of `ICON_BYTES`, a `'static` buffer
     // that this binary embeds. The pointer and the length that

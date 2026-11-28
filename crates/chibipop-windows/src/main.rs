@@ -1,3 +1,4 @@
+#![cfg_attr(windows, windows_subsystem = "windows")]
 // Keep these lints allowed by default.
 #![warn(missing_unsafe_on_extern)]
 #![warn(unsafe_attr_outside_unsafe)]

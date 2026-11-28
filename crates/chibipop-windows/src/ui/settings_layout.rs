@@ -9,7 +9,7 @@ use std::collections::HashSet;
 const LAYOUT_VERSION: u32 = 1;
 const EMBEDDED_LAYOUT: &str = include_str!("../../assets/settings-layout.toml");
 
-pub(super) const SETTING_INVENTORY: [SettingId; 63] = [
+pub(super) const SETTING_INVENTORY: [SettingId; 64] = [
     SettingId::LookupMode,
     SettingId::SelectedTextSentenceSearch,
     SettingId::OpenDictionarySearch,
@@ -52,8 +52,8 @@ pub(super) const SETTING_INVENTORY: [SettingId; 63] = [
     SettingId::DebugCaptureOutline,
     SettingId::DebugEngine,
     SettingId::DebugAdapter,
-    SettingId::ShowLiveLogs,
     SettingId::ClearLookupCache,
+    SettingId::LiveLogsView,
     SettingId::AnkiEnabled,
     SettingId::AnkiNotifyOnAdd,
     SettingId::AnkiOverwriteDuplicates,
@@ -73,6 +73,7 @@ pub(super) const SETTING_INVENTORY: [SettingId; 63] = [
     SettingId::AnkiFieldMap,
     SettingId::PluginList,
     SettingId::BackgroundOnClose,
+    SettingId::AboutInfo,
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -127,6 +128,7 @@ pub(super) enum TabId {
     Anki,
     Extensions,
     Debug,
+    Logs,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize)]
@@ -154,6 +156,8 @@ pub(super) enum SectionId {
     ExtensionPlugins,
     DebugDiagnostics,
     WindowBehavior,
+    About,
+    LiveLogs,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize)]
@@ -201,8 +205,8 @@ pub(super) enum SettingId {
     DebugCaptureOutline,
     DebugEngine,
     DebugAdapter,
-    ShowLiveLogs,
     ClearLookupCache,
+    LiveLogsView,
     AnkiEnabled,
     AnkiNotifyOnAdd,
     AnkiOverwriteDuplicates,
@@ -222,6 +226,7 @@ pub(super) enum SettingId {
     AnkiFieldMap,
     PluginList,
     BackgroundOnClose,
+    AboutInfo,
 }
 
 impl SettingsLayout {
@@ -363,9 +368,10 @@ mod tests {
                 "Anki",
                 "Extensions",
                 "Debug",
+                "Logs",
             ]
         );
-        assert_eq!(layout.tab_count(), 9);
+        assert_eq!(layout.tab_count(), 10);
         assert_eq!(layout.field_map_tab(), Some(6));
         assert!(layout.tab_needs_anki_detection(6));
         assert!(!layout.tab_needs_anki_detection(0));
@@ -383,11 +389,12 @@ mod tests {
         let (tab, section, entry) = location(&layout, SettingId::AnkiEnabled);
         assert_eq!(layout.tabs[tab].sections[section].entries[entry].label, "Enable Anki");
         assert_eq!(location(&layout, SettingId::BackgroundOnClose).0, 1);
+        assert_eq!(location(&layout, SettingId::AboutInfo).0, 1);
         assert_eq!(location(&layout, SettingId::DebugCaptureOutline).0, 8);
         assert_eq!(location(&layout, SettingId::DebugEngine).0, 8);
         assert_eq!(location(&layout, SettingId::DebugAdapter).0, 8);
-        assert_eq!(location(&layout, SettingId::ShowLiveLogs).0, 8);
         assert_eq!(location(&layout, SettingId::ClearLookupCache).0, 8);
+        assert_eq!(location(&layout, SettingId::LiveLogsView).0, 9);
 
         let ids: HashSet<_> = SETTING_INVENTORY.into_iter().collect();
         assert_eq!(ids.len(), SETTING_INVENTORY.len());
@@ -409,6 +416,8 @@ mod tests {
             SettingId::PopupFont,
             SettingId::PopupMaxWidth,
             SettingId::PopupMaxHeight,
+            SettingId::BackgroundOnClose,
+            SettingId::AboutInfo,
             SettingId::LookupMode,
             SettingId::ConfiguredBinds,
             SettingId::OpenDictionarySearch,
@@ -429,6 +438,7 @@ mod tests {
             SettingId::AnkiSentenceMode,
             SettingId::AnkiStaticOverlay,
             SettingId::AnkiFieldMap,
+            SettingId::LiveLogsView,
         ]);
         assert_eq!(basic, approved);
     }

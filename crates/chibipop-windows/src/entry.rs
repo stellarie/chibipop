@@ -163,6 +163,9 @@ enum ActionCmd {
 
 pub fn run() -> Result<()> {
     chibipop::update::cleanup_old();
+    if std::env::args_os().len() > 1 {
+        chibipop_windows::ui::console::attach_parent();
+    }
     chibipop_windows::ui::console::hide();
     let cli = Cli::parse();
     // A double-click provides no Command.

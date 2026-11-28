@@ -31,7 +31,8 @@ use windows::Win32::Graphics::Gdi::{
     TEXTMETRICW,
 };
 use windows::Win32::UI::Controls::{
-    InitCommonControlsEx, SetScrollInfo, INITCOMMONCONTROLSEX, LVCOLUMNW, LVINSERTMARK, LVITEMW,
+    InitCommonControlsEx, SetScrollInfo, EM_GETFIRSTVISIBLELINE, EM_LINESCROLL, EM_SCROLLCARET,
+    EM_SETLIMITTEXT, EM_SETSEL, INITCOMMONCONTROLSEX, LVCOLUMNW, LVINSERTMARK, LVITEMW,
     LIST_VIEW_ITEM_STATE_FLAGS, NMLISTVIEW, ICC_LISTVIEW_CLASSES, ICC_TAB_CLASSES, ICC_BAR_CLASSES,
     LVCF_WIDTH,
     TTS_ALWAYSTIP, TTM_ACTIVATE, TTM_ADDTOOLW, TTM_SETMAXTIPWIDTH, TTM_TRACKACTIVATE,
@@ -253,6 +254,12 @@ const ID_CLEAR_LOOKUP_CACHE: i32 = 155;
 const ID_SHOW_ADVANCED: i32 = 189;
 const ID_APPLY_STATE: i32 = 193;
 const ID_RUNTIME_STATUS: i32 = 194;
+const ID_LIVE_LOGS: i32 = 195;
+const ID_ABOUT_GITHUB: i32 = 196;
+const LIVE_LOGS_H: i32 = 260;
+const ID_LOG_TIMER: usize = 0x72;
+const LOG_POLL_MS: u32 = 250;
+const ABOUT_GITHUB_URL: &str = "https://github.com/stellarie/chibipop";
 const ID_BACKGROUND_ON_CLOSE: i32 = 28000;
 const ID_SELECTED_TEXT_SENTENCE_SEARCH: i32 = 96;
 const ID_OPEN_DICTIONARY_SEARCH: i32 = 199;
@@ -640,6 +647,18 @@ unsafe fn checkbox_is_checked(hwnd: HWND, id: i32) -> bool {
         dlg_item(hwnd, id)
             .ok()
             .is_some_and(|control| SendMessageW(control, BM_GETCHECK, None, None).0 == 1)
+    }
+}
+
+unsafe fn update_css_editor_control(hwnd: HWND) {
+    // SAFETY: Caller supplies a live settings window.
+    unsafe {
+        let custom = dlg_item(hwnd, ID_THEME)
+            .ok()
+            .is_some_and(|c| SendMessageW(c, CB_GETCURSEL, None, None).0 == 2);
+        if let Ok(btn) = dlg_item(hwnd, ID_CSS_EDITOR) {
+            let _ = EnableWindow(btn, custom);
+        }
     }
 }
 
@@ -1178,6 +1197,8 @@ thread_local! {
     static RESIZED: Cell<Option<isize>> = const { Cell::new(None) };
     static WINDOW_DPI: Cell<Option<(isize, u32)>> = const { Cell::new(None) };
     static SHOW_LOGS: Cell<Option<isize>> = const { Cell::new(None) };
+    static LIVE_MODE: Cell<Option<isize>> = const { Cell::new(None) };
+    static LOG_REVISION: Cell<Option<(isize, u64)>> = const { Cell::new(None) };
     static USER_EDIT: Cell<Option<isize>> = const { Cell::new(None) };
     static BIND_EDIT: Cell<Option<isize>> = const { Cell::new(None) };
     static EDIT_TRACKING: Cell<Option<isize>> = const { Cell::new(None) };
@@ -1232,6 +1253,7 @@ fn user_edit_command(id: i32, notify: u16) -> bool {
         ID_APPLY | ID_QUIT | ID_CHECK_UPDATE | ID_ANKI_TEST | ID_CSS_EDITOR
             | ID_SHOW_ADVANCED | ID_ENGINE_CONFIGURE | ID_FIELD_MAP_TOGGLE | ID_SHOW_LIVE_LOGS
             | ID_CLEAR_LOOKUP_CACHE | ID_STATUS | ID_APPLY_STATE | ID_RUNTIME_STATUS
+            | ID_LIVE_LOGS | ID_ABOUT_GITHUB
             | ID_OPEN_DICTIONARY_SEARCH | ID_OPEN_SENTENCE_SEARCH
     ) && matches!(
         notify as u32,
@@ -1567,6 +1589,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 record_action(hwnd, Action::AddBind);
                 return LRESULT(0);
             }
+            if id == ID_THEME && notify == CBN_SELCHANGE as u16 {
+                CONDITION_CHANGED.with(|c| c.set(Some(hwnd.0 as isize)));
+                unsafe { update_css_editor_control(hwnd) };
+                return LRESULT(0);
+            }
             if id == ID_OCR_LANG && notify == CBN_SELCHANGE as u16 {
                 record_language_change(hwnd);
                 return LRESULT(0);
@@ -1603,6 +1630,17 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 ID_CHECK_UPDATE => record_click(hwnd, SettingsClick::CheckUpdate),
                 ID_CSS_EDITOR => record_click(hwnd, SettingsClick::CssEditor),
                 ID_SHOW_LIVE_LOGS => SHOW_LOGS.with(|slot| slot.set(Some(hwnd.0 as isize))),
+                ID_ABOUT_GITHUB if notify == BN_CLICKED as u16 => unsafe {
+                    let url = wide(ABOUT_GITHUB_URL);
+                    ShellExecuteW(
+                        Some(hwnd),
+                        w!("open"),
+                        PCWSTR(url.as_ptr()),
+                        PCWSTR::null(),
+                        PCWSTR::null(),
+                        SW_SHOWNORMAL,
+                    );
+                },
                 ID_CLEAR_LOOKUP_CACHE => record_click(hwnd, SettingsClick::ClearLookupCache),
                 ID_SCREENSHOT_RESET => record_action(hwnd, Action::ResetScreenshotTargets),
                 ID_FIELD_MAP_TOGGLE => record_field_map_toggle(hwnd),
@@ -1687,6 +1725,28 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             }
             LRESULT(0)
         }
+        WM_TIMER if wparam.0 == ID_LOG_TIMER => {
+            // SAFETY: `hwnd` is a live settings window.
+            unsafe { poll_live_logs(hwnd) };
+            LRESULT(0)
+        }
+        WM_SYSCOMMAND if (wparam.0 & 0xFFF0) == SC_MINIMIZE as usize => {
+            let live = LIVE_MODE.with(|slot| slot.get() == Some(hwnd.0 as isize));
+            // SAFETY: `hwnd` is a live settings window.
+            let minimize_to_tray = live
+                && unsafe {
+                    dlg_item(hwnd, ID_BACKGROUND_ON_CLOSE)
+                        .ok()
+                        .is_some_and(|c| SendMessageW(c, CB_GETCURSEL, None, None).0 == 1)
+                };
+            if minimize_to_tray {
+                // SAFETY: `hwnd` is a live settings window.
+                unsafe { let _ = ShowWindow(hwnd, SW_HIDE); }
+                LRESULT(0)
+            } else {
+                unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+            }
+        }
         WM_SIZE => {
             if wparam.0 != SIZE_MINIMIZED as usize {
                 RESIZED.with(|slot| slot.set(Some(hwnd.0 as isize)));
@@ -1762,10 +1822,16 @@ unsafe fn register_class(hinstance: HINSTANCE) -> Result<()> {
     // set to zero. `lpfnWndProc` points to an extern system function that stays
     // valid for the process lifetime, as the operating system requires.
     unsafe {
+        let hicon = crate::ui::tray::load_app_icon(GetSystemMetrics(SM_CXICON) as u32)
+            .unwrap_or_default();
+        let hicon_sm = crate::ui::tray::load_app_icon(GetSystemMetrics(SM_CXSMICON) as u32)
+            .unwrap_or_default();
         let wc = WNDCLASSEXW {
             cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
             lpfnWndProc: Some(wndproc),
             hInstance: hinstance,
+            hIcon: hicon,
+            hIconSm: hicon_sm,
             lpszClassName: class_name(),
             hCursor: LoadCursorW(None, IDC_ARROW).context("LoadCursorW(IDC_ARROW)")?,
             hbrBackground: windows::Win32::Graphics::Gdi::HBRUSH(
@@ -2834,6 +2900,7 @@ unsafe fn fill_combo_if_changed(combo: HWND, rows: &[String]) {
             None,
             Some(LPARAM(wide(&cur).as_ptr() as isize)),
         );
+        SendMessageW(combo, CB_SETEDITSEL, None, Some(LPARAM(-1isize)));
     }
 }
 
@@ -3089,6 +3156,58 @@ fn advanced_label(hidden: usize) -> String {
 }
 
 const APPLY_CAPTION: &str = "Apply";
+const APPLY_RESTART_CAPTION: &str = "Apply and Restart";
+
+fn normalize_crlf(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 64);
+    let mut prev_cr = false;
+    for ch in text.chars() {
+        if ch == '\n' && !prev_cr {
+            out.push('\r');
+        }
+        out.push(ch);
+        prev_cr = ch == '\r';
+    }
+    out
+}
+
+unsafe fn poll_live_logs(hwnd: HWND) {
+    let owner = hwnd.0 as isize;
+    let snap = crate::diagnostics::snapshot();
+    let unchanged = LOG_REVISION.with(|slot| slot.get() == Some((owner, snap.revision)));
+    if unchanged {
+        return;
+    }
+    // SAFETY: `ID_LIVE_LOGS` is a live child edit control.
+    unsafe {
+        let Ok(edit) = dlg_item(hwnd, ID_LIVE_LOGS) else {
+            return;
+        };
+        let mut si = SCROLLINFO {
+            cbSize: std::mem::size_of::<SCROLLINFO>() as u32,
+            fMask: SIF_RANGE | SIF_PAGE | SIF_POS,
+            ..Default::default()
+        };
+        let had_scroll = GetScrollInfo(edit, SB_VERT, &mut si).is_ok();
+        let was_first = LOG_REVISION.with(|slot| !slot.get().is_some_and(|(h, _)| h == owner));
+        let at_tail = was_first
+            || !had_scroll
+            || si.nMax <= 0
+            || si.nPos + (si.nPage as i32) >= si.nMax - 1;
+        let prev_top = SendMessageW(edit, EM_GETFIRSTVISIBLELINE, None, None).0 as isize;
+        let text = normalize_crlf(&snap.text);
+        let wide_text = wide(&text);
+        let _ = SetWindowTextW(edit, PCWSTR(wide_text.as_ptr()));
+        LOG_REVISION.with(|slot| slot.set(Some((owner, snap.revision))));
+        if at_tail {
+            let end = wide_text.len().saturating_sub(1);
+            SendMessageW(edit, EM_SETSEL, Some(WPARAM(end)), Some(LPARAM(end as isize)));
+            SendMessageW(edit, EM_SCROLLCARET, None, None);
+        } else if prev_top > 0 {
+            SendMessageW(edit, EM_LINESCROLL, None, Some(LPARAM(prev_top)));
+        }
+    }
+}
 
 /// Returns the Apply hint text.
 #[cfg(test)]
@@ -4387,6 +4506,7 @@ pub struct SettingsWindow {
     apply_mode: ApplyMode,
     /// True while the settings controls are disabled.
     busy: Cell<bool>,
+    restart_required: Cell<bool>,
     apply_state: Cell<ApplyState>,
     /// The tooltip control that carries an entry's help text on hover.
     tip: HWND,
@@ -4489,6 +4609,7 @@ impl SettingsWindow {
 
         unsafe {
             let _ = KillTimer(Some(self.hwnd), ID_TIP_TIMER);
+            let _ = KillTimer(Some(self.hwnd), ID_LOG_TIMER);
             for id in [ID_TAB, ID_VIEWPORT] {
                 if let Ok(child) = dlg_item(self.hwnd, id) {
                     DestroyWindow(child)?;
@@ -4496,6 +4617,11 @@ impl SettingsWindow {
             }
             destroy_tip(&mut self.tip);
         }
+        LOG_REVISION.with(|slot| {
+            if slot.get().is_some_and(|(owner, _)| owner == self.hwnd.0 as isize) {
+                slot.set(None);
+            }
+        });
         BIND_CAPTURED.with(|state| {
             let mut state = state.borrow_mut();
             if state.as_ref().is_some_and(|(owner, _)| *owner == self.hwnd.0 as isize) {
@@ -4575,10 +4701,16 @@ impl SettingsWindow {
             register_class(hinstance)?;
             register_pane_class(hinstance)?;
 
+            let ex_style = if mode == ApplyMode::Live {
+                WS_EX_TOOLWINDOW
+            } else {
+                WINDOW_EX_STYLE(0)
+            };
+            let title = wide(&format!("chibipop-v{}", env!("CARGO_PKG_VERSION")));
             let hwnd = CreateWindowExW(
-                WINDOW_EX_STYLE(0),
+                ex_style,
                 class_name(),
-                w!("chibipop settings"),
+                PCWSTR(title.as_ptr()),
                 WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX
                     | WS_THICKFRAME | WS_VSCROLL,
                 CW_USEDEFAULT,
@@ -4592,6 +4724,9 @@ impl SettingsWindow {
                 None,
             )
             .context("CreateWindowExW for the settings window")?;
+            if mode == ApplyMode::Live {
+                LIVE_MODE.with(|slot| slot.set(Some(hwnd.0 as isize)));
+            }
 
             let dpi = GetDpiForWindow(hwnd).max(96);
             WINDOW_DPI.with(|slot| slot.set(Some((hwnd.0 as isize, dpi))));
@@ -4633,6 +4768,7 @@ impl SettingsWindow {
                 show_advanced: Cell::new(true),
                 apply_mode: mode,
                 busy: Cell::new(false),
+                restart_required: Cell::new(false),
                 apply_state: Cell::new(if form.has_staged() {
                     ApplyState::Pending
                 } else {
@@ -4701,6 +4837,14 @@ impl SettingsWindow {
             }
             let _ = SetForegroundWindow(self.hwnd);
         }
+    }
+
+    /// Switches to the Logs tab and focuses window.
+    pub fn focus_logs_tab(&self) {
+        if let Some(idx) = self.tabs.iter().position(|tab| tab.id == TabId::Logs) {
+            self.switch_tab(idx as u32);
+        }
+        self.focus();
     }
 
     /// Hides the Settings window.
@@ -4773,10 +4917,10 @@ impl SettingsWindow {
             let idx = dlg_item(self.hwnd, ID_THEME)
                 .map(|c| SendMessageW(c, CB_GETCURSEL, None, None).0)
                 .unwrap_or(0);
-            if idx == 1 {
-                "light".into()
-            } else {
-                "dark".into()
+            match idx {
+                1 => "light".into(),
+                2 => "custom".into(),
+                _ => "dark".into(),
             }
         }
     }
@@ -4872,7 +5016,11 @@ impl SettingsWindow {
         if self.take_condition_change() {
             self.reflow_all_tabs();
             // SAFETY: Conditional controls remain live descendants.
-            unsafe { update_static_controls(self.hwnd) };
+            unsafe {
+                update_static_controls(self.hwnd);
+                update_css_editor_control(self.hwnd);
+            }
+            self.update_custom_style_visibility();
             self.hide_unshown();
             self.ensure_room_for(self.layout_bottom());
         }
@@ -5087,14 +5235,30 @@ impl SettingsWindow {
         });
     }
 
+    /// Marks whether Apply also restarts chibipop.
+    pub fn set_restart_required(&self, required: bool) {
+        self.restart_required.set(required);
+        self.refresh_apply();
+    }
+
+    /// Returns whether Apply also restarts chibipop.
+    pub fn restart_required(&self) -> bool {
+        self.restart_required.get()
+    }
+
     /// Updates Apply button label and status text.
     fn refresh_apply(&self) {
         let staged = self.staged.borrow();
         let has_staged = staged.has_staged();
+        let label = if self.restart_required.get() {
+            APPLY_RESTART_CAPTION
+        } else {
+            APPLY_CAPTION
+        };
         // SAFETY: `ID_APPLY` is a live child window.
         unsafe {
             if let Ok(c) = dlg_item(self.hwnd, ID_APPLY) {
-                let caption = wide(APPLY_CAPTION);
+                let caption = wide(label);
                 let _ = SetWindowTextW(c, PCWSTR(caption.as_ptr()));
             }
         }
@@ -5169,6 +5333,7 @@ impl SettingsWindow {
             if !busy {
                 update_list_buttons(self.hwnd);
                 update_engine_controls(self.hwnd);
+                update_css_editor_control(self.hwnd);
                 self.hide_unshown();
             }
         }
@@ -5395,8 +5560,39 @@ impl SettingsWindow {
         }
     }
 
+    fn theme_is_custom(&self) -> bool {
+        // SAFETY: `ID_THEME` is a live descendant of `self.hwnd`.
+        unsafe {
+            dlg_item(self.hwnd, ID_THEME)
+                .ok()
+                .is_some_and(|c| SendMessageW(c, CB_GETCURSEL, None, None).0 == 2)
+        }
+    }
+
+    fn update_custom_style_visibility(&self) {
+        let Some(runtime) = self.tabs.get(self.current_tab.get() as usize) else {
+            return;
+        };
+        // SAFETY: Runtime handles remain live descendants until `Drop`.
+        unsafe {
+            for section in &runtime.sections {
+                for entry in &section.entries {
+                    if entry.id != SettingId::PopupCustomStyle {
+                        continue;
+                    }
+                    let cmd = if self.entry_shown(entry) { SW_SHOW } else { SW_HIDE };
+                    for control in &entry.controls {
+                        let _ = ShowWindow(control.hwnd, cmd);
+                    }
+                }
+            }
+        }
+    }
+
     fn entry_shown(&self, entry: &EntryRuntime) -> bool {
-        self.show_advanced.get() || !entry.advanced
+        self.show_advanced.get()
+            || !entry.advanced
+            || (entry.id == SettingId::PopupCustomStyle && self.theme_is_custom())
     }
 
     fn section_shown(&self, section: &SectionRuntime) -> bool {
@@ -5680,6 +5876,12 @@ impl SettingsWindow {
             self.apply_field_map_visibility();
             update_engine_controls(self.hwnd);
             update_static_controls(self.hwnd);
+            if self.tabs.get(tab as usize).is_some_and(|t| t.id == TabId::Logs) {
+                poll_live_logs(self.hwnd);
+                SetTimer(Some(self.hwnd), ID_LOG_TIMER, LOG_POLL_MS, None);
+            } else {
+                let _ = KillTimer(Some(self.hwnd), ID_LOG_TIMER);
+            }
         }
         self.hide_unshown();
         self.reset_scroll();
@@ -6525,10 +6727,17 @@ impl SettingsWindow {
                 let combo = labelled_row!(w!("COMBOBOX"), "",
                     WINDOW_STYLE(CBS_DROPDOWNLIST as u32) | WS_TABSTOP | WS_VSCROLL,
                     ID_THEME, 220);
-                for (index, name) in ["dark", "light"].into_iter().enumerate() {
+                for (index, (value, label)) in [
+                    ("dark", "Dark"),
+                    ("light", "Light"),
+                    ("custom", "Custom"),
+                ]
+                .into_iter()
+                .enumerate()
+                {
                     SendMessageW(combo, CB_ADDSTRING, None,
-                        Some(LPARAM(wide(name).as_ptr() as isize)));
-                    if form.cfg.popup.theme == name {
+                        Some(LPARAM(wide(label).as_ptr() as isize)));
+                    if form.cfg.popup.theme == value {
                         SendMessageW(combo, CB_SETCURSEL, Some(WPARAM(index)), None);
                     }
                 }
@@ -6555,8 +6764,10 @@ impl SettingsWindow {
                 self.fonts = families;
             }
             SettingId::PopupCustomStyle => {
-                controls.push(child(page, w!("BUTTON"), &spec.label, WS_TABSTOP, PAD, y,
-                    WIN_W - 2 * PAD - 20, ROW_H, ID_CSS_EDITOR, f)?);
+                let btn = child(page, w!("BUTTON"), &spec.label, WS_TABSTOP, PAD, y,
+                    WIN_W - 2 * PAD - 20, ROW_H, ID_CSS_EDITOR, f)?;
+                let _ = EnableWindow(btn, form.cfg.popup.theme == "custom");
+                controls.push(btn);
                 y += ROW_H + ROW_GAP;
             }
             SettingId::PopupMaxWidth => {
@@ -6803,11 +7014,28 @@ impl SettingsWindow {
                 help!();
             }
             SettingId::BackgroundOnClose => {
-                checkbox!(
-                    ID_BACKGROUND_ON_CLOSE,
+                let combo = labelled_row!(w!("COMBOBOX"), "",
+                    WINDOW_STYLE(CBS_DROPDOWNLIST as u32) | WS_TABSTOP | WS_VSCROLL,
+                    ID_BACKGROUND_ON_CLOSE, 120);
+                for label in ["Close on exit", "Minimize to tray"] {
+                    SendMessageW(combo, CB_ADDSTRING, None,
+                        Some(LPARAM(wide(label).as_ptr() as isize)));
+                }
+                let selected = usize::from(
                     form.background_on_close.unwrap_or(form.cfg.application.background_on_close)
                 );
+                SendMessageW(combo, CB_SETCURSEL, Some(WPARAM(selected)), None);
                 help!();
+            }
+            SettingId::AboutInfo => {
+                let version = format!("chibipop v{}", env!("CARGO_PKG_VERSION"));
+                controls.push(child(page, w!("STATIC"), &version, WINDOW_STYLE(0), PAD, y,
+                    WIN_W - 2 * PAD - 20, ROW_H, 0, f)?);
+                y += ROW_H + ROW_GAP;
+                let link_label = format!("GitHub: {ABOUT_GITHUB_URL}");
+                controls.push(child(page, w!("BUTTON"), &link_label, WS_TABSTOP, PAD, y,
+                    WIN_W - 2 * PAD - 20, ROW_H, ID_ABOUT_GITHUB, f)?);
+                y += ROW_H + ROW_GAP;
             }
             SettingId::DebugCaptureOutline => {
                 checkbox!(ID_SHOW_SCAN, form.cfg.debug.show_scan_region);
@@ -6818,10 +7046,15 @@ impl SettingsWindow {
             SettingId::DebugAdapter => {
                 checkbox!(ID_ADAPTER_LOG, form.cfg.debug.show_adapter_log);
             }
-            SettingId::ShowLiveLogs => {
-                controls.push(child(page, w!("BUTTON"), &spec.label, WS_TABSTOP, PAD, y,
-                    160, ROW_H, ID_SHOW_LIVE_LOGS, f)?);
-                y += ROW_H + ROW_GAP;
+            SettingId::LiveLogsView => {
+                let style = WINDOW_STYLE(
+                    (ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | ES_AUTOHSCROLL) as u32
+                ) | WS_VSCROLL | WS_HSCROLL | WS_BORDER;
+                let edit = child(page, w!("EDIT"), "", style, PAD, y,
+                    WIN_W - 2 * PAD - 20, LIVE_LOGS_H, ID_LIVE_LOGS, f)?;
+                SendMessageW(edit, EM_SETLIMITTEXT, Some(WPARAM(0)), None);
+                controls.push(edit);
+                y += LIVE_LOGS_H + ROW_GAP;
             }
             SettingId::ClearLookupCache => {
                 controls.push(child(page, w!("BUTTON"), &spec.label, WS_TABSTOP, PAD, y,
@@ -6846,6 +7079,7 @@ impl SettingsWindow {
                     ID_ANKI_DECK, 160);
                 SendMessageW(combo, WM_SETTEXT, None,
                     Some(LPARAM(wide(&form.cfg.anki.deck).as_ptr() as isize)));
+                SendMessageW(combo, CB_SETEDITSEL, None, Some(LPARAM(-1isize)));
             }
             SettingId::AnkiModel => {
                 let combo = labelled_row!(w!("COMBOBOX"), &form.cfg.anki.model,
@@ -6853,6 +7087,7 @@ impl SettingsWindow {
                     ID_ANKI_MODEL, 160);
                 SendMessageW(combo, WM_SETTEXT, None,
                     Some(LPARAM(wide(&form.cfg.anki.model).as_ptr() as isize)));
+                SendMessageW(combo, CB_SETEDITSEL, None, Some(LPARAM(-1isize)));
             }
             SettingId::AnkiRefresh => {
                 controls.push(child(page, w!("BUTTON"), &spec.label, WS_TABSTOP, PAD, y,
@@ -7481,10 +7716,10 @@ impl SettingsWindow {
             let screenshot_reset_targets = staged.screenshot_reset_targets;
             let screenshot = staged.cfg.actions.screenshot.clone();
 
-            let theme = if combo_index(ID_THEME) == 1 {
-                "light"
-            } else {
-                "dark"
+            let theme = match combo_index(ID_THEME) {
+                1 => "light",
+                2 => "custom",
+                _ => "dark",
             };
             let sentence_mode = sentence_mode_at(combo_index(ID_SENTENCE_MODE));
             let selection_buttons = selection_buttons_at(combo_index(ID_SELECTION_BUTTONS));
@@ -7643,7 +7878,7 @@ impl SettingsWindow {
             form.cfg.debug.show_scan_region = checked(ID_SHOW_SCAN);
             form.cfg.debug.show_engine_log = checked(ID_ENGINE_LOG);
             form.cfg.debug.show_adapter_log = checked(ID_ADAPTER_LOG);
-            form.background_on_close = Some(checked(ID_BACKGROUND_ON_CLOSE));
+            form.background_on_close = Some(combo_index(ID_BACKGROUND_ON_CLOSE) == 1);
             form.freq_changed = staged.freq_changed;
             form.staged_adds = staged.staged_adds.clone();
             form.staged_removes = staged.staged_removes.clone();
@@ -7812,13 +8047,18 @@ impl Drop for SettingsWindow {
                 *slot = None;
             }
         });
-        for slot in [&RESIZED, &SHOW_LOGS, &USER_EDIT, &BIND_EDIT, &EDIT_TRACKING] {
+        for slot in [&RESIZED, &SHOW_LOGS, &LIVE_MODE, &USER_EDIT, &BIND_EDIT, &EDIT_TRACKING] {
             slot.with(|cell| {
                 if cell.get() == Some(self.hwnd.0 as isize) {
                     cell.set(None);
                 }
             });
         }
+        LOG_REVISION.with(|slot| {
+            if slot.get().is_some_and(|(owner, _)| owner == self.hwnd.0 as isize) {
+                slot.set(None);
+            }
+        });
         WINDOW_DPI.with(|slot| {
             if slot.get().is_some_and(|(owner, _)| owner == self.hwnd.0 as isize) {
                 slot.set(None);
@@ -7838,6 +8078,7 @@ impl Drop for SettingsWindow {
         unsafe {
             // Stop the poll before the window dies.
             let _ = KillTimer(Some(self.hwnd), ID_TIP_TIMER);
+            let _ = KillTimer(Some(self.hwnd), ID_LOG_TIMER);
             destroy_tip(&mut self.tip);
             let _ = DestroyWindow(self.hwnd);
             if let Some(f) = self.font.get() {
@@ -8416,15 +8657,17 @@ mod tests {
             unsafe { IsWindowVisible(dlg_item(window.hwnd, id).unwrap()).as_bool() }
         };
         let at = |id: TabId| window.tabs.iter().position(|tab| tab.id == id).unwrap() as u32;
-        assert_eq!((0..9).collect::<Vec<u32>>(), items(&window));
+        assert_eq!((0..10).collect::<Vec<u32>>(), items(&window));
 
         window.set_show_advanced(false);
         let basic = [
             TabId::Popup,
+            TabId::General,
             TabId::Shortcuts,
             TabId::Dictionaries,
             TabId::TextRecognition,
             TabId::Anki,
+            TabId::Logs,
         ];
         assert_eq!(basic.map(at).to_vec(), items(&window));
         assert!(!items(&window).contains(&at(TabId::Debug)));
@@ -8439,7 +8682,7 @@ mod tests {
         assert_eq!(form, window.read(&form));
 
         window.set_show_advanced(true);
-        assert_eq!((0..9).collect::<Vec<u32>>(), items(&window));
+        assert_eq!((0..10).collect::<Vec<u32>>(), items(&window));
         window.switch_tab(at(TabId::Popup));
         assert!(visible(&window, ID_SIDE_PANEL));
         assert_eq!(form, window.read(&form));
@@ -8473,7 +8716,7 @@ mod tests {
 
         click(&mut window, 0);
         assert!(!window.show_advanced());
-        assert_eq!("Show advanced settings (3 changed)", text(&window, ID_SHOW_ADVANCED));
+        assert_eq!("Show advanced settings (2 changed)", text(&window, ID_SHOW_ADVANCED));
         assert_eq!("Apply: Loaded", text(&window, ID_APPLY_STATE));
 
         click(&mut window, 1);
@@ -8528,6 +8771,62 @@ mod tests {
         read.select_profile(&parent, &[]).unwrap();
         read.select_profile(&derived, &[]).unwrap();
         assert_eq!("dark", read.cfg.popup.theme);
+    }
+
+    #[test]
+    fn popup_theme_combo_gates_css_editor_button() {
+        use windows::Win32::UI::Input::KeyboardAndMouse::IsWindowEnabled;
+
+        let mut form = crate::settings::from_config(&crate::config::Config::default(), &[]);
+        form.cfg.popup.theme = "dark".into();
+        let mut window = SettingsWindow::open(&form, &[], ApplyMode::Standalone).unwrap();
+        // SAFETY: The test window owns both controls.
+        unsafe {
+            let combo = dlg_item(window.hwnd, ID_THEME).unwrap();
+            let css_btn = dlg_item(window.hwnd, ID_CSS_EDITOR).unwrap();
+            assert_eq!(SendMessageW(combo, CB_GETCOUNT, None, None).0, 3);
+            assert!(!IsWindowEnabled(css_btn).as_bool());
+
+            select_combo_row(&window, ID_THEME, 1);
+            assert_eq!(window.read_theme_name(), "light");
+            assert!(!IsWindowEnabled(css_btn).as_bool());
+
+            select_combo_row(&window, ID_THEME, 2);
+            assert_eq!(window.read_theme_name(), "custom");
+            assert_eq!(window.read(&form).cfg.popup.theme, "custom");
+            assert!(IsWindowEnabled(css_btn).as_bool());
+
+            select_combo_row(&window, ID_THEME, 0);
+            assert_eq!(window.read_theme_name(), "dark");
+            assert!(!IsWindowEnabled(css_btn).as_bool());
+        }
+
+        form.cfg.popup.theme = "custom".into();
+        let custom_win = SettingsWindow::open(&form, &[], ApplyMode::Standalone).unwrap();
+        // SAFETY: The test window owns `ID_CSS_EDITOR`.
+        unsafe {
+            let css_btn = dlg_item(custom_win.hwnd, ID_CSS_EDITOR).unwrap();
+            assert!(IsWindowEnabled(css_btn).as_bool());
+        }
+
+        // Toggle theme with advanced settings hidden.
+        window.set_show_advanced(false);
+        // SAFETY: The test window owns `ID_CSS_EDITOR`.
+        unsafe {
+            let css_btn = dlg_item(window.hwnd, ID_CSS_EDITOR).unwrap();
+            assert!(!IsWindowVisible(css_btn).as_bool());
+            select_combo_row(&window, ID_THEME, 2);
+            window.pump(|| {});
+            assert!(IsWindowVisible(css_btn).as_bool());
+            assert!(IsWindowEnabled(css_btn).as_bool());
+            select_combo_row(&window, ID_THEME, 1);
+            window.pump(|| {});
+            assert!(!IsWindowVisible(css_btn).as_bool());
+            select_combo_row(&window, ID_THEME, 2);
+            window.pump(|| {});
+            assert!(IsWindowVisible(css_btn).as_bool());
+            assert!(IsWindowEnabled(css_btn).as_bool());
+        }
     }
 
     #[test]

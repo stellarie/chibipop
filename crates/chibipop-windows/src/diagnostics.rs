@@ -134,7 +134,10 @@ struct PreparedStream {
 impl PreparedStream {
     fn new(kind: STD_HANDLE, name: &str) -> Result<Self> {
         let original = get_standard_handle(kind)?;
-        let sink = ForwardSink::new(duplicate_handle(original)?);
+        let sink = match original {
+            Some(handle) => ForwardSink::new(duplicate_handle(handle)?),
+            None => ForwardSink::None,
+        };
         let (reader, writer) = create_pipe()?;
         let (done_tx, done) = mpsc::channel();
         let stop = Arc::new(Mutex::new(None));
@@ -146,7 +149,7 @@ impl PreparedStream {
             .context("starting a diagnostic reader")?;
         Ok(Self {
             kind,
-            original: handle_raw(original),
+            original: original.map_or(0, handle_raw),
             writer: Some(writer),
             worker: Some(worker),
             done,
@@ -219,6 +222,7 @@ impl Drop for OwnedHandle {
 }
 
 enum ForwardSink {
+    None,
     Console(OwnedHandle),
     Raw(OwnedHandle),
 }
@@ -236,6 +240,7 @@ impl ForwardSink {
 
     fn forward(&self, bytes: &[u8], text: &str) -> Result<()> {
         match self {
+            Self::None => Ok(()),
             Self::Raw(handle) => write_file_all(handle.0, bytes),
             Self::Console(handle) => write_console_all(handle.0, text),
         }
@@ -323,13 +328,13 @@ fn reader_loop(
     let _ = done.send(());
 }
 
-fn get_standard_handle(kind: STD_HANDLE) -> Result<HANDLE> {
+fn get_standard_handle(kind: STD_HANDLE) -> Result<Option<HANDLE>> {
     // SAFETY: `kind` is one of the two standard output handle identifiers.
     let handle = unsafe { GetStdHandle(kind) }.context("reading a standard handle")?;
     if handle.is_invalid() {
-        Err(anyhow!("the standard handle is invalid"))
+        Ok(None)
     } else {
-        Ok(handle)
+        Ok(Some(handle))
     }
 }
 
